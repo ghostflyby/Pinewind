@@ -1,0 +1,5 @@
+__patch:
+# Rx: rime/rime-emoji:customize: {
+  - patch/+:
+      old: true
+# }

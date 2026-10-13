@@ -1,6 +1,6 @@
 # 松风 / Pinewind:兼容 plum 清单的包管理与配置方案(设计定案)
 
-- 状态:设计定案稿 v4;§12 为文件格式与状态职责草案,§13 为增量执行预设计(未改任何代码)
+- 状态:设计定案稿 v4;M1 首轮离线核心已实现(§14),§12 为文件格式与状态职责草案,§13 为增量执行预设计
 - 日期:2026-10-11(v2:收窄为 Swift 库设计——本机布局零 plum 沿袭、URL+元数据身份、短名映射分层、有序覆盖);2026-10-13(v3:conf 前端改用 SwiftBash、清单语法生态普查、选项双层求值实证、只读挂载实测落档)
 - v4 修订(2026-10-13):conf 前端统一为 SwiftBash 沙盒求值;删除 SwiftBash 平台依赖条件化;commit 为源码复现锚点,归档哈希仅用于下载与缓存校验;补丁逐条目在文件安装后立即应用,后续整文件覆盖可覆盖此前补丁。
 - 依赖基线:plum `b1be196`(`/Users/ghostflyby/repos/learn/plum`,仅作语法与语义参照,无代码关联);RimeKit v0.0.42(`rime-deploy`/`RimeDeployCore` 工具族先例);Pteromyini master 契约(`RimeServiceClient.swift:56-72`、`BlueGreenManager.swift:147-169`)
@@ -229,7 +229,7 @@ conf 前端使用 **SwiftBash**(cocoanetics/swiftbash;MIT;SPM 远程依赖 `0.1.
 
 - 输入域以 `Mount(virtual:host:readOnly: true)` 挂载供解释器 `source`:include 与 `${var:-default}` 获得与 plum 一致的原生语义;
 - 数组初始化、重置、追加、引号、变量展开与 `source` 均由解释器处理;求值完成后读取 `package_list` 数组,再按 §1.1 翻译描述符。不另设 AST 节点白名单或自定义参数展开子集;
-- `:preset`/`:extra`/`:all` 的 vendored conf 与取回的远程 conf 走同一沙盒求值入口,清单内容只读供给;include 的来源定位与资源限制见实现期核对清单;
+- `:preset`/`:extra`/`:all` 直接映射为自有的有序包标识列表,不分发或求值上游 conf 副本。用户提供的本地与取回的远程 conf 走沙盒求值入口;include 的来源定位与资源限制见实现期核对清单;
 - 只读由 `MountedFileSystem.gateWrite` 结构性强制(实测:`cat`/`source` 通过,重定向/`touch`/`rm`/`chmod` 全部 `permission denied`,被挂载目录零残留);读写两侧均过 `canonicalGate`,挂载内符号链接逃逸被拒;
 - 能力受限模型:无 fork/exec,命令集 = 已注册的 Swift 命令,网络默认拒绝(`Network access denied`),文件系统默认虚拟;
 - 威胁模型为**能力受限执行 + 只读挂载强制 I1**:清单在 Swift 解释器内求值,不调用宿主 bash;访问权限由挂载表、命令注册与网络权限控制,不依赖语法子集限制。
@@ -290,6 +290,7 @@ protocol PackageFetcher: Sendable {
 - **不同 Rx 键**:保留当前已有块,按条目应用次序追加新块;**同一目标内同一 Rx 键**:先移除当前文件中所有该键的旧块,再在段末追加本次块,使本次应用后的该键仅保留一份。旧块可能来自先前条目,也可能从用户文件树或包文件中复制而来;去重范围是当前目标文件,不作跨文件或全局去重;
 - 后续条目若整文件覆盖目标,此前补丁随旧文件一并被覆盖,不在末尾重新补回;因此 `self` 放最后时,它提供的同名文件决定最终内容;
 - 未被同键替换或整文件覆盖的 Rx 注释原样保留,用于溯源与生态标记互认(如本机 `~/Library/Rime/rime_ice.custom.yaml` 中 octagram 留下的标记);
+- 本轮补丁体经 Yams 解析与重序列化,保持 YAML 语义,不承诺逐行搬运的原始排版。接管 plum 既有 Rx 块时,同键替换可能带来缩进、引号或折叠样式变化;未被替换的块仍保留原文;
 - **绝不回写输入域**。
 
 例如 `order: [A, self, B]`:A 安装文件并应用 A 的补丁 → `self` 拷入用户文件,覆盖同名文件及其中 A 的补丁 → B 安装文件并在当时的目标文件上应用 B 的补丁。若 B 只补丁、不安装该目标文件,其补丁作用于 `self` 提供的基底;若 B 安装同名文件,则先覆盖基底再应用补丁。
@@ -339,7 +340,7 @@ CLI 示例:`pinewind resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 | 包描述语法 / 缺省规则 | §1.1 | **同** | 生态兼容 |
 | conf 清单语法 | bash,`source` 执行 | **SwiftBash 沙盒求值**(`BashInterpreter` + 只读挂载),不另设语法子集 | 解释器兼容清单语义,权限边界保障输入域只读(§9) |
 | 原生清单 | 无(仅 conf) | `pinewind.yaml` 有序条目,plum conf 经 `import` 接入 | URL+元数据身份;次序即覆盖序 |
-| `:preset` 等内置清单 | plum 仓库 conf | vendored 副本 | 免运行期 plum 依赖 |
+| `:preset` 等内置清单 | plum 仓库 conf | Swift 有序包标识列表 | 免运行期 plum 依赖,不打包上游 conf |
 | 远程清单 URL | 任意 HTTPS | **同** | 生态兼容 |
 | recipe 三段 / Rx 格式 | §1.3,逐包安装后补丁 | **同格式与应用时序**;组合域内逐条目安装后补丁,同目标同 Rx 替换,后续整文件覆盖可覆盖已有补丁 | 净态重建保障跨次幂等,Rx 替换处理单次组合中的既有块 |
 | 包身份 / 命名 | user/repo 简写 + 缺省展开 | **URL+元数据**为原生身份;plum 简写仅导入期翻译;短名映射双层(§4.3) | 本机零沿袭;可本地改向 |
@@ -468,7 +469,7 @@ names:
 - 合并次序:manifest.names → 本地覆写 names → 条目内联字段,后层胜。短名只用于找声明,不成为缓存或锁的源码身份;本地覆写同样必须有顶层整数 version。
 - 沿用**字段级合并**:未出现字段继承;出现字段整体替换,例如 `options` 整个映射替换,不隐式逐键合并。
 - 对可选字段,`null` 明确清除继承值:recipe 回到自动选择、ref/commit 清除请求、options 回到 `{}`、include/exclude 回到缺省。最终必须有非空 URL,ref 与 commit 不得同时有效。
-- `file://` 表示实时本地文件树,不强制要求 git 仓库,不取包也不读取 HEAD;继承的 ref/commit 不参与本地树版本判断,不 hash 本地目录,编辑后可直接重新组合。
+- `file://` 表示实时本地文件树,不强制要求 git 仓库,不取包也不读取 HEAD。高优先级层将远端 URL 改为 file URL 时,清除该层未指定的继承 ref/commit;直连本地条目或覆写层显式携带有效 ref/commit 则诊断错误,不静默丢弃。不 hash 本地目录,编辑后可直接重新组合。
 - 不生成本地锁。先验证共享声明与 pinewind.lock,再把本地覆写应用到执行计划;共享锁只根据 manifest(包括其 names 段)生成,不被本机调试改向改写。
 - 本地覆写未改变远端来源与 ref/commit 请求时可继续使用已锁源码版本;改为其他远端时可直接在覆写中指定 commit,使用浮动 ref 则在开发模式解析为本次 commit。
 - 开发覆写启用时不承诺仅凭共享输入 commit 与共享锁复现本机结果。本机解析结果可留在会话或可抛弃的私有缓存中,不新增输入域文件;增量失效语义见 §13。
@@ -480,6 +481,8 @@ pinewind.lock 只对外承诺解析结果与操作语义。下列信息由库内
 - 有序包应用及其规范化源码 URL、原始版本请求和最终 commit;同一 URL 可多次出现,不同 ref/recipe/options 不合并为同一条目。
 - 短名展开后的有效元数据与过滤规则,以及每个 import 的选择器、显式变量和完整有序展开结果。compose 消费锁中的展开结果,不重新下载可变远程 conf 来检查变化。
 - 独立下载资源的来源 URL、落盘相对路径和内容版本校验值。不记录缓存绝对路径、镜像 URL 或非必要取包时间。
+
+远程 conf 的 SHA-256 校验记录随 M2 的远程资源视图进入锁,覆盖 include 资源;M1 尚不提供远程 conf 获取或此类校验记录。
 
 共享声明与锁的匹配采用规范化后的字段比较,不计算声明或目录树哈希;显式 commit 必须匹配,自动解析的 commit 不是用户请求字段。import 的来源变化通过显式 resolve/update 重新求值;锁内的展开结果在此之前保持固定。
 
@@ -542,6 +545,8 @@ resolve/update 产生解析结果;fetch 准备源码与独立资源;compose 先�
 
 计划知道每项操作的条目位置、源文件、目标路径、有效参数及前后依赖;可新增/移除的输出也在计划内。逻辑模型先定义,不必现在暴露 Swift 类型布局或持久化 schema。无变化时可返回既有已发布结果;有变化时准备候选结果,验证后发布。
 
+计划持有来源与操作,不驻留所有文件字节。M1 将引用文件首次读取时复制到计划持有的磁盘快照(APFS 可克隆,不使用硬链接),同一来源在计划内只捕获一次。规划完成后的本地编辑在下次计划生效;这不是整个工作树的原子快照,并发修改规划中的输入仍需调用方协调。快照根可由调用方注入,不得与输入源重叠,最后一个计划所有者释放后清理。执行按输出逐文件处理,普通拷贝、内容比较与独立资源校验不整文件装入内存;补丁处理仍可能占用单个目标文件的字节与 YAML 解析内存。
+
 ### 13.3 为每个输出保留完整来源与有序操作链
 
 仅记录最终获胜 URL 不够。需要知道一个目标文件的各次写入/补丁来自哪个条目,以及它们的次序;同一 URL 的多次出现必须分别参与排序。
@@ -592,3 +597,37 @@ glob 不只依赖上次匹配到的文件,还依赖搜索范围与模式;否则�
 ### 13.8 验证方向
 
 实现期用同一输入的增量结果与全量结果做差异核对,覆盖删包后来源回退、顺序调整、补丁撤销/同 Rx 替换、glob 新增匹配、跨包源变更、本地编辑与缓存丢失。比较实际输出文件集与内容即可,不引入目录树哈希作为正确性契约。
+
+
+## 14. M1 首轮实现(2026-10-13)
+
+SPM 新增独立 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,两项产品依赖都不作 macOS 条件化。
+
+已实现:
+
+- Manifest.parse/load:version 必填,合入 names,字段级本地覆写与 null 清除,重复键/未知字段/错误类型诊断,保留有序重复条目。
+- PlumImporter:preset/extra/all 内置包标识列表、本地 conf 的独立沙盒求值、只读挂载、重复 source、数组重置/追加、参数展开及 plum 描述符翻译。内置列表无需 resource bundle;自编测试夹具位于测试源码与测试目标自己的资源 bundle 中,多文件场景保留磁盘目录结构并复制到独立临时目录使用,不拷贝上游文件。无宿主执行与网络命令注册;source 预算为至多 64 次、每文件 1 MiB、累计 4 MiB,默认求值超时 5 秒。
+- CompositionPlanner:任意 self 文件树、默认白名单(含 ocd2)、默认/显式 recipe、glob、预备源码间的兼容引用、字面 option 替换、独立资源版本校验、有序写入/补丁操作链。计划持有磁盘快照引用与目录成员,不驻留全量源字节,不 hash 目录树;资源校验按块读取。
+- Composer:逐文件执行全量语义操作链、同目标同 Rx 替换、后续整文件覆盖、净态候选输出与 Darwin 原子目录交换;不保留全量渲染字节,普通文件直接拷贝并按块比较。对相同结果直接返回旧代,有变化时报告新增/变化/退出路径。输入与输出根不得重叠,当前源文件视图不接受符号链接。
+- Resolution/LockedPackage:解析结果的检查、声明匹配与 pinewind.lock 的私有编解码/原子写入;同 URL 的不同应用保留,本地工作树不写共享内容锁。
+- PackageFetcher/PackageSourceSnapshot:来源解析与完整快照准备的后端接口,组合器可消费调用方传入的 PreparedPackage。
+
+调用方可先使用本地包,或自行提供已经取回的远端快照:
+
+```swift
+let manifest = try Manifest.load(inputRoot: input)
+let expanded = try await PlumImporter().expand(manifest, inputRoot: input)
+let plan = try CompositionPlanner().plan(expanded, inputRoot: input, packages: prepared)
+let result = try await Composer().compose(plan, inputRoot: input, outputRoot: composed)
+```
+
+当前边界:
+
+- HTTPArchiveFetcher、联网 ref/资源解析、远程 conf 资源视图与自动 resolve/update 流程属于 M2,本轮尚未实现。远端包必须先由调用方准备快照;独立资源必须同时提供已固定的版本记录。
+- 每目标 sync/事务恢复、CLI pinewind 与 Pteromyini 接入尚未实现。
+- 本轮增量仅包括未变化结果不发布、未变化文件复用与变更报告;仍枚举源文件并执行全量操作链,没有实现持久化依赖缓存或最小重算集合。
+- 同一输出根由同一个 Composer actor 串行操作;跨实例/跨进程的目标协调留待统一管理入口实现。
+- 目前补丁目标已有 __patch 时要求其为块式序列。其他 YAML 表达形式的保真转换需在后续兼容 fixture 中补足。
+- recipe 补丁体为语义等价重序列化,不承诺保持上游原始排版;模板 `${name}`/`$name` 接受显式空值,`${name:-default}` 对缺失或空值使用缺省。没有提供值且没有缺省时诊断错误。
+
+验证:新增 34 项 Pinewind 行为测试;全包四个测试目标共 144 项通过;覆盖超时取消、折叠 install_files、命名下载、补丁目标创建、import/self 交错次序、显式空模板值、版本诊断与 256 MiB 词典组合。磁盘快照回归覆盖同一来源复用、规划后原地编辑、recipe 固定、资源校验后编辑及计划释放清理。PinewindCore generic iOS Simulator 构建通过。SwiftPM 当前会报告 SwiftXPC 与 SwiftBash 家族传递依赖使用两个 swift-syntax 仓库 URL 的 identity 警告,解析到同一个 603.0.2 版本,不影响本轮构建;后续需统一上游 URL。

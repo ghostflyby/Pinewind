@@ -1,0 +1,3 @@
+install_files: >-
+  schemas/*.yaml
+  opencc/*.txt
