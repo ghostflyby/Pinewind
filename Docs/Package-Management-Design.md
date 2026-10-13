@@ -453,7 +453,7 @@ names 段可省略,缺省 `{}`;其映射定义本身不产生安装条目。orde
 - `ref` 是分支/tag 请求,缺省为仓库默认分支;`commit` 是完整 commit 直引,与 `ref` 互斥。无歧义需要时使用 `refs/heads/...` / `refs/tags/...`。明确指定 commit 后,update 不前进该条目。
 - `recipe` 缺省遵循既有选择顺序;`options` 为字符串映射,缺省 `{}`;不是 shell 命令或脚本片段。
 - `include` 缺省选择完整候选文件集,`exclude` 缺省 `[]`;存在 include 时先取候选集交集,再排除 exclude 匹配项。匹配对象为规范化后的输出相对路径;对补丁目标应用同一过滤规则,不通过补丁绕过过滤。
-- glob 格式需统一定义:以根相对路径匹配,`*`/`?` 不跨 `/`,`**` 可跨目录;候选来自白名单/recipe 或用户树,include 不扩大原始候选范围。匹配与展开顺序不得依赖宿主目录枚举顺序或 locale。
+- glob 使用 swift-glob 的 Pattern 解析和匹配:以根相对路径匹配,`*`/`?` 与字符类不跨 `/`,`**` 可跨目录且中间 `**/` 可匹配零层目录;区分大小写,通配符可匹配点文件,不启用 extglob、brace expansion 或反斜杠转义。绝对路径、父目录段、反斜杠与 NUL 被拒绝,语法错误在配置解析或规划时诊断。候选来自白名单/recipe 或用户树,include 不扩大原始候选范围。匹配与展开顺序不得依赖宿主目录枚举顺序或 locale。
 - import 在该位置展开,每个原生 import 以独立的解释器环境求值;内部重复 `source` 采用解释器语义。`variables` 为显式字符串映射,用于 conf 求值;库设置的虚拟 `root_dir` 不允许覆写,不隐式继承宿主进程环境。
 
 ### 12.4 短名表与本地覆写
@@ -601,7 +601,7 @@ glob 不只依赖上次匹配到的文件,还依赖搜索范围与模式;否则�
 
 ## 14. M1 首轮实现(2026-10-13)
 
-SPM 新增独立 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,两项产品依赖都不作 macOS 条件化。
+SPM 新增独立 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,glob 使用 davbeck/swift-glob 1.x 的 Pattern,这些产品依赖都不作 macOS 条件化。
 
 已实现:
 
@@ -630,4 +630,4 @@ let result = try await Composer().compose(plan, inputRoot: input, outputRoot: co
 - 目前补丁目标已有 __patch 时要求其为块式序列。其他 YAML 表达形式的保真转换需在后续兼容 fixture 中补足。
 - recipe 补丁体为语义等价重序列化,不承诺保持上游原始排版;模板 `${name}`/`$name` 接受显式空值,`${name:-default}` 对缺失或空值使用缺省。没有提供值且没有缺省时诊断错误。
 
-验证:新增 34 项 Pinewind 行为测试;全包四个测试目标共 144 项通过;覆盖超时取消、折叠 install_files、命名下载、补丁目标创建、import/self 交错次序、显式空模板值、版本诊断与 256 MiB 词典组合。磁盘快照回归覆盖同一来源复用、规划后原地编辑、recipe 固定、资源校验后编辑及计划释放清理。PinewindCore generic iOS Simulator 构建通过。SwiftPM 当前会报告 SwiftXPC 与 SwiftBash 家族传递依赖使用两个 swift-syntax 仓库 URL 的 identity 警告,解析到同一个 603.0.2 版本,不影响本轮构建;后续需统一上游 URL。
+验证:新增 37 项 Pinewind 行为测试;全包四个测试目标共 147 项通过;覆盖超时取消、折叠 install_files、命名下载、补丁目标创建、import/self 交错次序、显式空模板值、版本诊断与 256 MiB 词典组合。磁盘快照回归覆盖同一来源复用、规划后原地编辑、recipe 固定、资源校验后编辑及计划释放清理。glob 回归覆盖目录层级、字符类、点文件、非法模式和 include/exclude 一致性。PinewindCore generic iOS Simulator 构建通过。SwiftPM 当前会报告 SwiftXPC 与 SwiftBash 家族传递依赖使用两个 swift-syntax 仓库 URL 的 identity 警告,解析到同一个 603.0.2 版本,不影响本轮构建;后续需统一上游 URL。

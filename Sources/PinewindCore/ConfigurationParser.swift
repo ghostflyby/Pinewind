@@ -63,7 +63,7 @@ struct YAMLReader {
   func filter(_ fields: [String: Node]) throws -> FileFilter {
     let include = try fields["include"].flatMap { $0.tag == Tag(.null) ? nil : try strings($0) }
     let exclude = try fields["exclude"].map { $0.tag == Tag(.null) ? [] : try strings($0) } ?? []
-    for pattern in (include ?? []) + exclude { _ = try Glob.expression(pattern) }
+    for pattern in (include ?? []) + exclude { _ = try Glob.compile(pattern) }
     return FileFilter(include: include, exclude: exclude)
   }
 }

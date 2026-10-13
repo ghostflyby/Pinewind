@@ -159,9 +159,8 @@ public struct CompositionPlanner: Sendable {
                 throw PinewindError("cross-package source is missing or ambiguous: \(segments[1])")
               }
               roots.append(sibling.directory)
-              let matched = try snapshot.files(in: sibling.directory).filter {
-                try Glob.matches(segments[2], path: $0)
-              }
+              let glob = try Glob.compile(segments[2])
+              let matched = try snapshot.files(in: sibling.directory).filter { glob.match($0) }
               guard !matched.isEmpty else {
                 throw PinewindError("install_files pattern matched no files: \(pattern)")
               }
@@ -169,7 +168,8 @@ public struct CompositionPlanner: Sendable {
                 selected.append((path, try SafePath.file(path, in: sibling.directory)))
               }
             } else {
-              let matched = try candidates.filter { try Glob.matches(pattern, path: $0) }
+              let glob = try Glob.compile(pattern)
+              let matched = candidates.filter { glob.match($0) }
               guard !matched.isEmpty else {
                 throw PinewindError("install_files pattern matched no files: \(pattern)")
               }
