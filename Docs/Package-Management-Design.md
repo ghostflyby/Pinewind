@@ -1,4 +1,4 @@
-# RimePkg:兼容 plum 清单的包管理与配置方案(设计定案)
+# 松风 / Pinewind:兼容 plum 清单的包管理与配置方案(设计定案)
 
 - 状态:设计定案稿 v4;§12 为文件格式与状态职责草案,§13 为增量执行预设计(未改任何代码)
 - 日期:2026-10-11(v2:收窄为 Swift 库设计——本机布局零 plum 沿袭、URL+元数据身份、短名映射分层、有序覆盖);2026-10-13(v3:conf 前端改用 SwiftBash、清单语法生态普查、选项双层求值实证、只读挂载实测落档)
@@ -8,13 +8,14 @@
   1. 本阶段为 **Swift 库设计**:定数据文件清单(格式/用途/是否同步)与目录角色及内部结构;**一切目录位置皆为库参数,库不内定路径**;实现另立一轮;
   2. **本机落盘零 plum 沿袭**:兼容仅限 plum 生态包在远端的文件格式与内容/元数据;本机目录与文件布局为自有设计;
   3. 原生清单与锁以 **URL + 元数据**为包身份;plum 包名规则(user 缺省/裸名展开)仅作 conf 导入期的翻译兼容;
-  4. **短名映射双层**:同步层合入 `packages.manifest.yaml` 的 `names` 段,本地覆写单独存于 `packages.names.local.yaml`;字段级合并、本地胜,便于本地改向调试;
+  4. **短名映射双层**:同步层合入 `pinewind.yaml` 的 `names` 段,本地覆写单独存于 `pinewind.local.yaml`;字段级合并、本地胜,便于本地改向调试;
   5. 覆盖 = **声明次序后者胜**,无角色特殊优先级;用户文件树(`self`)是清单中一个可排序条目;每个包条目先安装文件、再立即应用自身补丁,后续条目可整文件覆盖此前的文件与补丁;
   6. 取包后端 v1 = **HTTP 归档**(codeload tarball + refs API 锁 commit,零 git 依赖);后端走接口抽象,libgit2 路线(Swift 绑定调研中)可后续替换;
   7. **conf 前端 = SwiftBash 沙盒求值**(v4,§4.5):使用 `BashInterpreter` + 只读挂载,清单求值采用解释器语义,不维护自定义 bash 求值子集;SwiftBash 产品依赖不作平台条件化,macOS / iOS 均支持 conf 导入。
   8. **独立下载资源固定版本**:recipe 的 `download_files` 不受仓库 commit 约束,可变 URL 的资源单独在包锁中记录内容校验值;该校验值标识资源内容版本,不用于源码归档复现(语义见 §12.5)。
-  9. **锁为库管理的不透明文件**:文件名 `packages.lock`,不带 YAML 后缀,不承诺序列化格式、字段布局或内部结构;用户通过库操作生成、更新和检查锁。
+  9. **锁为库管理的不透明文件**:文件名 `pinewind.lock`,不带 YAML 后缀,不承诺序列化格式、字段布局或内部结构;用户通过库操作生成、更新和检查锁。
   10. **用户配置 version 必填**:manifest 与本地覆写文件均须声明顶层整数 `version: 1`;缺失或不支持的版本报错,不按隐含 v1 解析。plum conf/recipe 继续使用生态格式,锁和私有状态不受此 YAML 规则约束。
+  11. **项目命名**:松风 / Pinewind;库 `PinewindCore`,命令 `pinewind`,用户侧文件 `pinewind.yaml` / `pinewind.local.yaml` / `pinewind.lock`。
 
 ---
 
@@ -33,7 +34,9 @@ plum 是 rime 生态的事实标准配置管理器,但其模型有一个结构�
 3. 用户配置树保持 **rime 配置目录的任意子结构**——不强迫任何固定骨架,文件的仓库相对路径即其在组合产物中的路径;
 4. 以 **Swift 库**形态交付:目录位置、镜像、后端全部是调用方注入的参数;CLI 与 App(Pteromyini)只是两类调用方。
 
-命名提案(与 `rime-deploy`/`RimeDeployCore` 同族):核心库 `RimePkgCore`(CLI `rime-pkg` 与 App 皆为其调用方)。落位 RimeKit 包内(实现期另立 target)。
+项目/产品名已定为 **松风 / Pinewind**;核心库 `PinewindCore`,CLI 命令 `pinewind`,与输入法产品 Pteromyini 分别命名。核心库落位 RimeKit 包内(实现期另立 target),CLI 与 App 均为库的调用方。
+
+“松风”取意于王维《酬张少府》的“松风吹解带,山月照弹琴”(参见[原诗](https://www.gushici.net/shici/31/4886.html));英文名 Pinewind 与松林之风的意象对应。配置文件统一使用产品的小写前缀:共享声明 `pinewind.yaml`、可选本地覆写 `pinewind.local.yaml`、库管理的不透明锁 `pinewind.lock`。
 
 ## 1. plum 规则基线(实测语义)
 
@@ -113,11 +116,11 @@ plum 是 rime 生态的事实标准配置管理器,但其模型有一个结构�
 
 不变式:
 
-- **I1(纯用户域)**:输入域只含 authored 内容与 §4.1 所列库元数据;库对输入域的唯一写回是 `packages.lock`(受控生成物),`packages.names.local.yaml` 由用户手写;取包与组合绝不写入输入域;
+- **I1(纯用户域)**:输入域只含 authored 内容与 §4.1 所列库元数据;库对输入域的唯一写回是 `pinewind.lock`(受控生成物),`pinewind.local.yaml` 由用户手写;取包与组合绝不写入输入域;
 - **I2(缓存可抛弃)**:缓存域整目录可删;凭锁文件重取,组合结果不变;
 - **I3(组合纯派生)**:组合域任意时刻可删;结果必须等价于从净态按声明次序组合。允许复用依赖仍有效的私有缓存与中间结果,缓存缺失时可全量重建;不得在已发布文件上重复叠加补丁来代替组合。Rx 同键替换见 §6.2,不修改输入域;
 - **I4(任意子结构)**:用户域文件的相对路径 = 其组合产物中的路径;不设强制骨架;
-- **I5(复现封闭)**:输入域 git commit + `packages.lock` 完全确定组合域文件内容;远程仓库源码以锁定的 commit 为复现锚点,不以归档字节哈希或目录树哈希标识源码版本;
+- **I5(复现封闭)**:输入域 git commit + `pinewind.lock` 完全确定组合域文件内容;远程仓库源码以锁定的 commit 为复现锚点,不以归档字节哈希或目录树哈希标识源码版本;
 - **I6(位置皆参数)**:三个域的根路径、镜像、后端全部由调用方注入(§7.3);库不内定任何本机路径。
 
 ## 3. 目录角色与内部结构(位置一律为库参数)
@@ -159,14 +162,14 @@ packages/<identity>/<commit>/
 
 | 文件(名为提案) | 角色 | 格式 | 用途 | 谁写 | 随用户仓库同步 |
 |---|---|---|---|---|---|
-| `packages.manifest.yaml` | 输入域 | YAML 映射(version 必填,names 可选,order 有序) | 短名同步层 + 部署声明:条目次序即覆盖次序 | 用户 | 同步 |
-| `packages.names.local.yaml` | 输入域 | YAML 映射(version 必填,names 覆写) | 短名映射本地覆写层(字段级合并、本地胜;本地改向调试) | 用户 | **不同步**(约定 gitignore) |
-| `packages.lock` | 输入域 | 库私有,不承诺内部格式 | 解析结果与资源版本约束 | 库生成 | 建议同步 |
+| `pinewind.yaml` | 输入域 | YAML 映射(version 必填,names 可选,order 有序) | 短名同步层 + 部署声明:条目次序即覆盖次序 | 用户 | 同步 |
+| `pinewind.local.yaml` | 输入域 | YAML 映射(version 必填,names 覆写) | 短名映射本地覆写层(字段级合并、本地胜;本地改向调试) | 用户 | **不同步**(约定 gitignore) |
+| `pinewind.lock` | 输入域 | 库私有,不承诺内部格式 | 解析结果与资源版本约束 | 库生成 | 建议同步 |
 | `*-packages.conf` / `recipe.yaml` / Rx 块 | 远端 | plum 格式 | 只读导入与 recipe 语义(§1、§4.5) | 生态 | — |
 
 库不读输入域中除上表外的任何文件;其余内容即用户文件树(`self` 条目的取材范围)。
 
-### 4.2 `packages.manifest.yaml`(原生清单)
+### 4.2 `pinewind.yaml`(原生清单)
 
 顶层 `version` 必填,`names` 为可选同步短名映射(缺省 `{}`),`order` 为有序条目表。短名定义本身不安装包,只有 order 中引用才应用;**条目次序即覆盖次序**(§6),条目四型:
 
@@ -194,10 +197,10 @@ order:
 - `import` 求值得到的 plum 描述符按 §1.1 规则翻译为 URL+元数据条目;conf 内的 `source` 按解释器语义处理,不对重复引用自动去重,求值资源限制见 §4.5 与 §10.2;
 - 镜像/缓存位置等**环境性配置不在此文件**——那是调用方注入的库参数(§7.3);文件里只有部署声明。
 
-### 4.3 manifest 的 `names` / `packages.names.local.yaml`(短名映射)
+### 4.3 manifest 的 `names` / `pinewind.local.yaml`(短名映射)
 
 ```yaml
-# packages.names.local.yaml —— 本地覆写层(不同步)
+# pinewind.local.yaml —— 本地覆写层(不同步)
 version: 1
 names:
   wanxiang:
@@ -208,7 +211,7 @@ names:
 - 本地层可新增同步层没有的短名(纯本地包);
 - plum 简写(`rime-essay` 裸名等)**不经映射机制**:仅在 conf 导入翻译期按 §1.1 缺省规则展开为 URL 条目。
 
-### 4.4 `packages.lock`(锁)
+### 4.4 `pinewind.lock`(锁)
 
 锁是库生成、解释和维护的不透明文件,不承诺文本/二进制编码、字段名或结构。文件可以随用户仓库同步;库应提供检查解析结果的 API/CLI,不要求用户直接编辑锁。实现负责内部格式识别与迁移,不支持的锁给出明确诊断,不静默重新解析为新版本。
 
@@ -327,7 +330,7 @@ struct PkgConfig: Sendable {
 // 主要入口(草案):resolve() / fetch() / compose() / sync(into:) / update()
 ```
 
-CLI 示例:`rime-pkg resolve|fetch|compose|sync|update|list`(`--config <dir>` 指输入域,`--rime-dir <dir>` 通用形态目标——皆为 CLI 层实参,非库内定)。
+CLI 示例:`pinewind resolve|fetch|compose|sync|update|list`(`--config <dir>` 指输入域,`--rime-dir <dir>` 通用形态目标——皆为 CLI 层实参,非库内定)。
 
 ## 8. 兼容与偏离对照表
 
@@ -335,7 +338,7 @@ CLI 示例:`rime-pkg resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 |---|---|---|---|
 | 包描述语法 / 缺省规则 | §1.1 | **同** | 生态兼容 |
 | conf 清单语法 | bash,`source` 执行 | **SwiftBash 沙盒求值**(`BashInterpreter` + 只读挂载),不另设语法子集 | 解释器兼容清单语义,权限边界保障输入域只读(§9) |
-| 原生清单 | 无(仅 conf) | `packages.manifest.yaml` 有序条目,plum conf 经 `import` 接入 | URL+元数据身份;次序即覆盖序 |
+| 原生清单 | 无(仅 conf) | `pinewind.yaml` 有序条目,plum conf 经 `import` 接入 | URL+元数据身份;次序即覆盖序 |
 | `:preset` 等内置清单 | plum 仓库 conf | vendored 副本 | 免运行期 plum 依赖 |
 | 远程清单 URL | 任意 HTTPS | **同** | 生态兼容 |
 | recipe 三段 / Rx 格式 | §1.3,逐包安装后补丁 | **同格式与应用时序**;组合域内逐条目安装后补丁,同目标同 Rx 替换,后续整文件覆盖可覆盖已有补丁 | 净态重建保障跨次幂等,Rx 替换处理单次组合中的既有块 |
@@ -346,7 +349,7 @@ CLI 示例:`rime-pkg resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 | `.new` 原子替换 | 有 | 无(账本同步取代) | 场景被结构性消除 |
 | 白名单 | 顶层 yaml/txt/gram + opencc 一层 | 同 + `.ocd2` | ocd2 是现代 OpenCC 产物,plum 白名单陈旧 |
 | 子模块 / `git_mirror` / `--select` | 支持 / 已废弃 / 支持 | v1 均不支持 | 归档路线代价;交互属 CLI 之外 |
-| 锁文件 | 无 | `packages.lock`(库管理,不承诺内部格式;记录有序解析结果) | 复现;本机部署状态另行管理 |
+| 锁文件 | 无 | `pinewind.lock`(库管理,不承诺内部格式;记录有序解析结果) | 复现;本机部署状态另行管理 |
 
 ## 9. 安全决策
 
@@ -380,7 +383,7 @@ CLI 示例:`rime-pkg resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 
 - 组合报告(冲突告警、来源清单)是否落盘为文件,v1 先仅日志;
 - 万象从构建期 submodule 迁为运行期包的路径与时机;
-- 设置 UI 中包列表管理的形态(增删包 = 编辑 `packages.manifest.yaml` 的引导式界面?);
+- 设置 UI 中包列表管理的形态(增删包 = 编辑 `pinewind.yaml` 的引导式界面?);
 - 多机同步下锁文件的合并策略(以 commit 为锚的自动合并是否安全);
 - `download_files` 是否需要条件请求(ETag/Last-Modified)省流量,v1 全量重下;
 - 原生条目 `ref` 承载分支/tag;commit 直引(钉死历史版本)是否开放为显式字段;
@@ -395,16 +398,16 @@ CLI 示例:`rime-pkg resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 
 | 文件 | 所在角色 | 必要性 | 谁写 | 同步 |
 |---|---|---|---|---|
-| `packages.manifest.yaml` | 输入域 | 含 order 与可选 names;无文件等价仅 `self` | 用户 | 是 |
-| `packages.names.local.yaml` | 输入域 | 本地改向时可选 | 用户 | 否 |
-| `packages.lock` | 输入域 | 使用远程包/import 后生成 | 库 | 是 |
+| `pinewind.yaml` | 输入域 | 含 order 与可选 names;无文件等价仅 `self` | 用户 | 是 |
+| `pinewind.local.yaml` | 输入域 | 本地改向时可选 | 用户 | 否 |
+| `pinewind.lock` | 输入域 | 使用远程包/import 后生成 | 库 | 是 |
 | 部署状态(私有存储) | 调用方注入的位置,每部署目标独立 | 使用目录同步时需要 | 库 | 否 |
 | 下载与增量缓存元数据(私有存储) | 缓存域 | 产生缓存时维护 | 库 | 否 |
 
 - 普通配置只需 manifest 与 lock;同步短名表是 manifest 的可选 names 段,本地覆写按需出现,不生成本地锁。没有远程包或 import 的纯 `self` 组合不要求先生成锁。
 - 配置只声明所需内容;锁只记录解析结果;同步状态只记录某个本机目标的成功同步历史;下载记录只记录可抛弃的缓存对象。
 - 目录根、镜像、认证和后端继续由调用方参数注入,不新增库级机器配置文件;CLI/App 如需保存自己的设置,格式由各调用方决定。
-- `self` 排除 manifest、本地覆写、packages.lock 等库元数据;本地文件由调用方配置 gitignore。库不得因此修改用户的 `.gitignore`。
+- `self` 排除 manifest、本地覆写、pinewind.lock 等库元数据;本地文件由调用方配置 gitignore。库不得因此修改用户的 `.gitignore`。
 
 ### 12.2 通用编码规则
 
@@ -455,7 +458,7 @@ names 段可省略,缺省 `{}`;其映射定义本身不产生安装条目。orde
 ### 12.4 短名表与本地覆写
 
 ```yaml
-# packages.names.local.yaml
+# pinewind.local.yaml
 version: 1
 names:
   emoji:
@@ -466,13 +469,13 @@ names:
 - 沿用**字段级合并**:未出现字段继承;出现字段整体替换,例如 `options` 整个映射替换,不隐式逐键合并。
 - 对可选字段,`null` 明确清除继承值:recipe 回到自动选择、ref/commit 清除请求、options 回到 `{}`、include/exclude 回到缺省。最终必须有非空 URL,ref 与 commit 不得同时有效。
 - `file://` 表示实时本地文件树,不强制要求 git 仓库,不取包也不读取 HEAD;继承的 ref/commit 不参与本地树版本判断,不 hash 本地目录,编辑后可直接重新组合。
-- 不生成本地锁。先验证共享声明与 packages.lock,再把本地覆写应用到执行计划;共享锁只根据 manifest(包括其 names 段)生成,不被本机调试改向改写。
+- 不生成本地锁。先验证共享声明与 pinewind.lock,再把本地覆写应用到执行计划;共享锁只根据 manifest(包括其 names 段)生成,不被本机调试改向改写。
 - 本地覆写未改变远端来源与 ref/commit 请求时可继续使用已锁源码版本;改为其他远端时可直接在覆写中指定 commit,使用浮动 ref 则在开发模式解析为本次 commit。
 - 开发覆写启用时不承诺仅凭共享输入 commit 与共享锁复现本机结果。本机解析结果可留在会话或可抛弃的私有缓存中,不新增输入域文件;增量失效语义见 §13。
 
 ### 12.5 解析锁的语义(不承诺内部格式)
 
-packages.lock 只对外承诺解析结果与操作语义。下列信息由库内部表示,不是文件字段或序列化格式规定:
+pinewind.lock 只对外承诺解析结果与操作语义。下列信息由库内部表示,不是文件字段或序列化格式规定:
 
 - 有序包应用及其规范化源码 URL、原始版本请求和最终 commit;同一 URL 可多次出现,不同 ref/recipe/options 不合并为同一条目。
 - 短名展开后的有效元数据与过滤规则,以及每个 import 的选择器、显式变量和完整有序展开结果。compose 消费锁中的展开结果,不重新下载可变远程 conf 来检查变化。
@@ -514,7 +517,7 @@ packages.lock 只对外承诺解析结果与操作语义。下列信息由库内
 
 归档缓存损坏时按锁定 commit 重取;新归档字节校验值不同不改包锁。只有完成下载与必要解包的对象才可命中,ETag/Last-Modified 仅作为传输优化。
 
-增量组合的计划、来源依赖、局部变更记录与可复用中间结果也属于可抛弃私有缓存,不进入 packages.lock;缓存缺失或版本不兼容时可全量组合。具体存储结构不在本阶段承诺。
+增量组合的计划、来源依赖、局部变更记录与可复用中间结果也属于可抛弃私有缓存,不进入 pinewind.lock;缓存缺失或版本不兼容时可全量组合。具体存储结构不在本阶段承诺。
 
 ### 12.8 本轮需确认的取舍
 
@@ -525,7 +528,7 @@ packages.lock 只对外承诺解析结果与操作语义。下列信息由库内
 
 ## 13. 增量取包与组合的预设计(建议契约)
 
-本阶段应先保证全量与增量执行使用同一套语义,并为来源依赖与失效留出接口;不用现在定存储布局、目录树哈希或完整的增量算法。以下元数据全部属于私有状态,不改变 packages.lock 的公开承诺。
+本阶段应先保证全量与增量执行使用同一套语义,并为来源依赖与失效留出接口;不用现在定存储布局、目录树哈希或完整的增量算法。以下元数据全部属于私有状态,不改变 pinewind.lock 的公开承诺。
 
 ### 13.1 全量组合是正确性基准
 
