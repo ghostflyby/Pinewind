@@ -26,6 +26,8 @@ public struct FileFilter: Hashable, Codable, Sendable {
 }
 
 public struct PackageRequest: Hashable, Codable, Sendable {
+  /// The acquisition URL. Non-GitHub repository suffixes remain part of the endpoint;
+  /// SourceIdentity derives the separate canonical identity used by caches.
   public let url: URL
   public let ref: String?
   public let commit: String?
@@ -37,7 +39,7 @@ public struct PackageRequest: Hashable, Codable, Sendable {
     url: URL, ref: String? = nil, commit: String? = nil,
     recipe: String? = nil, options: [String: String] = [:], filter: FileFilter = FileFilter()
   ) throws {
-    self.url = try SourceIdentity.normalize(url)
+    self.url = try SourceIdentity.normalize(url, preservingGitSuffix: true)
     if url.isFileURL && (ref != nil || commit != nil) {
       throw PinewindError("file sources cannot specify ref or commit")
     }
@@ -120,7 +122,7 @@ public struct SourceIdentity: Hashable, Codable, Sendable {
     text.count == 40 && text.allSatisfy { $0.isASCII && $0.isHexDigit }
   }
 
-  static func normalize(_ url: URL) throws -> URL {
+  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
       guard url.path.hasPrefix("/") else {
         throw PinewindError("file sources require absolute paths")
@@ -138,7 +140,9 @@ public struct SourceIdentity: Hashable, Codable, Sendable {
     parts.host = host.lowercased()
     if parts.port == 443 { parts.port = nil }
     while parts.path.hasSuffix("/") { parts.path.removeLast() }
-    if parts.path.hasSuffix(".git") { parts.path.removeLast(4) }
+    if (!preservingGitSuffix || host.lowercased() == "github.com") && parts.path.hasSuffix(".git") {
+      parts.path.removeLast(4)
+    }
     if host.lowercased() == "github.com" { parts.path = parts.path.lowercased() }
     guard let normalized = parts.url else { throw PinewindError("invalid package URL") }
     return normalized

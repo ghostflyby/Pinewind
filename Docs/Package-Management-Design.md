@@ -10,7 +10,7 @@
   3. 原生清单与锁以 **URL + 元数据**为包身份;plum 包名规则(user 缺省/裸名展开)仅作 conf 导入期的翻译兼容;
   4. **短名映射双层**:同步层合入 `pinewind.yaml` 的 `names` 段,本地覆写单独存于 `pinewind.local.yaml`;字段级合并、本地胜,便于本地改向调试;
   5. 覆盖 = **声明次序后者胜**,无角色特殊优先级;用户文件树(`self`)是清单中一个可排序条目;每个包条目先安装文件、再立即应用自身补丁,后续条目可整文件覆盖此前的文件与补丁;
-  6. 取包后端 v1 = **HTTP 归档**(codeload tarball + refs API 锁 commit,零 git 依赖);后端走接口抽象,libgit2 路线(Swift 绑定调研中)可后续替换;
+  6. 取包后端 v1 = **HTTPS Git**(GitKit 提供的 libgit2 C 模块,进程内 refs 广播与 fetch);不依赖 git/ssh CLI,不使用 GitHub refs API 或 codeload tarball。后端仍走接口抽象;
   7. **conf 前端 = SwiftBash 沙盒求值**(v4,§4.5):使用 `BashInterpreter` + 只读挂载,清单求值采用解释器语义,不维护自定义 bash 求值子集;SwiftBash 产品依赖不作平台条件化,macOS / iOS 均支持 conf 导入。
   8. **独立下载资源固定版本**:recipe 的 `download_files` 不受仓库 commit 约束,可变 URL 的资源单独在包锁中记录内容校验值;该校验值标识资源内容版本,不用于源码归档复现(语义见 §12.5)。
   9. **锁为库管理的不透明文件**:文件名 `pinewind.lock`,不带 YAML 后缀,不承诺序列化格式、字段布局或内部结构;用户通过库操作生成、更新和检查锁。
@@ -139,12 +139,13 @@ plum 是 rime 生态的事实标准配置管理器,但其模型有一个结构�
 
 ```
 packages/<identity>/<commit>/
+repositories/<identity>.git/
 ```
 
-- `identity`:URL 归一化目录形式——GitHub 形态取 `<owner>/<repo>`,其余 URL 取安全化 slug(或其 sha256 前 16 位);
+- `identity`:规范化源码 URL 的 SHA-256,仅作为跨平台私有路径键。这是 URL 元数据散列,不散列目录树、commit 归档或本地文件内容;
 - 以 commit 键控:分支前进不覆写既有取回,多版本天然共存,与锁对齐;
-- 归档对象的 sha256 存在缓存域的下载记录中,用于下载对象与缓存字节校验,不进入源码复现锁;不计算解包目录树哈希;
-- 归档解包剥 tar 顶层 `<repo>-<sha7>/` 前缀后落此;`file://` 条目不占缓存(直连本地路径)。
+- 裸仓库保存可增量复用的 Git 对象与私有 commit 引用;源码快照不含 `.git`,不应用换行/smudge 等工作树过滤器;
+- 导出先写私有候选目录,成功后发布并在快照旁原子写完成记录。没有有效完成记录的快照按未完成缓存处理;`file://` 条目不占缓存(直连本地路径)。
 
 ### 3.3 组合域
 
@@ -240,16 +241,16 @@ conf 前端使用 **SwiftBash**(cocoanetics/swiftbash;MIT;SPM 远程依赖 `0.1.
 - swift-tools 6.2;探测的 SwiftBash 平台基线为 macOS 13 / iOS 16,当前 RimeKit 为 macOS 15 / iOS 16。SwiftBash 产品依赖不加 `.when(platforms:)`,macOS / iOS 均提供原生清单与 conf 导入;
 - 0.x 阶段 API 随 minor 变动,`upToNextMinor` 锁家族同步升级。
 
-## 5. 取包后端(v1:HTTP 归档)
+## 5. 取包后端(v1:GitKit + HTTPS Git)
 
 ### 5.1 流程
 
-1. **解析引用**:`GET {api}/repos/<u>/<r>` 取 `default_branch`(描述符未指定分支时),或 `GET {api}/repos/<u>/<r>/commits/<ref>` 取分支/tag 头 commit sha;
-2. **取归档**:`GET {archive}/<u>/<r>/tar.gz/<sha>`(按锁定 commit 寻址)。commit 确定源码版本;归档压缩字节可能变化,其 sha256 仅存入下载缓存记录用于对象校验,不与历史锁中的归档哈希作复现约束,不计算目录树哈希;
-3. **解包**:剥顶层 `<repo>-<sha7>/` 前缀,落缓存域 `packages/<identity>/<commit>/`(§3.2);
-4. **recipe download_files**:普通 HTTPS GET(支持 `<filename>::<url>` 落盘名)。
+1. **解析引用**:通过 HTTPS Git 的远端 refs 广播读取 HEAD 的 symbolic target 与分支/tag OID;附注 tag 使用 peeled OID。短名同时对应分支和 tag 时诊断歧义,可显式使用 `refs/heads/...` 或 `refs/tags/...`。完整 commit 直引无需联网解析,在准备源码时核实存在;
+2. **取对象**:在 URL 专属裸仓库中 fetch 分支与 tag,复用既有对象。锁定 commit 不在普通引用历史中时尝试直接取该 OID;服务器不允许或对象不可用则失败,绝不替换成最新分支头。保留成功取回 commit 的私有引用;
+3. **导出源码**:从精确 commit 的 tree 导出候选快照,关闭工作树过滤器,保留原始 blob 字节;完整候选发布到 `packages/<identity>/<commit>/`(§3.2)。不使用归档,不 hash 目录树;
+4. **recipe download_files**:独立资源仍为 HTTPS GET,其版本通过锁中的 SHA-256 固定(§12.5),不以仓库 commit 替代。源码快照保持只读消费,资源覆盖需要条目专属准备视图。
 
-### 5.2 后端接缝(为 libgit2 预留)
+### 5.2 后端接缝
 
 ```swift
 protocol PackageFetcher: Sendable {
@@ -260,14 +261,16 @@ protocol PackageFetcher: Sendable {
 }
 ```
 
-`PackageSourceSnapshot` 表示可读取的完整源码快照,具体类型在实现期定义,不要求以归档或 git 工作树作为组合层输入。v1 仅提供 `HTTPArchiveFetcher`,内部通过归档准备快照;libgit2 后端后续可用增量对象传输准备同一语义的快照,组合层无感。
+`PackageSourceSnapshot` 表示可读取的完整源码快照。v1 提供 `GitKitPackageFetcher`,使用 Cocoanetics/GitKit 2.2.x 的 `CGitKit` product;组合层消费快照,不读取裸仓库。Git I/O 由共享 dispatch 串行执行器承载,不阻塞主线程或占用 Swift Concurrency 的协作线程池;所有本进程后端实例共用该队列,缓存读写串行。
+
+仅 HTTPS 来源进入公开后端。传输回调显式选择进程内 HTTP(S) transport,不启用 SSH/exec transport;凭证经调用方提供的同步回调供给,不写入源码 URL 或共享锁。下载资源校验 HTTP 状态,并拒绝降级到 HTTP 的重定向。GitKit 高层 SDK 的可选 Archive product 在当前 SwiftPM 依赖图中存在解析问题;包级启用其 Archive 声明作为解析兼容,但本库仅依赖 CGitKit,不构建或链接 Archive product。
 
 ### 5.3 已知约束(显式接受)
 
-- 无子模块、无新 commit 的差量传输(归档天然全量;已有 URL 身份 + 锁定 commit 的完整缓存可复用,成功取回、解包后才标记完成;归档缓存字节按下载记录校验)。这不限制增量组合/同步,见 §13;
-- 未认证 GitHub API 限流 60 次/时/IP:取包为低频操作,可接受;遇 403/429 给可读诊断;镜像经库配置(§7.3 `PkgConfig.mirrors`)缓解;
-- v1 归档后端仅支持 **GitHub 形态 URL**(github.com 及同形镜像)与 **`file://` 本地路径**(短名映射本地改向的直连通道,免网络,不占缓存);其余 git 托管 URL 明确报错,留待 git/libgit2 后端;
-- 仅 HTTPS。
+- 首次取回包含远端普通分支/tag 的历史,不是浅克隆;后续 fetch 可复用已有对象,不承诺最小传输量。无自动子模块递归获取或 Git LFS 对象获取;gitlink 最多留下空目录,LFS pointer 按原始 blob 导出;
+- 不受 GitHub REST refs API 的 60 次/时额度约束,仍可能受 Git 托管服务自身认证、限速和 commit 可达性策略限制;
+- 支持 **HTTPS Git 仓库 URL**,GitHub URL 校验 owner/repo 形态并补 `.git`。非 GitHub 请求及锁记录保留调用方地址的 `.git` 后缀,按该地址进行引用解析和 fetch,不依赖主机重定向;带/不带后缀的规范化源码身份仍共用缓存,recipe Rx 与跨包寻址也使用该身份。`file://` 用户条目仍由本地输入视图处理,不进入远端后端;
+- 当前源码快照拒绝符号链接,与组合器的输入约束一致。完成的缓存由库拥有,调用方不得修改;跨进程共用缓存的协调尚未实现。
 
 ## 6. 组合规则
 
@@ -345,7 +348,7 @@ CLI 示例:`pinewind resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 | recipe 三段 / Rx 格式 | §1.3,逐包安装后补丁 | **同格式与应用时序**;组合域内逐条目安装后补丁,同目标同 Rx 替换,后续整文件覆盖可覆盖已有补丁 | 净态重建保障跨次幂等,Rx 替换处理单次组合中的既有块 |
 | 包身份 / 命名 | user/repo 简写 + 缺省展开 | **URL+元数据**为原生身份;plum 简写仅导入期翻译;短名映射双层(§4.3) | 本机零沿袭;可本地改向 |
 | 缓存布局 | `package/<user>/<pkg>`(plum 仓库内) | `packages/<身份>/<commit>`(自有设计,位置为库参数) | 本机布局零沿袭 |
-| 取包 | GitHub git clone | HTTP 归档(镜像可配) | 零 git 依赖,锁保复现 |
+| 取包 | GitHub git clone CLI | GitKit 进程内 HTTPS Git fetch | 无 git/ssh CLI 依赖,commit 固定版本,对象可增量复用 |
 | 覆盖语义 | 后包无条件覆盖(用户文件遭殃) | **声明次序后者胜**,每包安装后立即补丁;`self` 为可排序条目,后续整文件可覆盖此前补丁 | 次序显式化;用户树同权可定位 |
 | `.new` 原子替换 | 有 | 无(账本同步取代) | 场景被结构性消除 |
 | 白名单 | 顶层 yaml/txt/gram + opencc 一层 | 同 + `.ocd2` | ocd2 是现代 OpenCC 产物,plum 白名单陈旧 |
@@ -364,7 +367,7 @@ CLI 示例:`pinewind resolve|fetch|compose|sync|update|list`(`--config <dir>` �
 ### 10.1 里程碑
 
 - **M1 解析 + 组合(离线可测)**:manifest(含同步 names) / 本地 names 覆写解析器(version 必填) + SwiftBash conf 沙盒求值前端 + 有序条目组合引擎(白名单/glob/补丁重建);fixture 取 `learn/plum` 各 conf 与 `RimeDeployPluginTests` 现有包形态用例(万象 import_tables/prism 命名/孤儿词典三类坑);
-- **M2 取包 + 锁**:`HTTPArchiveFetcher` + 锁读写 + `update`;
+- **M2 取包 + 锁**:`GitKitPackageFetcher` + 锁读写 + 自动 resolve/update 与资源准备视图;
 - **M3 Pteromyini 集成**:§7.1 改造点 + 菜单/设置入口。
 
 ### 10.2 实现期核对清单(本轮未逐字确认,不冒下定论)
@@ -589,7 +592,7 @@ glob 不只依赖上次匹配到的文件,还依赖搜索范围与模式;否则�
 需区分三类增量:
 
 - **取包复用**:不重新下载已完整缓存的 URL + commit,独立资源缓存命中时不重取;v1 可做。
-- **增量传输**:从旧 commit 只取变化对象,由 git/libgit2 等后端后续提供;HTTP codeload v1 不承诺新 commit 的差量下载。
+- **增量传输**:GitKit 后端通过 fetch 协商复用对象;不承诺任意服务器与引用变化下的最小传输量。
 - **增量组合与同步**:复用未受影响的输出/中间结果,重放受影响路径的操作链,只写变化的目标;可在全量组合模型之上逐步实现。
 
 本阶段必要交付是操作计划、来源/依赖与失效边界、完整结果发布契约。实现可先支持取包缓存与无变化直接返回,再增加按路径重算;无需现在承诺任意操作下的最小重算集。
@@ -623,7 +626,7 @@ let result = try await Composer().compose(plan, inputRoot: input, outputRoot: co
 
 当前边界:
 
-- HTTPArchiveFetcher、联网 ref/资源解析、远程 conf 资源视图与自动 resolve/update 流程属于 M2,本轮尚未实现。远端包必须先由调用方准备快照;独立资源必须同时提供已固定的版本记录。
+- GitKitPackageFetcher 已提供联网 ref 解析、HTTPS Git 源码准备与独立 HTTPS 下载。远程 conf 资源视图、资源锁自动生成/条目视图准备及自动 resolve/update 编排仍属于 M2;独立资源必须同时提供已固定的版本记录。
 - 每目标 sync/事务恢复、CLI pinewind 与 Pteromyini 接入尚未实现。
 - 本轮增量仅包括未变化结果不发布、未变化文件复用与变更报告;仍枚举源文件并执行全量操作链,没有实现持久化依赖缓存或最小重算集合。
 - 同一输出根由同一个 Composer actor 串行操作;跨实例/跨进程的目标协调留待统一管理入口实现。
@@ -631,3 +634,11 @@ let result = try await Composer().compose(plan, inputRoot: input, outputRoot: co
 - recipe 补丁体为语义等价重序列化,不承诺保持上游原始排版;模板 `${name}`/`$name` 接受显式空值,`${name:-default}` 对缺失或空值使用缺省。没有提供值且没有缺省时诊断错误。
 
 验证:新增 37 项 Pinewind 行为测试;全包四个测试目标共 147 项通过;覆盖超时取消、折叠 install_files、命名下载、补丁目标创建、import/self 交错次序、显式空模板值、版本诊断与 256 MiB 词典组合。磁盘快照回归覆盖同一来源复用、规划后原地编辑、recipe 固定、资源校验后编辑及计划释放清理。glob 回归覆盖目录层级、字符类、点文件、非法模式和 include/exclude 一致性。PinewindCore generic iOS Simulator 构建通过。SwiftPM 当前会报告 SwiftXPC 与 SwiftBash 家族传递依赖使用两个 swift-syntax 仓库 URL 的 identity 警告,解析到同一个 603.0.2 版本,不影响本轮构建;后续需统一上游 URL。
+
+## 15. GitKit HTTPS Git 后端(2026-10-14)
+
+新增 `GitKitPackageFetcher`,实现 §5.2 的引用解析、源码准备与独立 HTTPS 下载接口。GitHub 源码获取改为 Git 协议,源码锁仍锚定完整 commit,不新增目录树或归档哈希。凭证以 `GitCredentialProvider` 注入,可返回 `GitCredentials.token(...)` 或用户名/口令,不依赖外部 credential helper。组合器仍消费 `PreparedPackage`,调用方用源码快照和已锁资源准备条目视图。
+
+新增 13 项 Git 后端测试,使用自编文件树与 libgit2 建仓库,不调用 git CLI。覆盖分支/附注 tag 与歧义、精确 commit 与新版本 fetch、缓存复用/离线重建、祖先 commit 的私有引用保留、未完成快照替换、实例间串行缓存访问、符号链接失败与旧视图保护、取消、不合法来源与独立下载的 HTTP 状态。地址回归检查 manifest 与锁往返后传入 advertise/fetch 的实际 URL,覆盖非 GitHub 带/不带 `.git` 后缀与 GitHub 规范化,并检查缓存身份复用;组合回归覆盖后缀差异下的跨包寻址与 Rx 身份。联网用例通过 `PINEWIND_NETWORK_TESTS=1` 显式启用,实际获取 rime-prelude 并对照同 commit 的 HTTPS 文件字节。
+
+验证:全包测试报告计数 160 项(包含既有跳过项),联网用例实际执行通过;iOS Simulator 的库与测试目标 `build-for-testing` 通过,部署下限仍为 iOS 16。独立调用方在清空 PATH、禁止 fork/exec 的 sandbox 中完成 HTTPS 引用解析、fetch 与源码导出。GitKit 的高层 Archive product 不进入 Core 构建/链接闭包;SwiftPM 的 swift-syntax URL identity 警告仍为已有问题。

@@ -6,8 +6,8 @@
 
 import Foundation
 
-/// The backend prepares an immutable complete snapshot; archive transport and git
-/// object deltas remain backend details. M1 consumers can provide prepared views.
+/// The backend prepares a complete commit snapshot. Git transport and object
+/// reuse remain backend details; callers also supply live local working trees.
 public protocol PackageFetcher: Sendable {
   func resolveDefaultBranch(url: URL) async throws -> String
   func resolveCommit(url: URL, ref: String) async throws -> String

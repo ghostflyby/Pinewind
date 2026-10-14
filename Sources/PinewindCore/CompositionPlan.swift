@@ -118,6 +118,7 @@ public struct CompositionPlanner: Sendable {
             "package has no prepared snapshot", source: request.url.absoluteString)
         }
         roots.append(prepared.directory)
+        let source = try SourceIdentity.normalize(request.url)
         let candidates = try snapshot.files(in: prepared.directory)
         let recipe = try Recipe.load(
           request: request, directory: prepared.directory, read: snapshot.read)
@@ -146,14 +147,15 @@ public struct CompositionPlanner: Sendable {
               guard segments.count == 3, segments[0] == ".." else {
                 throw PinewindError("cross-package pattern must be ../<package>/<pattern>")
               }
-              let candidates = available.filter {
-                $0.request.url.deletingLastPathComponent()
-                  == request.url.deletingLastPathComponent()
-                  && Self.compatibilityName($0.request.url)
+              let candidates = try available.filter {
+                let sibling = try SourceIdentity.normalize($0.request.url)
+                return sibling.deletingLastPathComponent()
+                  == source.deletingLastPathComponent()
+                  && Self.compatibilityName(sibling)
                     == segments[1]
               }
-              let versions = Dictionary(grouping: candidates) {
-                SourceVersion(url: $0.request.url, commit: $0.commit)
+              let versions = try Dictionary(grouping: candidates) {
+                SourceVersion(url: try SourceIdentity.normalize($0.request.url), commit: $0.commit)
               }
               guard versions.count == 1, let sibling = versions.values.first?.first else {
                 throw PinewindError("cross-package source is missing or ambiguous: \(segments[1])")

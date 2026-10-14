@@ -478,16 +478,21 @@ struct CompositionTests {
     }
   }
 
-  @Test func crossPackageReadsDeduplicateTheSameSourceVersionAndTrackItsFile() throws {
+  @Test(arguments: ["github.com", "git.example"])
+  func crossPackageReadsDeduplicateTheSameSourceVersionAndTrackItsFile(_ host: String) throws {
     let f = try Fixture()
     defer { f.remove() }
-    try f.write("recipe.yaml", "install_files: [\"../essay/shared.yaml\"]", in: f.a)
+    try f.write(
+      "recipe.yaml",
+      "install_files: [\"../essay/shared.yaml\"]\npatch_files: {consumer.custom.yaml: [{schema: test}]}",
+      in: f.a)
     try f.write("shared.yaml", "source: essay", in: f.b)
     let consumer = try PackageRequest(
-      url: #require(URL(string: "https://github.com/rime/rime-consumer")))
+      url: #require(URL(string: "https://\(host)/rime/rime-consumer.git")))
     let shared = try PackageRequest(
-      url: #require(URL(string: "https://github.com/rime/rime-essay")))
-    let sharedAgain = try PackageRequest(url: shared.url, recipe: "other")
+      url: #require(URL(string: "https://\(host)/rime/rime-essay.git")))
+    let sharedAgain = try PackageRequest(
+      url: #require(URL(string: "https://\(host)/rime/rime-essay")), recipe: "other")
     let commit = String(repeating: "a", count: 40)
     let views = try [
       PreparedPackage(request: consumer, directory: f.a, commit: commit),
@@ -495,7 +500,13 @@ struct CompositionTests {
       PreparedPackage(request: sharedAgain, directory: f.b, commit: commit),
     ]
     let plan = try f.plan([.package(consumer)], packages: views)
-    #expect(plan.paths == ["shared.yaml"])
+    #expect(plan.paths == ["consumer.custom.yaml", "shared.yaml"])
+    let patch = try #require(plan.files["consumer.custom.yaml"]?.first)
+    guard case .patch(let rx, _) = patch.action else {
+      Issue.record("expected a recipe patch")
+      return
+    }
+    #expect(rx == "rime/rime-consumer::")
     #expect(plan.files["shared.yaml"]?.first?.source == f.b.appendingPathComponent("shared.yaml"))
     let conflicting = try PreparedPackage(
       request: shared, directory: f.b, commit: String(repeating: "b", count: 40))

@@ -83,7 +83,8 @@ struct Recipe {
     guard Set(resources.map(\.path)).count == resources.count else {
       throw reader.error("download_files targets must be unique")
     }
-    let components = request.url.path.split(separator: "/").suffix(2).joined(separator: "/")
+    let source = try SourceIdentity.normalize(request.url)
+    let components = source.path.split(separator: "/").suffix(2).joined(separator: "/")
     let options = request.options.keys.sorted().map { "\($0)=\(request.options[$0] ?? "")" }.joined(
       separator: ",")
     let rx = components + ":" + (request.recipe ?? "") + ":" + options
