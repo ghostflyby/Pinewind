@@ -79,8 +79,14 @@ public actor Composer {
       try fm.createDirectory(
         at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
       try render(operations, to: destination)
-      let old = try SafePath.file(path, in: outputRoot)
-      if exists, fm.fileExists(atPath: old.path), try SnapshotFiles.sameContents(old, destination) {
+      var matchesPrevious = false
+      if exists {
+        let old = try SafePath.file(path, in: outputRoot)
+        matchesPrevious =
+          try fm.fileExists(atPath: old.path)
+          && SnapshotFiles.sameContents(old, destination)
+      }
+      if matchesPrevious {
         reused.append(path)
       } else {
         changed.append(path)
