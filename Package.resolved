@@ -1,5 +1,5 @@
 {
-  "originHash" : "54ee55a3e4c053d4ecb7c2c5f96ba6d247dda3d764837360a59017f2c521340b",
+  "originHash" : "3a8e9886aa9b8ff476cf8a3426db73eb04f8f923304bd7485b2ea4f92a11a228",
   "pins" : [
     {
       "identity" : "csqlite",
@@ -112,10 +112,9 @@
     {
       "identity" : "swift-glob",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/davbeck/swift-glob.git",
+      "location" : "https://github.com/ghostflyby/swift-glob.git",
       "state" : {
-        "revision" : "f039a675d39ba178f710980a64dd0a142e83dcde",
-        "version" : "1.0.0"
+        "revision" : "263caacce41361bf8a27c92da528bb399a999673"
       }
     },
     {

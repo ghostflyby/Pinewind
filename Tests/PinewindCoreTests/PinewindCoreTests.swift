@@ -355,22 +355,54 @@ struct CompositionTests {
     let entries = try [ManifestEntry.package(f.request(f.a))]
     let composer = Composer()
     _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    let before =
-      try f.output.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
-      as? NSObject
+    let file = f.output.appendingPathComponent("default.yaml")
+    let sentinel = Date(timeIntervalSince1970: 946_684_800)
+    try FileManager.default.setAttributes([.modificationDate: sentinel], ofItemAtPath: file.path)
     let unchanged = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     let after =
-      try f.output.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
-      as? NSObject
+      try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
     #expect(unchanged.changedPaths.isEmpty)
     #expect(unchanged.reusedPaths == ["default.yaml"])
-    #expect(before != nil && before == after)
+    #expect(after == sentinel)
     try f.write("default.yaml", "value: new\n", in: f.a)
     let changed = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     #expect(changed.changedPaths == ["default.yaml"])
     #expect(try f.read("default.yaml") == "value: new\n")
+  }
+
+  @Test func publishingNeverRemovesTheVisibleGeneration() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let composer = Composer()
+    let entries = [ManifestEntry.userFiles(FileFilter())]
+    try f.write("default.yaml", "value: a\n", in: f.input)
+    _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    let file = f.output.appendingPathComponent("default.yaml")
+    let reader = Task.detached { () -> (failures: [String], reads: Int) in
+      var failures: [String] = []
+      var reads = 0
+      while !Task.isCancelled {
+        do {
+          let value = try String(contentsOf: file, encoding: .utf8)
+          reads += 1
+          if value != "value: a\n" && value != "value: b\n" { failures.append(value) }
+        } catch { failures.append(String(describing: error)) }
+        await Task.yield()
+      }
+      return (failures, reads)
+    }
+    defer { reader.cancel() }
+    for index in 0..<20 {
+      try f.write(
+        "default.yaml", index.isMultiple(of: 2) ? "value: b\n" : "value: a\n", in: f.input)
+      _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    }
+    reader.cancel()
+    let observations = await reader.value
+    #expect(observations.reads > 0)
+    #expect(observations.failures.isEmpty)
   }
 
   @Test func globDetectsNewFilesAndRemovesDeletedOutputs() async throws {

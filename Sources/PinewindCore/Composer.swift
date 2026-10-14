@@ -4,8 +4,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import Darwin
 import Foundation
+
+#if !os(Windows)
+  import CPinewindPlatform
+#endif
 
 public struct CompositionResult: Sendable {
   public let directory: URL
@@ -37,9 +40,20 @@ public actor Composer {
     let previous = exists ? try SafePath.files(in: outputRoot) : []
     let parent = outputRoot.deletingLastPathComponent()
     try fm.createDirectory(at: parent, withIntermediateDirectories: true)
-    let candidate = parent.appendingPathComponent(".pinewind-" + UUID().uuidString)
+    #if os(Windows)
+      try WindowsDirectoryPublisher.validate(outputRoot)
+      let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
+      try SafePath.validateRoots(
+        input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
+      try fm.createDirectory(at: storage, withIntermediateDirectories: true)
+      let candidate = storage.appendingPathComponent(
+        "generation-" + UUID().uuidString, isDirectory: true)
+    #else
+      let candidate = parent.appendingPathComponent(".pinewind-" + UUID().uuidString)
+    #endif
     try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
-    defer { try? fm.removeItem(at: candidate) }
+    var retained = false
+    defer { if !retained { try? fm.removeItem(at: candidate) } }
     var reused: [String] = []
     var changed: [String] = []
     for path in plan.paths {
@@ -62,17 +76,20 @@ public actor Composer {
         directory: outputRoot, paths: plan.paths,
         changedPaths: [], removedPaths: [], reusedPaths: reused)
     }
-    if exists {
-      // Darwin directory exchange keeps an existing, nonempty output visible.
-      guard
-        renameatx_np(AT_FDCWD, candidate.path, AT_FDCWD, outputRoot.path, UInt32(RENAME_SWAP)) == 0
-      else {
-        throw PinewindError(
-          "cannot atomically exchange composition directories: \(String(cString: strerror(errno)))")
+    #if os(Windows)
+      try WindowsDirectoryPublisher.publish(candidate, at: outputRoot)
+      retained = true
+    #else
+      if exists {
+        let status = pinewind_exchange_directories(candidate.path, outputRoot.path)
+        guard status == 0 else {
+          throw PinewindError(
+            "cannot atomically exchange composition directories (errno \(status))")
+        }
+      } else {
+        try fm.moveItem(at: candidate, to: outputRoot)
       }
-    } else {
-      try fm.moveItem(at: candidate, to: outputRoot)
-    }
+    #endif
     return CompositionResult(
       directory: outputRoot, paths: plan.paths,
       changedPaths: changed, removedPaths: removed, reusedPaths: reused)
