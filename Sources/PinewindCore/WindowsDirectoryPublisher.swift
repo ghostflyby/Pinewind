@@ -93,6 +93,10 @@
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
     static func canonicalPath(_ url: URL) throws -> String {
+      try resolvedURL(url).standardizedFileURL.path.lowercased()
+    }
+
+    static func resolvedURL(_ url: URL) throws -> URL {
       var ancestor = url.standardizedFileURL
       var missing: [String] = []
       while !FileManager.default.fileExists(atPath: ancestor.path) {
@@ -118,7 +122,7 @@
         return URL(fileURLWithPath: path)
       }
       for component in missing.reversed() { resolved.appendPathComponent(component) }
-      return resolved.standardizedFileURL.path.lowercased()
+      return resolved
     }
 
     private static func currentTarget(_ output: URL) throws -> URL? {

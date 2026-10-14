@@ -56,6 +56,9 @@ enum SafePath {
   }
 
   static func files(in root: URL) throws -> [String] {
+    #if os(Windows)
+      let root = try WindowsDirectoryPublisher.resolvedURL(root)
+    #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
     let values = try root.resourceValues(forKeys: [.isDirectoryKey])

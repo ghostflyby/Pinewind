@@ -2,7 +2,7 @@
 
 Pinewind 是 Rime 包管理与配置组合的 Swift 库,提供 `PinewindCore` product。它将用户文件与远程包分开保存,按声明次序生成组合目录,供调用方交给输入法引擎部署。
 
-支持 macOS 15 / iOS 16 及以上版本,需要 Swift 6.2 或更高版本。Linux / Windows 尚未支持。
+支持 macOS 15 / iOS 16 及以上版本、Linux 和 Windows。需要 Swift 6.2 或更高版本;Windows 使用 Swift 6.3.1 或更高版本。
 
 ## 接入
 
@@ -38,6 +38,8 @@ let plan = try CompositionPlanner().plan(expanded, inputRoot: inputRoot)
 let result = try await Composer().compose(
   plan, inputRoot: inputRoot, outputRoot: composeRoot)
 ```
+
+Windows 的 `composeRoot` 必须不存在、为空或已由 Pinewind 管理,所在文件系统需支持目录 junction。
 
 没有清单时只组合用户文件。清单中的 `self` 与包条目按同一顺序执行:后面的文件覆盖前面的同名文件,每个包安装文件后立即应用自己的补丁。本地文件编辑在下一次规划时生效,不生成本地锁。
 
