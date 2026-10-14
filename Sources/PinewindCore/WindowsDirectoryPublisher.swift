@@ -91,7 +91,7 @@
     }
 
     private static func nativePath(_ url: URL) throws -> String {
-      guard url.isFileURL, !url.path.contains("\0"),
+      guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
         let representation = url.withUnsafeFileSystemRepresentation({ pointer in
           pointer.map { String(cString: $0) }
         })

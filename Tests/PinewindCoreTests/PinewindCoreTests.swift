@@ -465,14 +465,13 @@ struct CompositionTests {
       #expect(FileManager.default.fileExists(atPath: active.path))
     }
 
-    @Test func malformedJunctionPathsThrowTypedErrors() throws {
-      let urls = [
-        try #require(URL(string: "https://example.com/output")),
-        URL(fileURLWithPath: FileManager.default.temporaryDirectory.path + "/bad\0path"),
-      ]
-      for url in urls {
-        #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
-      }
+    @Test(arguments: ["https://example.com/output", "file:///C:/bad%00path"])
+    func malformedJunctionPathsThrowTypedErrors(_ text: String) throws {
+      let url = try #require(URL(string: text))
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
+      let literal = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "pinewind-percent%00-" + UUID().uuidString)
+      #expect(try WindowsDirectoryPublisher.currentTarget(literal) == nil)
     }
 
     @Test func emptyOutputDirectoryIsAdoptedAsAJunction() async throws {
