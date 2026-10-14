@@ -30,26 +30,32 @@ jobs:
       - name: swift test
         run: swift test --no-parallel
 
-  ios-build:
-    name: iOS · build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: xcodebuild build-for-testing (generic iOS Simulator)
-        run: |
-          set -o pipefail
-          xcodebuild build-for-testing \
-            -scheme Pinewind \
-            -destination 'generic/platform=iOS Simulator' \
-            -skipMacroValidation -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            2>&1
-
   ios-test:
-    name: iOS · simulator test
+    name: iOS · build and simulator test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Identify Xcode toolchain
+        id: xcode
+        run: |
+          fingerprint=$(
+            {
+              xcodebuild -version
+              xcrun --sdk iphonesimulator --show-sdk-build-version
+              sw_vers -buildVersion
+            } | shasum -a 256 | cut -d ' ' -f 1
+          )
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Cache Xcode build and dependencies
+        uses: irgaly/xcode-cache@v1
+        with:
+          key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+          swiftpm-package-resolved-file: Package.resolved
+          restore-mtime-targets: |
+            Tests/**/*
+            Package.resolved
       - name: Select simulator
         run: |
           xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
@@ -68,18 +74,21 @@ jobs:
                       sys.exit(0)
           sys.exit("No available iPhone simulator")
           PY
-      - name: xcodebuild test
-        run: |
-          set -o pipefail
-          mkdir -p ci-output
-          xcodebuild test \
-            -scheme Pinewind \
-            -destination "platform=iOS Simulator,id=$SIM_ID" \
-            -resultBundlePath ci-output/Pinewind.xcresult \
-            -parallel-testing-enabled NO \
-            -skipMacroValidation -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee ci-output/ios-test.log
+      - name: Prepare diagnostics directory
+        run: mkdir -p ci-output
+      - name: Build and test on iOS Simulator
+        uses: sersoft-gmbh/xcodebuild-action@v4
+        with:
+          spm-package: .
+          scheme: Pinewind
+          destination: platform=iOS Simulator,id=${{ env.SIM_ID }}
+          result-bundle-path: ci-output/Pinewind.xcresult
+          parallel-testing-enabled: false
+          disable-automatic-package-resolution: true
+          skip-macro-validation: true
+          skip-package-plugin-validation: true
+          build-settings: CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO
+          output-formatter: tee ci-output/ios-test.log
       - name: Collect diagnostics
         if: always()
         run: |
