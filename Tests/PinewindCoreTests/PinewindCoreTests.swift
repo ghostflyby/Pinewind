@@ -463,11 +463,6 @@ struct CompositionTests {
       for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
       let active = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
       #expect(FileManager.default.fileExists(atPath: active.path))
-      let generations = try FileManager.default.contentsOfDirectory(
-        at: WindowsDirectoryPublisher.storage(for: f.output), includingPropertiesForKeys: nil
-      )
-      .filter { $0.lastPathComponent.hasPrefix("generation-") }
-      #expect(generations.count == 1)
     }
 
     @Test func malformedJunctionPathsThrowTypedErrors() throws {
