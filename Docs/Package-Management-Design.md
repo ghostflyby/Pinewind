@@ -1,45 +1,428 @@
-# Pinewind 包管理与配置组合设计
+# 松风 / Pinewind:兼容 plum 清单的包管理与配置方案(设计定案)
 
-本文面向维护或扩展 Pinewind 的开发者,规定配置语义、来源身份、组合不变式与接口边界。使用方式见 [README](../README.md),贡献流程见 [CONTRIBUTING](../CONTRIBUTING.md)。
+- 状态:设计定案稿 v4;M1 首轮离线核心已实现(§14),§12 为文件格式与状态职责草案,§13 为增量执行预设计
+- 日期:2026-10-11(v2:收窄为 Swift 库设计——本机布局零 plum 沿袭、URL+元数据身份、短名映射分层、有序覆盖);2026-10-13(v3:conf 前端改用 SwiftBash、清单语法生态普查、选项双层求值实证、只读挂载实测落档)
+- v4 修订(2026-10-13):conf 前端统一为 SwiftBash 沙盒求值;删除 SwiftBash 平台依赖条件化;commit 为源码复现锚点,归档哈希仅用于下载与缓存校验;补丁逐条目在文件安装后立即应用,后续整文件覆盖可覆盖此前补丁。
+- 依赖基线:plum `b1be196`(`/Users/ghostflyby/repos/learn/plum`,仅作语法与语义参照,无代码关联);RimeKit v0.0.42(`rime-deploy`/`RimeDeployCore` 工具族先例);Pteromyini master 契约(`RimeServiceClient.swift:56-72`、`BlueGreenManager.swift:147-169`)
+- 已确认决策:
+  1. 本阶段为 **Swift 库设计**:定数据文件清单(格式/用途/是否同步)与目录角色及内部结构;**一切目录位置皆为库参数,库不内定路径**;实现另立一轮;
+  2. **本机落盘零 plum 沿袭**:兼容仅限 plum 生态包在远端的文件格式与内容/元数据;本机目录与文件布局为自有设计;
+  3. 原生清单与锁以 **URL + 元数据**为包身份;plum 包名规则(user 缺省/裸名展开)仅作 conf 导入期的翻译兼容;
+  4. **短名映射双层**:同步层合入 `pinewind.yaml` 的 `names` 段,本地覆写单独存于 `pinewind.local.yaml`;字段级合并、本地胜,便于本地改向调试;
+  5. 覆盖 = **声明次序后者胜**,无角色特殊优先级;用户文件树(`self`)是清单中一个可排序条目;每个包条目先安装文件、再立即应用自身补丁,后续条目可整文件覆盖此前的文件与补丁;
+  6. 取包后端 v1 = **HTTPS Git**(GitKit 提供的 libgit2 C 模块,进程内 refs 广播与 fetch);不依赖 git/ssh CLI,不使用 GitHub refs API 或 codeload tarball。后端仍走接口抽象;
+  7. **conf 前端 = SwiftBash 沙盒求值**(v4,§4.5):使用 `BashInterpreter` + 只读挂载,清单求值采用解释器语义,不维护自定义 bash 求值子集;SwiftBash 产品依赖不作平台条件化,macOS / iOS 均支持 conf 导入。
+  8. **独立下载资源固定版本**:recipe 的 `download_files` 不受仓库 commit 约束,可变 URL 的资源单独在包锁中记录内容校验值;该校验值标识资源内容版本,不用于源码归档复现(语义见 §12.5)。
+  9. **锁为库管理的不透明文件**:文件名 `pinewind.lock`,不带 YAML 后缀,不承诺序列化格式、字段布局或内部结构;用户通过库操作生成、更新和检查锁。
+  10. **用户配置 version 必填**:manifest 与本地覆写文件均须声明顶层整数 `version: 1`;缺失或不支持的版本报错,不按隐含 v1 解析。plum conf/recipe 继续使用生态格式,锁和私有状态不受此 YAML 规则约束。
+  11. **项目命名**:松风 / Pinewind;库 `PinewindCore`,命令 `pinewind`,用户侧文件 `pinewind.yaml` / `pinewind.local.yaml` / `pinewind.lock`。
 
-“预设计”章节描述尚未提供的编排与同步能力,不代表现有 API 已实现。其余章节说明现有模型与行为。
+---
 
-## 1. 职责与目录模型
+## 0. 背景与目标
 
-Pinewind 提供 `PinewindCore` Swift 库,不依赖输入法引擎。调用方负责目录位置、认证、引擎部署及 UI;库负责解析配置、准备来源和生成组合目录。
+plum 是 rime 生态的事实标准配置管理器,但其模型有一个结构性缺陷:**取包、组合、落盘全部直接发生在 rime 目录里**。后果:
 
-| 目录角色 | 内容 | 所有权 |
+- 用户改过的文件会被后到的包直接覆盖(`install-packages.sh:84-104`:`diff` 不同即 `cp`,无优先级概念);
+- 远程内容与用户配置混居一目录,无法用 git 干净地同步「我自己的配置」;
+- plum 的 Rx 标签「删旧块再追加」既处理重复应用,也发生在**就地编辑**可能已被用户改动的文件时。本方案从净态组合,不跨次修改旧输出;单次组合中仍按 Rx 键替换已有同键块,包括从用户文件复制来的块。
+
+本方案的目标:**用户配置与远程下载包彻底分离,经声明次序组合后部署**,使得:
+
+1. 用户配置仓库可以整体 git 同步,复现 = 输入域 commit + 锁文件,二者完全确定组合产物;
+2. 兼容 plum 生态的**远端文件格式与内容/元数据**(`*-packages.conf`、包描述语法、`:preset` 等内置清单、recipe.yaml 三段、Rx 标签)——可导入、可翻译;**本机落盘布局完全是自有设计,零 plum 沿袭**;
+3. 用户配置树保持 **rime 配置目录的任意子结构**——不强迫任何固定骨架,文件的仓库相对路径即其在组合产物中的路径;
+4. 以 **Swift 库**形态交付:目录位置、镜像、后端全部是调用方注入的参数;CLI 与 App(Pteromyini)只是两类调用方。
+
+项目/产品名已定为 **松风 / Pinewind**;独立 Swift Package 与仓库名 `Pinewind`,核心库 `PinewindCore`,CLI 命令 `pinewind`,与输入法产品 Pteromyini 分别命名。源码、测试与本设计文档从 RimeKit 迁入独立仓库;CLI 与 App 均为库的调用方,应用层分别消费 Pinewind 与 RimeKit。
+
+“松风”取意于王维《酬张少府》的“松风吹解带,山月照弹琴”(参见[原诗](https://www.gushici.net/shici/31/4886.html));英文名 Pinewind 与松林之风的意象对应。配置文件统一使用产品的小写前缀:共享声明 `pinewind.yaml`、可选本地覆写 `pinewind.local.yaml`、库管理的不透明锁 `pinewind.lock`。
+
+## 1. plum 规则基线(实测语义)
+
+以下语义已对照 `learn/plum` 源码逐行核实,是本方案兼容面的 authoritative 基线。**兼容仅限本章所列远端格式的读取与翻译**;§1.5–§1.6 的本机行为(落盘覆盖、缓存布局、git 取包)仅作对照与决裂对象,不沿袭。
+
+### 1.1 包描述语法(resolver.sh:5-56)
+
+```
+<github-user>/<repository-name>@<branch>:<recipe>:key=value,...
+```
+
+| 部分 | 缺省 | 解析 |
 |---|---|---|
-| 输入域 | 用户文件、manifest、本地覆写与共享锁 | 用户编辑;库通过显式 API 写锁 |
-| 缓存域 | Git 对象、commit 源码快照及可抛弃的准备数据 | 库管理,不进入用户仓库 |
-| 组合域 | 用户文件与包内容按声明次序生成的结果 | 库生成,调用方只读消费 |
+| user | `rime` | 最后一个 `/` 之前(`resolver.sh:10-17`) |
+| package | — | 最后一个 `/` 之后,剥 `rime-` 前缀用于缓存目录名(`resolver.sh:19-24`) |
+| branch | (repo 默认分支) | `@` 之后、第一个 `:` 之前(`resolver.sh:32-37`) |
+| recipe | (空) | 第一个 `:` 之后、第二个 `:` 之前(`resolver.sh:40-46`) |
+| options | (空) | 第二个 `:` 之后,按 `,`/`:` 切分(`resolver.sh:48-56`) |
 
-三个根目录由调用方传入。机器路径、认证及后端选择不属于用户 manifest,库不修改用户的 `.gitignore`。
+裸名 `foo` 经缺省规则展开为 `rime/rime-foo`,plum 缓存目录 `package/rime/foo`。
 
-核心不变式:
+### 1.2 清单 target 四类(resolver.sh:70-95)
 
-- 取包、conf 求值和组合不回写输入文件。
-- 组合结果以净态按声明顺序执行为基准;失败保留上一份完整输出。
-- 用户文件可以保留任意子目录,其相对路径就是输出路径。
-- 远程源码的版本由完整 commit 固定,独立下载资源由内容校验值固定。
-- 缓存可删除。重建仍要求来源能提供锁定版本,不承诺远端永久保留旧内容。
-- 本地工作树是实时输入;启用本地覆写后,共享锁不能单独复现本机编辑结果。
+1. **远程清单**:`<user>/<repo>[@<branch>]/<path>/…-packages.conf` 映射为 `https://github.com/<user>/<repo>/raw/<branch|master>/<path>`,或任意 `https://` URL(plum 用 `curl -fLO` 下载后 `source`)(`resolver.sh:58-68`);
+2. **本地 `.conf`**:直接 `source`;
+3. **`:name`**:展开为工具自带的 `name-packages.conf`(`:preset` 8 包、`:extra` 追加 14 包、`:all` = 两者并集);
+4. **其余**:视为单个包描述符。
 
-## 2. 用户配置
+清单文件本体是 bash 语法(`package_list+=( … )` 数组,可多次追加),plum 以 `source` 加载。
 
-### 2.1 文件职责与编码
+### 1.3 recipe 语义(recipe.sh)
 
-| 文件 | 写入方 | 是否随用户仓库同步 |
-|---|---|---|
-| `pinewind.yaml` | 用户 | 是 |
-| `pinewind.local.yaml` | 用户,可选 | 否 |
-| `pinewind.lock` | 库 API | 建议同步 |
+- **选择顺序**(`install-packages.sh:38-46`):显式 `:<recipe>` 用 `<recipe>.recipe.yaml` → 否则包内默认 `recipe.yaml` → 否则白名单整拷;
+- **`recipe:` 段 Rx 校验**(`recipe.sh:34-45`):段内 `Rx:` 值须与 recipe 文件名主干一致(未显式指定 recipe 时跳过);
+- **`download_files:`**(`recipe.sh:47-94`):每项为 URL,支持 `<filename>::<url>` 指定落盘名,取进包目录;
+- **`install_files:`**(`recipe.sh:96-117`):每项是**包目录内求值的 shell glob**(`cd <package_dir> && ls <patterns>`),匹配文件按相对路径落盘;`../<其他包>/…` 形态可跨包取文件(plum 生态中 essay 等共享文件依赖此机制)。映射式(`target: source`)写法在 bash 解析下不可达,生态以纯列表为主(抽样核对见 §10.2);
+- **`patch_files:`**(`recipe.sh:119-198`):每项为 `<目标文件>:` + 缩进补丁体;补丁体以 **Rx 标签块**追加到输出目录目标文件的 `__patch:` 段之后,块格式:
 
-manifest 和本地覆写使用 UTF-8 YAML,顶层整数 `version: 1` 必填。缺失版本、不支持的版本、重复键、未知字段和错误类型均报错。URL、ref、commit、recipe 与 option 值使用字符串;易被 YAML 推断成数字或布尔值的内容需要加引号。
+  ```yaml
+  # Rx: <user>/<repo>:<recipe>:<opt1,opt2> {
+  <补丁体>
+  # }
+  ```
 
-锁是库管理的不透明文件,不承诺字段布局、文本或二进制编码。plum conf 和 recipe 使用各自的生态格式,不要求添加这个 version 字段。
+  幂等 = 先按 Rx 标签删旧块再追加;落盘经 `.new` 临时文件 + `mv` 原子替换。recipe options 在 patch 阶段被 `eval` 为 shell 变量,消费点两处,均靠 bash 展开而非显式模板:**目标文件名键**(被转成 `patch_file <键> <<EOF` 命令行后展开,选项决定补哪个文件;rime-emoji `customize.recipe.yaml` 的键 `${schema:-luna_pinyin}.custom.yaml` 为实证用例)与**补丁体**(未加引号的 heredoc 展开)。两层均构成任意求值面:`eval` 对选项词逐字求值,heredoc/命令行对 recipe.yaml(远端内容)中的一切 `$` 展开——本方案以 §9 第 2 条的字面白名单替换取代之。
 
-### 2.2 Manifest
+### 1.4 默认白名单(install-packages.sh:67-82)
+
+无 recipe 的包,从包目录顶层拷贝:
+
+- `*.yaml`,排除 `*.custom.yaml`、`*.recipe.yaml`、`recipe.yaml`;
+- `*.txt`、`*.gram`;
+- `opencc/*.{json,ocd,txt}`(仅一层)。
+
+注意:**不含 `.ocd2`、不含 `lua/`、不递归子目录**(除 opencc 一层)——生态里靠自定义 recipe 补足(万象即走定制 plum 分支)。
+
+### 1.5 落盘次序与覆盖(install-packages.sh:84-118)
+
+包按清单顺序处理;`install_files` 对已存在且内容不同的目标**无条件 `cp` 覆盖**——后包覆盖先包,也覆盖用户已改文件。这是本方案以「声明次序覆盖」取代的行为(§6.1)。
+
+### 1.6 其他
+
+- 缓存布局:`${plum根}/package/<user>/<pkg>/`(在 plum 仓库内,不在 rime 目录)(`install-packages.sh:27`);
+- 取包:git clone `--depth 1`(含子模块);更新 `fetch` + `--ff-only`,失败降级 `reset --hard`;
+- `no_update=1` 跳过更新;来源限制:git 包仅 GitHub,清单与 download_files 任意 HTTPS(`git_mirror` 已于上游废弃)。
+
+## 2. 三层域模型
+
+```
+┌─ 用户配置域 ─────────┐   ┌─ 包缓存域 ──────────┐   ┌─ 组合域 ────────────┐
+│ 用户 authored 文件    │   │ 取回的远程包内容      │   │ 用户 ⊕ 包 ⊕ 补丁     │
+│ (rime 目录任意子结构) │   │ (可抛弃,不入库)      │   │ (纯派生,随删随建)    │
+│ + manifest/lock      │   │ packages/<身份>/<c>/ │   │                      │
+│   可选本地覆写        │   │                      │   │ ← 部署唯一取材处      │
+└───────── git 同步 ────┘   └──────────────────────┘   └──────────────────────┘
+```
+
+不变式:
+
+- **I1(纯用户域)**:输入域只含 authored 内容与 §4.1 所列库元数据;库对输入域的唯一写回是 `pinewind.lock`(受控生成物),`pinewind.local.yaml` 由用户手写;取包与组合绝不写入输入域;
+- **I2(缓存可抛弃)**:缓存域整目录可删;凭锁文件重取,组合结果不变;
+- **I3(组合纯派生)**:组合域任意时刻可删;结果必须等价于从净态按声明次序组合。允许复用依赖仍有效的私有缓存与中间结果,缓存缺失时可全量重建;不得在已发布文件上重复叠加补丁来代替组合。Rx 同键替换见 §6.2,不修改输入域;
+- **I4(任意子结构)**:用户域文件的相对路径 = 其组合产物中的路径;不设强制骨架;
+- **I5(复现封闭)**:输入域 git commit + `pinewind.lock` 完全确定组合域文件内容;远程仓库源码以锁定的 commit 为复现锚点,不以归档字节哈希或目录树哈希标识源码版本;
+- **I6(位置皆参数)**:三个域的根路径、镜像、后端全部由调用方注入(§7.3);库不内定任何本机路径。
+
+## 3. 目录角色与内部结构(位置一律为库参数)
+
+库只认三个**目录角色**,根路径全部由调用方注入(配置类型见 §7.3);库内不出现任何默认绝对路径,也不感知调用方形态(CLI、App、测试)。
+
+### 3.1 输入域(用户配置域)
+
+- 用户文件树:rime 目录任意子结构,无强制骨架(`self` 条目的取材范围);
+- 库元数据文件:§4.1 总表所列(manifest 含同步 names、可选本地覆写、lock);
+- 组合期排除:`.git/`、`.DS_Store`、`*.local.*` 约定文件与库元数据文件本体。
+
+### 3.2 缓存域
+
+内部结构为自有设计(键 = 包身份,非 plum 布局):
+
+```
+packages/<identity>/<commit>/
+repositories/<identity>.git/
+```
+
+- `identity`:规范化源码 URL 的 SHA-256,仅作为跨平台私有路径键。这是 URL 元数据散列,不散列目录树、commit 归档或本地文件内容;
+- 以 commit 键控:分支前进不覆写既有取回,多版本天然共存,与锁对齐;
+- 裸仓库保存可增量复用的 Git 对象与私有 commit 引用;源码快照不含 `.git`,不应用换行/smudge 等工作树过滤器;
+- 导出先写私有候选目录,成功后发布并在快照旁原子写完成记录。没有有效完成记录的快照按未完成缓存处理;`file://` 条目不占缓存(直连本地路径)。
+
+### 3.3 组合域
+
+- 每次组合在未发布的 staging 中准备候选结果,可全量重建或复用仍有效的文件/中间结果;完成后原子发布为 composed(调用方只读)。活跃输出不可就地修改,具体代次切换机制在实现期确定;
+- 组合域可整目录删除,由输入域 + 锁完全重建。
+
+### 3.4 调用方示例(位置由调用方决定,库不感知)
+
+- **通用 CLI**:输入域 = 用户 dotfiles 仓库;缓存域/组合域 = CLI 实参或其自选默认;目标 rime 目录经**受管路径账本**同步(§7.2),绝不碰 userdb、`build/`、`installation.yaml`、`user.yaml` 及一切未受管文件;
+- **Pteromyini**:输入域 = master(`~/Library/Application Support/Pteromyini/config`,契约不变:唯一用户编辑域,引擎永不写入);缓存域/组合域 = App 容器内 App 自定;`importMasterSources` 导入源 master → composed 的改造点见 §7.1;无 manifest 时等价 `order: [self]`(fresh-install 行为与现状一致,bundle 万象 shared 兜底不变);「重新部署」= `fetch(如需)→ compose → deployAndSwitch`,fetch/compose 绝不进入按键服务路径(遵循 XPC-BlueGreen-Refactor-Plan 不变式 I4)。
+
+## 4. 文件清单与格式
+
+### 4.1 文件总表
+
+| 文件(名为提案) | 角色 | 格式 | 用途 | 谁写 | 随用户仓库同步 |
+|---|---|---|---|---|---|
+| `pinewind.yaml` | 输入域 | YAML 映射(version 必填,names 可选,order 有序) | 短名同步层 + 部署声明:条目次序即覆盖次序 | 用户 | 同步 |
+| `pinewind.local.yaml` | 输入域 | YAML 映射(version 必填,names 覆写) | 短名映射本地覆写层(字段级合并、本地胜;本地改向调试) | 用户 | **不同步**(约定 gitignore) |
+| `pinewind.lock` | 输入域 | 库私有,不承诺内部格式 | 解析结果与资源版本约束 | 库生成 | 建议同步 |
+| `*-packages.conf` / `recipe.yaml` / Rx 块 | 远端 | plum 格式 | 只读导入与 recipe 语义(§1、§4.5) | 生态 | — |
+
+库不读输入域中除上表外的任何文件;其余内容即用户文件树(`self` 条目的取材范围)。
+
+### 4.2 `pinewind.yaml`(原生清单)
+
+顶层 `version` 必填,`names` 为可选同步短名映射(缺省 `{}`),`order` 为有序条目表。短名定义本身不安装包,只有 order 中引用才应用;**条目次序即覆盖次序**(§6),条目四型:
+
+```yaml
+version: 1
+names:
+  wanxiang:
+    url: https://github.com/amzxyz/rime-wanxiang
+    ref: main
+  octagram:
+    url: https://github.com/lotem/rime-octagram-data
+order:
+  - self                       # 用户文件树条目:位置可任意声明
+  - wanxiang                   # 短名条目:经映射解析(§4.3)
+  - name: octagram             # 短名条目 + 内联字段覆写
+    recipe: customize
+  - url: https://github.com/amzxyz/rime-wanxiang   # 直连条目(不经映射)
+    ref: main
+  - import: :preset            # plum conf 导入:在其位置就地按序展开
+  - import: https://…/x-packages.conf
+```
+
+- 包条目可选字段:`ref`(分支/tag)或 `commit`(二者互斥)、`recipe`、`options`、`exclude`/`include`(glob);各条目具体字段见 §12.3;
+- 无 manifest 时等价 `order: [self]`(库退化为纯拷贝);
+- `import` 求值得到的 plum 描述符按 §1.1 规则翻译为 URL+元数据条目;conf 内的 `source` 按解释器语义处理,不对重复引用自动去重,求值资源限制见 §4.5 与 §10.2;
+- 镜像/缓存位置等**环境性配置不在此文件**——那是调用方注入的库参数(§7.3);文件里只有部署声明。
+
+### 4.3 manifest 的 `names` / `pinewind.local.yaml`(短名映射)
+
+```yaml
+# pinewind.local.yaml —— 本地覆写层(不同步)
+version: 1
+names:
+  wanxiang:
+    url: file:///Users/me/dev/rime-wanxiang   # 改指本地文件树调试
+```
+
+- 同步短名表就是 manifest 的 names 段,不另设文件。解析按 manifest.names → 本地 names → 条目内联字段的次序**字段级合并**,后层胜;只改 `url` 不必抄全量;
+- 本地层可新增同步层没有的短名(纯本地包);
+- plum 简写(`rime-essay` 裸名等)**不经映射机制**:仅在 conf 导入翻译期按 §1.1 缺省规则展开为 URL 条目。
+
+### 4.4 `pinewind.lock`(锁)
+
+锁是库生成、解释和维护的不透明文件,不承诺文本/二进制编码、字段名或结构。文件可以随用户仓库同步;库应提供检查解析结果的 API/CLI,不要求用户直接编辑锁。实现负责内部格式识别与迁移,不支持的锁给出明确诊断,不静默重新解析为新版本。
+
+语义上记录有序包应用对应的源码 URL、锁定 commit、recipe/options/过滤规则,conf 的已解析展开结果,以及独立下载资源的版本约束。同一 URL 可出现多次,不以 URL 唯一记录代替有序声明;源码缓存可按 URL + commit 复用。
+
+锁不承载本机路径、部署账本或增量执行缓存。resolve/update 才修改锁,fetch/compose/sync 不改锁;本地覆写在本次执行中应用,不生成本地锁。具体匹配与更新语义见 §12.4–§12.5;每目标部署状态见 §12.6。
+
+### 4.5 `*-packages.conf` 前端(plum 兼容;SwiftBash 沙盒求值,v4)
+
+plum 以 `source` 加载清单意味着清单可执行任意代码。v2 曾决定手写「bash 数组字面量子集」静态解析,v3 起证伪并废弃:生态普查(19 份独立内容清单、34 个文件)显示严格子集会拒绝 **68.4%**——失败组 100% 使用初始赋值 `package_list=( … )`(社区单文件清单的主流写法),另有行尾注释 ×2、`source "${root_dir:-.}"/…` include ×2、双引号 `${var:-default}` ×1;而危险构造(`$( )`、反引号、裸 `$var`、单引号串、if/for/函数)在全部文件中**零出现**。结论:生态复杂度集中在无害语法,手写子集既不必要也不胜任。
+
+conf 前端使用 **SwiftBash**(cocoanetics/swiftbash;MIT;SPM 远程依赖 `0.1.x`,家族 minor 同步锁)的 `BashInterpreter` 进行沙盒求值。此前的 `BashSyntax` AST 子集提取路线已被替代,不再作为默认或备选前端。
+
+**求值与能力边界(只读挂载已实测)**
+
+- 输入域以 `Mount(virtual:host:readOnly: true)` 挂载供解释器 `source`:include 与 `${var:-default}` 获得与 plum 一致的原生语义;
+- 数组初始化、重置、追加、引号、变量展开与 `source` 均由解释器处理;求值完成后读取 `package_list` 数组,再按 §1.1 翻译描述符。不另设 AST 节点白名单或自定义参数展开子集;
+- `:preset`/`:extra`/`:all` 直接映射为自有的有序包标识列表,不分发或求值上游 conf 副本。用户提供的本地与取回的远程 conf 走沙盒求值入口;include 的来源定位与资源限制见实现期核对清单;
+- 只读由 `MountedFileSystem.gateWrite` 结构性强制(实测:`cat`/`source` 通过,重定向/`touch`/`rm`/`chmod` 全部 `permission denied`,被挂载目录零残留);读写两侧均过 `canonicalGate`,挂载内符号链接逃逸被拒;
+- 能力受限模型:无 fork/exec,命令集 = 已注册的 Swift 命令,网络默认拒绝(`Network access denied`),文件系统默认虚拟;
+- 威胁模型为**能力受限执行 + 只读挂载强制 I1**:清单在 Swift 解释器内求值,不调用宿主 bash;访问权限由挂载表、命令注册与网络权限控制,不依赖语法子集限制。
+
+**依赖与平台事实**
+
+- 产品级消费:`BashInterpreter`(所需命令按需由 `BashCommandKit` 提供);SwiftPM 解析期取回家族(ShellKit/SwiftPorts/SwiftScript 及传递依赖;其中 GitKit 自带 vendored libgit2,可作 §5.2 后端的参照),解释器所需家族目标进入构建图;
+- swift-tools 6.2;探测的 SwiftBash 平台基线为 macOS 13 / iOS 16,当前 Pinewind 保持迁移前的 macOS 15 / iOS 16 基线。SwiftBash 产品依赖不加 `.when(platforms:)`,macOS / iOS 均提供原生清单与 conf 导入;
+- 0.x 阶段 API 随 minor 变动,`upToNextMinor` 锁家族同步升级。
+
+## 5. 取包后端(v1:GitKit + HTTPS Git)
+
+### 5.1 流程
+
+1. **解析引用**:通过 HTTPS Git 的远端 refs 广播读取 HEAD 的 symbolic target 与分支/tag OID;附注 tag 使用 peeled OID。短名同时对应分支和 tag 时诊断歧义,可显式使用 `refs/heads/...` 或 `refs/tags/...`。完整 commit 直引无需联网解析,在准备源码时核实存在;
+2. **取对象**:在 URL 专属裸仓库中 fetch 分支与 tag,复用既有对象。锁定 commit 不在普通引用历史中时尝试直接取该 OID;服务器不允许或对象不可用则失败,绝不替换成最新分支头。保留成功取回 commit 的私有引用;
+3. **导出源码**:从精确 commit 的 tree 导出候选快照,关闭工作树过滤器,保留原始 blob 字节;完整候选发布到 `packages/<identity>/<commit>/`(§3.2)。不使用归档,不 hash 目录树;
+4. **recipe download_files**:独立资源仍为 HTTPS GET,其版本通过锁中的 SHA-256 固定(§12.5),不以仓库 commit 替代。源码快照保持只读消费,资源覆盖需要条目专属准备视图。
+
+### 5.2 后端接缝
+
+```swift
+protocol PackageFetcher: Sendable {
+  func resolveDefaultBranch(url: URL) async throws -> String
+  func resolveCommit(url: URL, ref: String) async throws -> String
+  func prepareSource(url: URL, commit: String, cacheRoot: URL) async throws -> PackageSourceSnapshot
+  func downloadFile(url: URL) async throws -> Data
+}
+```
+
+`PackageSourceSnapshot` 表示可读取的完整源码快照。v1 提供 `GitKitPackageFetcher`,使用 Cocoanetics/GitKit 2.2.x 的 `CGitKit` product;组合层消费快照,不读取裸仓库。Git I/O 由共享 dispatch 串行执行器承载,不阻塞主线程或占用 Swift Concurrency 的协作线程池;所有本进程后端实例共用该队列,缓存读写串行。
+
+仅 HTTPS 来源进入公开后端。传输回调显式选择进程内 HTTP(S) transport,不启用 SSH/exec transport;凭证经调用方提供的同步回调供给,不写入源码 URL 或共享锁。下载资源校验 HTTP 状态,并拒绝降级到 HTTP 的重定向。GitKit 高层 SDK 的可选 Archive product 在当前 SwiftPM 依赖图中存在解析问题;包级启用其 Archive 声明作为解析兼容,但本库仅依赖 CGitKit,不构建或链接 Archive product。
+
+### 5.3 已知约束(显式接受)
+
+- 首次取回包含远端普通分支/tag 的历史,不是浅克隆;后续 fetch 可复用已有对象,不承诺最小传输量。无自动子模块递归获取或 Git LFS 对象获取;gitlink 最多留下空目录,LFS pointer 按原始 blob 导出;
+- 不受 GitHub REST refs API 的 60 次/时额度约束,仍可能受 Git 托管服务自身认证、限速和 commit 可达性策略限制;
+- 支持 **HTTPS Git 仓库 URL**,GitHub URL 校验 owner/repo 形态并补 `.git`。非 GitHub 请求及锁记录保留调用方地址的 `.git` 后缀,按该地址进行引用解析和 fetch,不依赖主机重定向;带/不带后缀的规范化源码身份仍共用缓存,recipe Rx 与跨包寻址也使用该身份。`file://` 用户条目仍由本地输入视图处理,不进入远端后端;
+- 当前源码快照拒绝符号链接,与组合器的输入约束一致。完成的缓存由库拥有,调用方不得修改;跨进程共用缓存的协调尚未实现。
+
+## 6. 组合规则
+
+### 6.1 步骤(净态组合为语义基准,候选结果原子发布)
+
+1. 使用锁与已准备好的源码/资源建立组合计划,在组合域临时目录准备结果(§3.3)。下列顺序定义全量基准语义;增量执行可跳过或复用经依赖检查仍有效的操作(§13);
+2. 按 manifest `order` **逐条目依声明次序**应用:
+   - `self`:拷用户树(排除 §3.1 排除项;条目级 `exclude`/`include` 生效);
+   - 包条目:消费 fetch 准备的源码与独立下载资源视图 → 定文件集(显式 `recipe` → 包内 `recipe.yaml` → 白名单,§1.4 规格逐字对齐外加 `.ocd2`,见偏离表)→ `install_files` glob 于缓存域包目录求值(`../<包>/…` 跨包寻址在缓存域内解析)→ 按相对路径落组合域 → **立即应用该条目的 `patch_files`**(§6.2),完成后才处理下一条目;
+   - 同路径文件:**后声明条目覆盖先声明条目**,整文件覆盖同时覆盖该文件中此前已应用的补丁;`self` 与包条目完全同权,其在序中的位置由用户声明(缺省首项)。补丁遵循同一条目次序,不设独立的最终补丁阶段;
+3. 全部条目完成后发布候选组合结果与本次文件集,不改锁。部署账本只在目标同步成功后提交(§12.6)。
+
+### 6.2 补丁语义(逐条目应用,同 Rx 替换)
+
+补丁属于声明它的包条目:**先安装该条目的文件,再立即应用其补丁,然后进入下一条目**。补丁在当前文件上追加或替换 Rx 块,后续条目仍可覆盖整个文件:
+
+- 目标文件基底 = 该条目的文件安装完成后,组合域中当时的同名文件(可能来自当前包、`self` 或先前的包条目);
+- 目标不存在时,创建所需父目录与带 `__patch:` 的目标文件;目标存在但没有 `__patch:` 段时,补建该段;
+- 各包补丁段以 plum 同款 Rx 标签块格式追加到 `__patch:` 段内;Rx 键沿用 plum 形态 `<user>/<repo>:<recipe>:<opts>`(由包 URL 推导 owner/repo),与生态既有标记互认;
+- **不同 Rx 键**:保留当前已有块,按条目应用次序追加新块;**同一目标内同一 Rx 键**:先移除当前文件中所有该键的旧块,再在段末追加本次块,使本次应用后的该键仅保留一份。旧块可能来自先前条目,也可能从用户文件树或包文件中复制而来;去重范围是当前目标文件,不作跨文件或全局去重;
+- 后续条目若整文件覆盖目标,此前补丁随旧文件一并被覆盖,不在末尾重新补回;因此 `self` 放最后时,它提供的同名文件决定最终内容;
+- 未被同键替换或整文件覆盖的 Rx 注释原样保留,用于溯源与生态标记互认(如本机 `~/Library/Rime/rime_ice.custom.yaml` 中 octagram 留下的标记);
+- 本轮补丁体经 Yams 解析与重序列化,保持 YAML 语义,不承诺逐行搬运的原始排版。接管 plum 既有 Rx 块时,同键替换可能带来缩进、引号或折叠样式变化;未被替换的块仍保留原文;
+- **绝不回写输入域**。
+
+例如 `order: [A, self, B]`:A 安装文件并应用 A 的补丁 → `self` 拷入用户文件,覆盖同名文件及其中 A 的补丁 → B 安装文件并在当时的目标文件上应用 B 的补丁。若 B 只补丁、不安装该目标文件,其补丁作用于 `self` 提供的基底;若 B 安装同名文件,则先覆盖基底再应用补丁。
+
+## 7. 调用方衔接(位置均由调用方注入)
+
+### 7.1 Pteromyini(未来改造点,本轮不实施)
+
+| 改动 | 位置 |
+|---|---|
+| `importMasterSources` 导入源 master → composed | `BlueGreenManager.swift:147-169` |
+| 「重新部署」前置 fetch + compose(异步,禁入按键路径) | `PteromyiniApplication.swift` redeploy 动作 |
+| 缓存域/组合域路径常量 | `RimeServiceClient.swift`(与 master 常量同处) |
+
+不改动:master 契约、bundle 万象 shared 兜底、`prefillStagedBuild` 预铺、蓝绿翻转语义。
+
+### 7.2 通用形态同步(`sync` 子命令)
+
+staging(组合域)→ rime 目录的账本同步:
+
+- 受管且内容变 → 更新;账本有而 staging 无 → 删除(该包已移除或文件退出文件集);
+- 账本外路径一律不碰(userdb、`build/`、`installation.yaml`、`user.yaml`、用户手放文件);
+- `.new` 原子替换机制**不进入本方案**:它服务的场景(就地改用户文件时的冲突暂停)被 staging + 账本同步结构性消除;
+- `--dry-run` 打印变更集。
+
+### 7.3 库 API 骨架与 CLI 示例(草案)
+
+库的一切位置/后端/镜像经单一配置类型注入;CLI 只是库的一层调用方:
+
+```swift
+struct PkgConfig: Sendable {
+  var inputRoot: URL          // 输入域(§3.1)
+  var cacheRoot: URL          // 缓存域(§3.2)
+  var composeRoot: URL        // 组合域(§3.3)
+  var fetcher: any PackageFetcher
+  var mirrors: [MirrorRule]   // GitHub 形态 URL 的 base 改写(可选)
+}
+// 主要入口(草案):resolve() / fetch() / compose() / sync(into:) / update()
+```
+
+CLI 示例:`pinewind resolve|fetch|compose|sync|update|list`(`--config <dir>` 指输入域,`--rime-dir <dir>` 通用形态目标——皆为 CLI 层实参,非库内定)。
+
+## 8. 兼容与偏离对照表
+
+| 面 | plum | 本方案 | 动机 |
+|---|---|---|---|
+| 包描述语法 / 缺省规则 | §1.1 | **同** | 生态兼容 |
+| conf 清单语法 | bash,`source` 执行 | **SwiftBash 沙盒求值**(`BashInterpreter` + 只读挂载),不另设语法子集 | 解释器兼容清单语义,权限边界保障输入域只读(§9) |
+| 原生清单 | 无(仅 conf) | `pinewind.yaml` 有序条目,plum conf 经 `import` 接入 | URL+元数据身份;次序即覆盖序 |
+| `:preset` 等内置清单 | plum 仓库 conf | Swift 有序包标识列表 | 免运行期 plum 依赖,不打包上游 conf |
+| 远程清单 URL | 任意 HTTPS | **同** | 生态兼容 |
+| recipe 三段 / Rx 格式 | §1.3,逐包安装后补丁 | **同格式与应用时序**;组合域内逐条目安装后补丁,同目标同 Rx 替换,后续整文件覆盖可覆盖已有补丁 | 净态重建保障跨次幂等,Rx 替换处理单次组合中的既有块 |
+| 包身份 / 命名 | user/repo 简写 + 缺省展开 | **URL+元数据**为原生身份;plum 简写仅导入期翻译;短名映射双层(§4.3) | 本机零沿袭;可本地改向 |
+| 缓存布局 | `package/<user>/<pkg>`(plum 仓库内) | `packages/<身份>/<commit>`(自有设计,位置为库参数) | 本机布局零沿袭 |
+| 取包 | GitHub git clone CLI | GitKit 进程内 HTTPS Git fetch | 无 git/ssh CLI 依赖,commit 固定版本,对象可增量复用 |
+| 覆盖语义 | 后包无条件覆盖(用户文件遭殃) | **声明次序后者胜**,每包安装后立即补丁;`self` 为可排序条目,后续整文件可覆盖此前补丁 | 次序显式化;用户树同权可定位 |
+| `.new` 原子替换 | 有 | 无(账本同步取代) | 场景被结构性消除 |
+| 白名单 | 顶层 yaml/txt/gram + opencc 一层 | 同 + `.ocd2` | ocd2 是现代 OpenCC 产物,plum 白名单陈旧 |
+| 子模块 / `git_mirror` / `--select` | 支持 / 已废弃 / 支持 | v1 均不支持 | 归档路线代价;交互属 CLI 之外 |
+| 锁文件 | 无 | `pinewind.lock`(库管理,不承诺内部格式;记录有序解析结果) | 复现;本机部署状态另行管理 |
+
+## 9. 安全决策
+
+1. **清单沙盒求值**:使用 SwiftBash `BashInterpreter`,只读挂载输入域与清单资源;无宿主 fork/exec,网络保持拒绝,仅注册清单求值所需命令。`source`、数组与参数展开采用解释器语义,安全边界由能力限制与文件系统权限强制,不维护 bash 求值子集(§4.5)。
+2. **补丁是数据不是代码**:plum 在 patch 阶段生成 bash 脚本并执行(选项 `eval`、命令行与未引号 heredoc 双层任意求值,实证见 §1.3);本方案补丁体与目标文件名键均为数据,选项替换仅对**已声明的 option 键**做字面白名单替换(生态用例 rime-emoji 已确认该形态足够)。
+3. **归档解包加固**:tar 条目拒绝绝对路径、`..` 穿越与符号链接条目。
+4. **传输与完整性**:远程传输仅 HTTPS;commit 是仓库源码的复现锚点。归档 sha256 仅用于下载与缓存对象校验,损坏对象丢弃后按同一 commit 重取,不自动前进 ref;同一 commit 的归档压缩字节变化不改变源码版本。远程清单 sha256 对锁校验,失败即终止不回落。
+
+## 10. 实现路线与核对清单
+
+### 10.1 里程碑
+
+- **M1 解析 + 组合(离线可测)**:manifest(含同步 names) / 本地 names 覆写解析器(version 必填) + SwiftBash conf 沙盒求值前端 + 有序条目组合引擎(白名单/glob/补丁重建);fixture 取 `learn/plum` 各 conf 与 `RimeDeployPluginTests` 现有包形态用例(万象 import_tables/prism 命名/孤儿词典三类坑);
+- **M2 取包 + 锁**:`GitKitPackageFetcher` + 锁读写 + 自动 resolve/update 与资源准备视图;
+- **M3 Pteromyini 集成**:§7.1 改造点 + 菜单/设置入口。
+
+### 10.2 实现期核对清单(本轮未逐字确认,不冒下定论)
+
+- `install_files` 生态形态抽样:纯 glob 列表为主,映射式是否真实存在于在用 recipe;
+- `opencc/*.*` 白名单是否需含 `.ocd2` 之外的现代产物(以生态包抽样定);
+- 远程 conf 的编码/行尾假设(plum 依赖 bash 词法,CRLF 行为需测);
+- 同一 commit 的归档重新生成或压缩格式变化时,下载缓存记录更新与损坏缓存恢复行为;归档哈希不作为源码复现约束;
+- 镜像域名对 API/归档两条路径的兼容矩阵;
+- recipe `Rx:` 校验对大小写/空白的容差;
+- 补丁时序 fixture:后续整文件覆盖此前补丁、`self` 置尾、已有同 Rx 块替换、不同 Rx 顺序追加、目标缺失时创建与重复净态组合结果一致;
+- 沙盒求值最小产品集:`BashInterpreter` 能否脱离 `BashCommandKit` 满足 `source` + 数组读取(`printf` 是否内建);
+- conf 求值的只读清单视图、远程 include 相对来源定位、注入变量范围及时间/内存/include 深度限制;与解释器语义一致的重复 `source` 行为;
+- SwiftBash 0.x 家族 minor 同步升级的跟进纪律(minor 变更须成组 bump 并过回归)。
+
+## 11. 开放问题
+
+- 组合报告(冲突告警、来源清单)是否落盘为文件,v1 先仅日志;
+- 万象从构建期 submodule 迁为运行期包的路径与时机;
+- 设置 UI 中包列表管理的形态(增删包 = 编辑 `pinewind.yaml` 的引导式界面?);
+- 多机同步下锁文件的合并策略(以 commit 为锚的自动合并是否安全);
+- `download_files` 是否需要条件请求(ETag/Last-Modified)省流量,v1 全量重下;
+- 原生条目 `ref` 承载分支/tag;commit 直引(钉死历史版本)是否开放为显式字段;
+- 本地覆写层是否需要输入域之外的全局层(用户主目录级)——v1 仅输入域内两层;
+- `file://` 条目的 ref 语义(忽略,或校验本地工作树状态);
+
+## 12. 文件格式细化草案(待确认)
+
+本节细化用户编写的 YAML 配置与库生成状态的职责。锁不承诺内部格式;部署状态和缓存状态亦不作为用户配置协议。锁与状态只定义必要语义,不以序列化示例限制实现。
+
+### 12.1 文件职责与同步边界
+
+| 文件 | 所在角色 | 必要性 | 谁写 | 同步 |
+|---|---|---|---|---|
+| `pinewind.yaml` | 输入域 | 含 order 与可选 names;无文件等价仅 `self` | 用户 | 是 |
+| `pinewind.local.yaml` | 输入域 | 本地改向时可选 | 用户 | 否 |
+| `pinewind.lock` | 输入域 | 使用远程包/import 后生成 | 库 | 是 |
+| 部署状态(私有存储) | 调用方注入的位置,每部署目标独立 | 使用目录同步时需要 | 库 | 否 |
+| 下载与增量缓存元数据(私有存储) | 缓存域 | 产生缓存时维护 | 库 | 否 |
+
+- 普通配置只需 manifest 与 lock;同步短名表是 manifest 的可选 names 段,本地覆写按需出现,不生成本地锁。没有远程包或 import 的纯 `self` 组合不要求先生成锁。
+- 配置只声明所需内容;锁只记录解析结果;同步状态只记录某个本机目标的成功同步历史;下载记录只记录可抛弃的缓存对象。
+- 目录根、镜像、认证和后端继续由调用方参数注入,不新增库级机器配置文件;CLI/App 如需保存自己的设置,格式由各调用方决定。
+- `self` 排除 manifest、本地覆写、pinewind.lock 等库元数据;本地文件由调用方配置 gitignore。库不得因此修改用户的 `.gitignore`。
+
+### 12.2 通用编码规则
+
+- 本小节编码规则仅适用于用户编写的 manifest / 本地覆写文件,不适用于 plum conf/recipe、锁或私有状态。用户配置使用 UTF-8 YAML,顶层整数 version 必填,当前支持 `version: 1`;缺失、类型错误或不支持的版本均报错,不接受无版本简写。
+- 数组有序;映射键的书写顺序不表示优先级。重复键、未知字段、错误类型和不支持的版本给带文件位置的诊断,不静默忽略。
+- URL、ref、commit、recipe 和 option 值均按字符串处理;易被 YAML 推断为布尔值/数字的内容需加引号。序列化器保证字符串类型,不借助隐式类型转换传递语义。
+- 路径使用 `/` 分隔的相对路径,不允许输出目标是绝对路径或含 `..`。recipe 的跨包源路径属于独立的兼容解析,不能原样成为输出目标路径。
+- 未声明字段按下文缺省规则处理;没有部署时间、取包时间等非必要易变字段进入共享锁。
+- 不生成目录树哈希,不以源码归档哈希定义包身份或复现版本。锁与 authored 声明的匹配采用规范化后的字段比较。
+
+### 12.3 原生清单
 
 ```yaml
 version: 1
@@ -48,223 +431,224 @@ names:
     url: https://github.com/rime/rime-emoji
     ref: master
 order:
-  - self
+  - url: https://github.com/rime/rime-essay
+    ref: master
   - name: emoji
     recipe: customize
     options:
       schema: luna_pinyin
   - import: ":preset"
+  - self:
+      exclude:
+        - "scratch/**"
 ```
 
-`names` 可省略,缺省为空映射。短名定义不安装包,只有 `order` 中的引用才应用。`order` 是有序序列,保留重复条目;每个条目只能有一种主选择器:
+names 段可省略,缺省 `{}`;其映射定义本身不产生安装条目。order 中每个条目必须且只能具有一种主选择器:
 
-| 选择器 | 写法 | 可选字段 |
+| 选择器 | 形式 | 可选字段 |
 |---|---|---|
-| 用户文件 | `self`,或 `self: {include: [...], exclude: [...]}` | include / exclude 位于 self 映射内 |
+| 用户树 | 标量 `self`,或 `self: {include: [...], exclude: [...]}` | include / exclude |
 | 短名 | 标量短名,或 `name: <短名>` | ref / commit / recipe / options / include / exclude |
 | 直连包 | `url: <URL>` | ref / commit / recipe / options / include / exclude |
-| conf 导入 | `import: <内置名、本地相对路径或 HTTPS URL>` | variables |
+| conf 导入 | `import: <内置名、输入域相对路径或 HTTPS URL>` | variables |
 
-- `self` 是保留名。存在 manifest 时不隐式插入 self;它可出现零次或多次。没有 manifest 时才等价于 `[self]`。
-- `ref` 表示分支或 tag 请求;缺省表示仓库默认分支。`commit` 是完整的 40 位十六进制 commit,与 ref 互斥。已锁版本与显式 commit 必须一致。
-- `recipe` 缺省按包内文件选择;`options` 是字符串映射,缺省为空,不是 shell 代码。
-- import 在当前位置按序展开,不合并相同 URL 的不同应用。HTTPS conf 选择器可以解析,其远程资源获取仍需调用方准备。
+- `self` 为保留名。manifest 存在时按其 `order` 原样执行,不隐式插入 `self`;可声明零次或多次。仅无 manifest 时缺省为 `[self]`。
+- `ref` 是分支/tag 请求,缺省为仓库默认分支;`commit` 是完整 commit 直引,与 `ref` 互斥。无歧义需要时使用 `refs/heads/...` / `refs/tags/...`。明确指定 commit 后,update 不前进该条目。
+- `recipe` 缺省遵循既有选择顺序;`options` 为字符串映射,缺省 `{}`;不是 shell 命令或脚本片段。
+- `include` 缺省选择完整候选文件集,`exclude` 缺省 `[]`;存在 include 时先取候选集交集,再排除 exclude 匹配项。匹配对象为规范化后的输出相对路径;对补丁目标应用同一过滤规则,不通过补丁绕过过滤。
+- glob 使用 swift-glob 的 Pattern 解析和匹配:以根相对路径匹配,`*`/`?` 与字符类不跨 `/`,`**` 可跨目录且中间 `**/` 可匹配零层目录;区分大小写,通配符可匹配点文件,不启用 extglob、brace expansion 或反斜杠转义。绝对路径、父目录段、反斜杠与 NUL 被拒绝,语法错误在配置解析或规划时诊断。候选来自白名单/recipe 或用户树,include 不扩大原始候选范围。匹配与展开顺序不得依赖宿主目录枚举顺序或 locale。
+- import 在该位置展开,每个原生 import 以独立的解释器环境求值;内部重复 `source` 采用解释器语义。`variables` 为显式字符串映射,用于 conf 求值;库设置的虚拟 `root_dir` 不允许覆写,不隐式继承宿主进程环境。
 
-### 2.3 短名与本地覆写
+### 12.4 短名表与本地覆写
 
 ```yaml
+# pinewind.local.yaml
 version: 1
 names:
   emoji:
-    url: file:///path/to/rime-emoji
+    url: file:///Users/me/dev/rime-emoji
 ```
 
-合并次序是 manifest.names → 本地 names → 条目内联字段,后层胜。合并以字段为单位:未出现的字段继承,出现的字段整体替换;options 不逐键合并。可选字段的 `null` 清除继承值,回到该字段缺省。最终包条目必须有有效的绝对 URL。
+- 合并次序:manifest.names → 本地覆写 names → 条目内联字段,后层胜。短名只用于找声明,不成为缓存或锁的源码身份;本地覆写同样必须有顶层整数 version。
+- 沿用**字段级合并**:未出现字段继承;出现字段整体替换,例如 `options` 整个映射替换,不隐式逐键合并。
+- 对可选字段,`null` 明确清除继承值:recipe 回到自动选择、ref/commit 清除请求、options 回到 `{}`、include/exclude 回到缺省。最终必须有非空 URL,ref 与 commit 不得同时有效。
+- `file://` 表示实时本地文件树,不强制要求 git 仓库,不取包也不读取 HEAD。高优先级层将远端 URL 改为 file URL 时,清除该层未指定的继承 ref/commit;直连本地条目或覆写层显式携带有效 ref/commit 则诊断错误,不静默丢弃。不 hash 本地目录,编辑后可直接重新组合。
+- 不生成本地锁。先验证共享声明与 pinewind.lock,再把本地覆写应用到执行计划;共享锁只根据 manifest(包括其 names 段)生成,不被本机调试改向改写。
+- 本地覆写未改变远端来源与 ref/commit 请求时可继续使用已锁源码版本;改为其他远端时可直接在覆写中指定 commit,使用浮动 ref 则在开发模式解析为本次 commit。
+- 开发覆写启用时不承诺仅凭共享输入 commit 与共享锁复现本机结果。本机解析结果可留在会话或可抛弃的私有缓存中,不新增输入域文件;增量失效语义见 §13。
 
-`file://` 表示本机文件树,不要求 Git 仓库,不读取 HEAD,不 hash 目录或生成本地锁。覆写层改向 file URL 时,清除该层未指定的继承 ref/commit;显式为本地 URL 指定 ref/commit 是错误。
+### 12.5 解析锁的语义(不承诺内部格式)
 
-共享声明与本地覆写应分别加载:用 `Manifest.load(applyLocalOverrides: false)` 得到共享声明并验证锁,再用本地覆写形成执行声明。`Resolution` 不持久化本地源码条目。本地覆写不改写共享锁。
+pinewind.lock 只对外承诺解析结果与操作语义。下列信息由库内部表示,不是文件字段或序列化格式规定:
 
-### 2.4 文件过滤与 glob
+- 有序包应用及其规范化源码 URL、原始版本请求和最终 commit;同一 URL 可多次出现,不同 ref/recipe/options 不合并为同一条目。
+- 短名展开后的有效元数据与过滤规则,以及每个 import 的选择器、显式变量和完整有序展开结果。compose 消费锁中的展开结果,不重新下载可变远程 conf 来检查变化。
+- 独立下载资源的来源 URL、落盘相对路径和内容版本校验值。不记录缓存绝对路径、镜像 URL 或非必要取包时间。
 
-候选文件集来自用户树、默认白名单或 recipe。include 缺省允许完整候选集,exclude 缺省为空。先与 include 匹配集取交集,再排除 exclude;include 不扩大候选集。过滤同样应用于补丁目标。
+远程 conf 的 SHA-256 校验记录随 M2 的远程资源视图进入锁,覆盖 include 资源;M1 尚不提供远程 conf 获取或此类校验记录。
 
-匹配使用根相对路径,区分大小写:`*`、`?` 和字符类不跨 `/`,`**` 可跨目录,中间的 `**/` 可匹配零层目录。通配符可匹配点文件;不启用 extglob、brace expansion 或反斜杠转义。绝对路径、父目录段、反斜杠与 NUL 被拒绝,非法模式给出诊断。匹配顺序不依赖宿主 shell、locale 或目录枚举顺序。
+共享声明与锁的匹配采用规范化后的字段比较,不计算声明或目录树哈希;显式 commit 必须匹配,自动解析的 commit 不是用户请求字段。import 的来源变化通过显式 resolve/update 重新求值;锁内的展开结果在此之前保持固定。
 
-## 3. 来源身份与取包
+同一源码的同一 ref 在一次解析事务中只解析一次,避免请求之间分支移动。缺省 recipe 可由锁定 commit 的文件推导,不必把 recipe 内容重复塞进锁。纯 self 的声明变化也参与共享计划匹配;没有远程包/import 时不要求先生成锁。
 
-### 3.1 身份与传输地址
+新增远程条目未锁定或共享声明与锁不匹配时,compose 报告需要 resolve,不自动联网或改锁。resolve 保留仍匹配的条目所锁版本,为新增/改变的声明解析;update 重解析指定范围的 ref/import/独立资源。fetch 按锁取回,compose 从执行计划与已准备资源组合,sync 只部署结果。本地覆写遵循 §12.4。
 
-源码身份是规范化 URL + commit,与 recipe、options、过滤规则及条目位置分开。同一源码版本可复用快照,不同应用仍分别参与组合。
+**已确认:独立下载资源固定版本。** 仓库 commit 不约束 download_files 的独立资源。v1 对每个此类资源记录来源、包准备视图内的安全相对路径与实际落盘字节的 SHA-256 校验值,不对内容作换行或编码归一化;同一条目不允许多个下载占用同一路径。这是资源版本约束,不用于源码归档复现。
 
-HTTPS URL 规范化包括协议和主机名小写、去默认 443 端口、尾斜杠和 `.git` 后缀;GitHub owner/repo 路径同时转小写。URL 不携带凭证、查询或 fragment。file URL 只能指向本机绝对路径。
+- 首次 resolve 下载并记录校验值;后续 resolve 保留仍匹配的资源记录,仅为新增或改变的资源声明建立新记录,不因同一 URL 返回新内容而刷新已有校验值。
+- fetch 按锁下载或命中内容缓存,校验不符即失败,不接受新内容、不自动改锁。源 URL 已变化且旧内容不在缓存时,报告锁定资源无法取回。
+- update 可更新指定范围的资源,即使仓库 commit 未变也可更新资源版本;完整解析与下载成功后才提交新锁。
+- 资源在条目专属准备视图中覆盖源码,不修改共享 commit 源码缓存;compose 只消费准备好的资源。本地调试 recipe 若改变资源声明,在本次开发计划中重新解析与校验该资源,不写共享锁;普通本地文件编辑不重新下载或计算资源校验值。
+- 独立资源 SHA-256 承担资源版本约束;归档 SHA-256 仅承担本机下载缓存校验,同一 commit 的归档重生成不会因此改变包锁。
 
-传输地址与身份分开处理:GitHub 地址验证 owner/repo 并补 `.git`;非 GitHub 请求及锁记录保留调用方的 `.git` 后缀,按该地址访问远端。带/不带后缀的身份可共用缓存,Rx 与跨包寻址使用规范化身份。
+### 12.6 每目标同步状态(私有存储)
 
-### 3.2 HTTPS Git 后端
+此处只规定职责与恢复语义,不规定文件名、后缀或序列化布局。库需要保存:
 
-`PackageFetcher` 分开提供默认分支解析、ref 到 commit 的解析、源码快照准备和独立文件下载。`GitKitPackageFetcher` 使用 GitKit 的 libgit2 C 接口执行进程内 HTTPS Git 操作,不调用外部 git/ssh 命令。
+- 状态绑定的本机目标,位置由调用方注入;不得拿另一目标/机器的状态作为本目标删除依据。Pteromyini blue / green 各自保存状态。
+- 上次成功同步的受管文件路径集合;只拥有文件,不拥有整个目录。删文件后仅清理空目录,不递归删除未受管内容。
+- 同步中的待恢复计划及其不可变源文件视图。它们不进入共享锁,也不是用户配置文件。
 
-- refs 广播提供 HEAD、分支和 tag OID。附注 tag 使用 peeled OID。短名同时匹配分支和 tag 时诊断歧义,调用方可指定 `refs/heads/...` 或 `refs/tags/...`。
-- 完整 commit 不需要联网解析,准备源码时检查对象是否存在。
-- 对象缓存 fetch 普通分支与 tag 的历史,复用已有对象。锁定 commit 不在其中时尝试按 OID 获取;不可用或服务器拒绝时失败,不回退分支头。
-- 从精确 commit 的 tree 导出源码,关闭工作树过滤器,保留原始 blob 字节。候选快照完整后才发布,成功导出的 commit 保留私有引用。
-- 下载检查 HTTP 状态,拒绝降级到 HTTP 的重定向。凭证由同步回调提供,不写入源码 URL 或共享锁。
+新组合提供本次文件集,删除集 = 上次成功文件集 − 本次文件集。compose 不修改部署状态,成功 sync 才提交新账本。新结果与既有未受管文件同路径时默认冲突,明确接管由调用方参数授权;运行产物始终受保护。
 
-所有后端实例共享阻塞 I/O 的串行执行器,Git 操作及源码缓存发布在本进程内串行。独立文件下载等待 URLSession 时可并发。跨进程缓存协调尚未提供。
+目标中的受管文件是部署副本,后续 sync 以声明和输入域为准;不要求记录历史文件哈希或自动合并目标编辑。
 
-首次获取不是浅克隆,不承诺最小传输量。子模块不递归获取,gitlink 至多留下空目录;LFS pointer 按普通 blob 导出,不自动获取 LFS 对象。源码快照拒绝符号链接。
+开始写目标前先预检冲突、准备事务专属的不可变文件视图并持久化计划;旧账本仍代表上次成功状态。中断后依同一计划继续,新创建文件仍有归属记录;同目标操作互斥,未恢复前不启动新同步。
 
-### 3.3 缓存与资源准备
+全部文件操作成功后原子提交新账本,再清理事务视图。待恢复源视图缺失时报告需要修复状态,不继续删除目标文件。v1 默认向前恢复,不承诺自动回滚目标目录。
 
-缓存保存可复用的对象仓库和不可变 commit 快照。URL 元数据的 SHA-256 仅用于生成私有缓存路径键,不 hash 源码树或 commit 归档。完成记录与目录共同判断快照是否可复用;不完整候选可丢弃。缓存布局与记录编码属于实现细节。
+### 12.7 下载与执行缓存元数据(私有存储)
 
-`download_files` 不受仓库 commit 约束,每项资源需要 URL、目标相对路径和实际字节 SHA-256。组合前必须准备相应 `PinnedResource` 并核对内容;校验失败不接受新内容或自动改锁。
+缓存内部记录下载对象的来源、字节校验值和完整状态;实现可采用索引、数据库或其他存储,不规定每个下载对应一个独立 receipt 文件。归档校验不遍历或 hash 解包目录树。
 
-独立资源覆盖在条目专属准备视图中进行,不修改共享源码快照。后端下载 API 只返回字节,资源锁生成及准备视图的自动编排尚未提供。
+归档缓存损坏时按锁定 commit 重取;新归档字节校验值不同不改包锁。只有完成下载与必要解包的对象才可命中,ETag/Last-Modified 仅作为传输优化。
 
-## 4. plum conf 导入
+增量组合的计划、来源依赖、局部变更记录与可复用中间结果也属于可抛弃私有缓存,不进入 pinewind.lock;缓存缺失或版本不兼容时可全量组合。具体存储结构不在本阶段承诺。
 
-兼容边界是包描述符、conf 的求值语义和 recipe 数据。plum 的本机缓存布局与就地修改用户目录行为不属于 Pinewind 的接口。
+### 12.8 本轮需确认的取舍
 
-### 4.1 包描述符
+- include/exclude 是否同时过滤补丁目标(本草案推荐是)。
+- 每目标部署状态与向前恢复语义是否按 §12.6 定案,内部存储格式由实现确定。
+- I2/I5 对本地开发模式与来源不可取回时的适用范围需统一描述,不把缓存可重建等同于远端永久保留旧资源。
 
-```text
-<owner>/<repository>@<ref>:<recipe>:key=value,...
+
+## 13. 增量取包与组合的预设计(建议契约)
+
+本阶段应先保证全量与增量执行使用同一套语义,并为来源依赖与失效留出接口;不用现在定存储布局、目录树哈希或完整的增量算法。以下元数据全部属于私有状态,不改变 pinewind.lock 的公开承诺。
+
+### 13.1 全量组合是正确性基准
+
+给定相同锁、有效声明与本次读取的源文件快照,增量结果必须与全量组合一致,包括删除、覆盖、Rx 替换与有序补丁。复用只能跳过已证明仍有效的工作;不能把“读旧输出再补一下”作为组合语义。
+
+本次执行中的计划、文件选择与补丁读取绑定同一份已准备快照,不在不同阶段混用变化前后的输入。缓存缺失、失效依据不充分或中间版本不兼容时退回全量组合,不影响语义。
+
+### 13.2 分开规划与执行
+
+resolve/update 产生解析结果;fetch 准备源码与独立资源;compose 先形成有序操作计划,再决定哪些操作重算、哪些结果复用。操作至少区分整文件写入与对目标文件的补丁。
+
+计划知道每项操作的条目位置、源文件、目标路径、有效参数及前后依赖;可新增/移除的输出也在计划内。逻辑模型先定义,不必现在暴露 Swift 类型布局或持久化 schema。无变化时可返回既有已发布结果;有变化时准备候选结果,验证后发布。
+
+计划持有来源与操作,不驻留所有文件字节。M1 将引用文件首次读取时复制到计划持有的磁盘快照(APFS 可克隆,不使用硬链接),同一来源在计划内只捕获一次。规划完成后的本地编辑在下次计划生效;这不是整个工作树的原子快照,并发修改规划中的输入仍需调用方协调。快照根可由调用方注入,不得与输入源重叠,最后一个计划所有者释放后清理。执行按输出逐文件处理,普通拷贝、内容比较与独立资源校验不整文件装入内存;补丁处理仍可能占用单个目标文件的字节与 YAML 解析内存。
+
+### 13.3 为每个输出保留完整来源与有序操作链
+
+仅记录最终获胜 URL 不够。需要知道一个目标文件的各次写入/补丁来自哪个条目,以及它们的次序;同一 URL 的多次出现必须分别参与排序。
+
+例如 A 写入 x.yaml,B 随后覆盖 x.yaml:移除 B 后,结果应恢复 A 的内容;不能只把旧的 x.yaml 删除。对某条补丁的修改/撤销同样需要从适当基底重放剩余操作,不能假设可以从合并后的文件反向恢复。
+
+文件内容可从**新计划中的最后一次整文件写入**开始,按序重放后续补丁。更早、已被覆盖的内容变化可不触发该路径重算;新增/删除/重排条目时必须重新确定获胜写入与后续补丁链。若没有整文件基底,按 §6.2 从空的补丁目标创建语义开始。
+
+### 13.4 显式记录依赖与失效条件
+
+| 变化 | 至少需要重查的工作 |
+|---|---|
+| URL / commit / 独立资源版本 | 对应源码准备视图,及使用它的选择/写入/补丁操作 |
+| recipe / options / include / exclude | 该条目的文件选择、目标路径与补丁操作;同时考虑旧路径退出与新路径进入 |
+| 条目新增、删除、重排 | 受影响路径的获胜来源与补丁顺序,以及依赖被变更条目的跨包引用 |
+| 本地文件修改 | 读取该文件的操作及依赖它的目标 |
+| 本地文件新增、删除、改名 | 对应目录/glob 的匹配集合,以及输出的新增/删除/来源回退 |
+| 跨包所引用源码变化 | 所有读取该来源的其他条目,即使它们自身 commit 未变 |
+| 组合器/recipe/glob/模板语义版本变化 | 使用旧语义生成的私有执行缓存 |
+
+glob 不只依赖上次匹配到的文件,还依赖搜索范围与模式;否则新增匹配文件会漏入结果。跨包引用也不能仅依赖消费者自身 commit,必须绑定实际引用的源码快照/本地文件。
+
+### 13.5 区分不可变来源与本地可变文件
+
+- 远程源码复用依据为规范化 URL + commit;独立资源按已确认的版本校验值复用。后端/镜像变化不凭空改变源码身份,解包/准备语义变化则使相应私有缓存失效。
+- 本地 file:// 与 self 不生成内容锁,不计算目录树哈希。变更通知和文件元数据可用于缩小检查范围,不能在漏事件或证据不足时当成内容未变的证明;必要时重新枚举相关目录、直接比较源文件字节或重算受影响项。
+- 变更记录需覆盖新增、修改、删除与改名;目录路径集合的变化也要被观察。调用方传入的变化集合可以作为优化提示,不能使实际输入变化被静默忽略。
+- 复用中间结果还需比较操作参数、补丁基底与执行语义版本;commit 相同不代表不同 recipe/options 或不同排序的组合结果相同。
+
+### 13.6 发布与同步只提交完整结果
+
+增量结果在未发布的候选代次中构造;可复用已发布的不可变文件,但任何补丁/写入前必须获得独立可写副本,不通过硬链接修改仍在使用的文件。
+
+全部成功后原子发布候选结果及其文件集;失败时保留上一份完整结果与成功账本。sync 根据新旧文件集计算新增/修改/删除,没有变化的路径可跳过写入,事务恢复仍遵循 §12.6。并发 compose/update/sync 不能相互覆盖同一份正在构造的状态;具体锁与代次机制由实现期选择。
+
+### 13.7 后端接缝与 v1 实现边界
+
+取包后端的组合层契约是“按锁定源码准备可读取的完整快照”(§5.2 prepareSource),HTTP 归档或 git/libgit2 如何取得该快照属于后端实现,不要求所有后端都返回 tarball。来源间差异可以作为可选优化信息,不是必需输入。
+
+需区分三类增量:
+
+- **取包复用**:不重新下载已完整缓存的 URL + commit,独立资源缓存命中时不重取;v1 可做。
+- **增量传输**:GitKit 后端通过 fetch 协商复用对象;不承诺任意服务器与引用变化下的最小传输量。
+- **增量组合与同步**:复用未受影响的输出/中间结果,重放受影响路径的操作链,只写变化的目标;可在全量组合模型之上逐步实现。
+
+本阶段必要交付是操作计划、来源/依赖与失效边界、完整结果发布契约。实现可先支持取包缓存与无变化直接返回,再增加按路径重算;无需现在承诺任意操作下的最小重算集。
+
+### 13.8 验证方向
+
+实现期用同一输入的增量结果与全量结果做差异核对,覆盖删包后来源回退、顺序调整、补丁撤销/同 Rx 替换、glob 新增匹配、跨包源变更、本地编辑与缓存丢失。比较实际输出文件集与内容即可,不引入目录树哈希作为正确性契约。
+
+
+## 14. M1 首轮实现(2026-10-13)
+
+独立 Swift Package `Pinewind` 提供 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,glob 使用 davbeck/swift-glob 1.x 的 Pattern,这些产品依赖都不作 macOS 条件化。下文 M1/M2 的原始交付验证数字记录的是拆包前的 RimeKit 聚合测试,独立包验证与平台边界见 §16。
+
+已实现:
+
+- Manifest.parse/load:version 必填,合入 names,字段级本地覆写与 null 清除,重复键/未知字段/错误类型诊断,保留有序重复条目。
+- PlumImporter:preset/extra/all 内置包标识列表、本地 conf 的独立沙盒求值、只读挂载、重复 source、数组重置/追加、参数展开及 plum 描述符翻译。内置列表无需 resource bundle;自编测试夹具位于测试源码与测试目标自己的资源 bundle 中,多文件场景保留磁盘目录结构并复制到独立临时目录使用,不拷贝上游文件。无宿主执行与网络命令注册;source 预算为至多 64 次、每文件 1 MiB、累计 4 MiB,默认求值超时 5 秒。
+- CompositionPlanner:任意 self 文件树、默认白名单(含 ocd2)、默认/显式 recipe、glob、预备源码间的兼容引用、字面 option 替换、独立资源版本校验、有序写入/补丁操作链。计划持有磁盘快照引用与目录成员,不驻留全量源字节,不 hash 目录树;资源校验按块读取。
+- Composer:逐文件执行全量语义操作链、同目标同 Rx 替换、后续整文件覆盖、净态候选输出与 Darwin 原子目录交换;不保留全量渲染字节,普通文件直接拷贝并按块比较。对相同结果直接返回旧代,有变化时报告新增/变化/退出路径。输入与输出根不得重叠,当前源文件视图不接受符号链接。
+- Resolution/LockedPackage:解析结果的检查、声明匹配与 pinewind.lock 的私有编解码/原子写入;同 URL 的不同应用保留,本地工作树不写共享内容锁。
+- PackageFetcher/PackageSourceSnapshot:来源解析与完整快照准备的后端接口,组合器可消费调用方传入的 PreparedPackage。
+
+调用方可先使用本地包,或自行提供已经取回的远端快照:
+
+```swift
+let manifest = try Manifest.load(inputRoot: input)
+let expanded = try await PlumImporter().expand(manifest, inputRoot: input)
+let plan = try CompositionPlanner().plan(expanded, inputRoot: input, packages: prepared)
+let result = try await Composer().compose(plan, inputRoot: input, outputRoot: composed)
 ```
 
-owner 缺省为 `rime`;裸名 `foo` 展开为 `rime/rime-foo`,已带 `rime-` 前缀时不重复添加。ref、recipe 和 options 可省略;空 owner/repo/ref 段及重复 option 键报错。options 作为字面字符串翻译为 `PackageRequest`,不经 shell eval。
+当前边界:
 
-`:preset`、`:extra`、`:all` 展开为有序内置列表。本地 conf 使用输入域相对路径。原生短名表与 plum 裸名展开互不替代。
+- GitKitPackageFetcher 已提供联网 ref 解析、HTTPS Git 源码准备与独立 HTTPS 下载。远程 conf 资源视图、资源锁自动生成/条目视图准备及自动 resolve/update 编排仍属于 M2;独立资源必须同时提供已固定的版本记录。
+- 每目标 sync/事务恢复、CLI pinewind 与 Pteromyini 接入尚未实现。
+- 本轮增量仅包括未变化结果不发布、未变化文件复用与变更报告;仍枚举源文件并执行全量操作链,没有实现持久化依赖缓存或最小重算集合。
+- 同一输出根由同一个 Composer actor 串行操作;跨实例/跨进程的目标协调留待统一管理入口实现。
+- 目前补丁目标已有 __patch 时要求其为块式序列。其他 YAML 表达形式的保真转换需在后续兼容 fixture 中补足。
+- recipe 补丁体为语义等价重序列化,不承诺保持上游原始排版;模板 `${name}`/`$name` 接受显式空值,`${name:-default}` 对缺失或空值使用缺省。没有提供值且没有缺省时诊断错误。
 
-### 4.2 沙盒求值
+验证:新增 37 项 Pinewind 行为测试;全包四个测试目标共 147 项通过;覆盖超时取消、折叠 install_files、命名下载、补丁目标创建、import/self 交错次序、显式空模板值、版本诊断与 256 MiB 词典组合。磁盘快照回归覆盖同一来源复用、规划后原地编辑、recipe 固定、资源校验后编辑及计划释放清理。glob 回归覆盖目录层级、字符类、点文件、非法模式和 include/exclude 一致性。PinewindCore generic iOS Simulator 构建通过。SwiftPM 当前会报告 SwiftXPC 与 SwiftBash 家族传递依赖使用两个 swift-syntax 仓库 URL 的 identity 警告,解析到同一个 603.0.2 版本,不影响本轮构建;后续需统一上游 URL。
 
-`PlumImporter` 使用 SwiftBash 的 `BashInterpreter` 求值,完成后读取索引数组 `package_list`,再翻译描述符。数组初始化、重置、追加、引号、参数展开、控制流和重复 source 均采用解释器语义。
+## 15. GitKit HTTPS Git 后端(2026-10-14)
 
-每个原生 import 使用独立环境。变量仅由 `variables` 显式提供;库保留 `root_dir`,不继承宿主环境。include 资源位于只读挂载域,不允许写宿主输入、符号链接逃逸、宿主进程执行或网络访问。权限边界由挂载和命令能力控制,不另设 bash 语法子集。
+新增 `GitKitPackageFetcher`,实现 §5.2 的引用解析、源码准备与独立 HTTPS 下载接口。GitHub 源码获取改为 Git 协议,源码锁仍锚定完整 commit,不新增目录树或归档哈希。凭证以 `GitCredentialProvider` 注入,可返回 `GitCredentials.token(...)` 或用户名/口令,不依赖外部 credential helper。组合器仍消费 `PreparedPackage`,调用方用源码快照和已锁资源准备条目视图。
 
-默认求值超时为 5 秒,可由调用方配置。一次求值最多读取 64 次 source、单文件 1 MiB、累计 4 MiB;重复读取计入预算。失败、超时或取消中止导入,不保留部分展开结果。
+新增 13 项 Git 后端测试,使用自编文件树与 libgit2 建仓库,不调用 git CLI。覆盖分支/附注 tag 与歧义、精确 commit 与新版本 fetch、缓存复用/离线重建、祖先 commit 的私有引用保留、未完成快照替换、实例间串行缓存访问、符号链接失败与旧视图保护、取消、不合法来源与独立下载的 HTTP 状态。地址回归检查 manifest 与锁往返后传入 advertise/fetch 的实际 URL,覆盖非 GitHub 带/不带 `.git` 后缀与 GitHub 规范化,并检查缓存身份复用;组合回归覆盖后缀差异下的跨包寻址与 Rx 身份。联网用例通过 `PINEWIND_NETWORK_TESTS=1` 显式启用,实际获取 rime-prelude 并对照同 commit 的 HTTPS 文件字节。
 
-远程 conf 自动获取尚未提供。调用方可准备完整的只读资源视图,使用 `evaluate(file:resourceRoot:variables:)`;解释器本身不负责联网下载 include。
+验证:全包测试报告计数 160 项(包含既有跳过项),联网用例实际执行通过;iOS Simulator 的库与测试目标 `build-for-testing` 通过,部署下限仍为 iOS 16。独立调用方在清空 PATH、禁止 fork/exec 的 sandbox 中完成 HTTPS 引用解析、fetch 与源码导出。GitKit 的高层 Archive product 不进入 Core 构建/链接闭包;SwiftPM 的 swift-syntax URL identity 警告仍为已有问题。
 
-## 5. Recipe 与补丁
+## 16. 独立包迁移(2026-10-14)
 
-### 5.1 文件选择
+Pinewind 从 RimeKit `ee75bfc` 提取为同级的独立仓库,保留 Pinewind 源码、测试、设计文档及 MPL-2.0 许可证的相关 Git 历史。独立 manifest 提供 `PinewindCore` library product,直接依赖 Yams、SwiftBash 的 BashInterpreter、swift-glob 与 GitKit 的 CGitKit;不包含 librime 或 SwiftXPC。RimeKit 删除对应 product、target、源码、测试及直接依赖,两者不互相依赖。调用方分别消费两个包,由应用层把组合目录交给引擎部署。
 
-选择顺序是显式 `<recipe>.recipe.yaml` → 包内默认 `recipe.yaml` → 默认白名单。显式选择的 recipe 必须存在,其 `recipe.Rx` 必须与选择名一致。
+迁移保持模块名、公开 API、用户配置与锁文件名、缓存身份和依赖版本。源码与测试的 35 个文件按迁移基点逐字节核对,测试资源继续由 PinewindCoreTests 自己的 Bundle.module 提供;设计文档中的旧聚合测试数字仅为历史记录。
 
-默认白名单只包含顶层 `.yaml`、`.txt`、`.gram` 与单层 `opencc/` 中的 `.json`、`.ocd`、`.ocd2`、`.txt`;排除 `.custom.yaml`、`.recipe.yaml` 和 `recipe.yaml`。其他子目录不递归选取。
+CI 参照 RimeKit 设置 Sources/Tests 严格格式检查、macOS 全包测试、generic iOS Simulator 构建与模拟器测试,使用独立包的 `Pinewind` scheme,收集 xcresult、测试日志与崩溃报告。Release 对 `v*.*.*` 标签检查 main 可达性,构建与测试后生成 GitHub Release;Dependabot 每周检查 SwiftPM 与 Actions 更新。独立包继续保持 macOS 15 / iOS 16 的已验证基线;Linux / Windows 属于后续移植工作,需先适配 Darwin 目录交换、哈希与文件系统语义,再建立平台门禁。
 
-`install_files` 使用 glob 列表,也接受按行或折叠字符串表达的模式。显式模式没有匹配文件时给出诊断。`../<包>/<pattern>` 在已准备的来源间寻址,不作为输出路径:来源需位于同一规范化 URL 父路径,包名剥 `rime-` 前缀。同一 URL + commit 的重复准备不制造歧义;缺失或同时匹配多个版本时报错,不自动取回未准备的包。
-
-`download_files` 接受 HTTPS URL 或 `<filename>::<url>`;目标必须是安全的相对路径,同一 recipe 内不得重复。其资源版本与准备规则见第 3 节。
-
-### 5.2 Option 替换
-
-options 必须在 `recipe.args` 中声明。补丁目标和补丁体支持 `$name`、`${name}` 和 `${name:-default}`,替换值不再次解析为 shell 代码。
-
-无缺省的变量接受显式空串;缺值时报错。`:-` 对缺失或空值采用缺省。未声明变量时报错。展开后的目标仍须通过相对路径校验。
-
-补丁体以 YAML 序列表示,经解析、语义等价重序列化和 option 替换后使用,不承诺原始缩进、引号或折叠样式的逐字保真。
-
-### 5.3 应用次序与 Rx
-
-每个包条目先安装文件,立即应用其补丁,再进入下一条目。补丁基底是该时刻组合结果中的同名文件,可来自当前包、self 或先前条目。
-
-- 目标缺失时创建父目录与 `__patch` 段;目标存在但没有该段时补建。
-- Rx 标记采用 `<owner>/<repo>:<recipe>:<options>` 形态,由规范化 URL 与有效参数推导。
-- 同一目标内同一 Rx 的旧块全部删除,本次块在段末追加;不同 Rx 按应用次序保留。旧块也可能来自 self 或拷入的包文件。
-- 后续整文件写入可覆盖此前所有补丁,不在最后重新补回。self 放最后时,其同名文件决定结果。
-- 未被替换的块及注释保留原文;输入文件不被回写。
-
-例如 `[A, self, B]`:A 安装并补丁 → self 覆盖同名文件 → B 安装并补丁。B 只提供补丁时作用于 self 的基底;B 安装同名文件时先覆盖基底。
-
-现有 `__patch` 需为块式 YAML 序列;其他形式的保真转换尚未支持。
-
-## 6. 规划、执行与发布
-
-`CompositionPlanner` 为每个目标保留完整有序操作链,包括已被后续写入覆盖的来源,以支持删除条目、重排和来源回退。计划记录来源与操作,不驻留全部文件字节。
-
-规划时将首次引用的文件与 recipe 捕获到计划持有的磁盘快照,同一来源只捕获一次。原地编辑在下次规划生效;规划期间并发编辑整个输入树仍需调用方协调。快照根可由调用方注入,不得与输入来源重叠,最后一个计划所有者释放后清理。快照不通过硬链接共享可变输入。
-
-`Composer` 按输出文件执行操作链,普通文件复制和比较按文件或分块处理;补丁仍可能占用单个目标的字节与 YAML 解析内存。未变化结果返回原输出,有变化时生成完整候选代次后原子发布,并报告变化、删除与复用路径。
-
-输入、输出及快照根不得违规重叠。self 排除 `.git/`、`.DS_Store`、`*.local.*`、manifest、本地覆写和锁等库元数据。源码视图不接受符号链接。
-
-同一输出根应交给同一个 Composer actor。跨 Composer 实例或进程的输出协调尚未提供。跨平台发布实现须保持完整代次切换语义,不能用逐文件覆盖活跃目录替代。
-
-## 7. 锁与现有接口边界
-
-`Resolution` 保存共享声明、完整有序展开结果和 `LockedPackage`;每个锁定包带源码请求、commit 与独立资源版本。相同 URL 的多次应用不能合并为一条声明。
-
-锁不保存本机路径、认证、部署账本、执行缓存或取包时间。声明匹配比较经过配置解析的字段,不计算声明或目录树哈希。显式 commit 与锁不一致时报错。
-
-库提供锁的读取、验证与原子写入 API,不承诺内部序列化结构。不支持或损坏的锁给出诊断,不静默重新解析为新版本。
-
-现有接口分工:
-
-| 接口 | 职责 |
-|---|---|
-| `Manifest.parse/load` | 配置解析、短名合并与本地覆写 |
-| `PlumImporter.expand/evaluate` | 内置列表与已准备 conf 的有序展开 |
-| `PackageFetcher` / `GitKitPackageFetcher` | 引用解析、源码快照准备、独立 HTTPS 下载 |
-| `PreparedPackage` | 调用方交给组合层的来源与资源视图 |
-| `CompositionPlanner.plan` | 选择文件并形成快照绑定的操作计划 |
-| `Composer.compose` | 生成、发布结果并返回变更报告 |
-| `Resolution` / `LockedPackage` | 解析结果、声明匹配与锁读写 |
-
-planner 不自动取包、读取共享锁或生成资源版本;调用方需先展开 import,准备远端包与独立资源并验证锁。自动 resolve/update 编排、远程 conf 资源视图、目标 sync 和 CLI 尚未提供。
-
-## 8. 解析与更新编排(预设计)
-
-resolve 保留仍匹配声明的锁定版本,只解析新增或改变的声明;update 重解析指定范围的浮动 ref、conf 与独立资源,显式 commit 不前进。fetch 按锁准备来源,compose 消费已准备输入,sync 只部署结果;后三者不修改共享锁。
-
-同一源码 ref 在一次解析事务中只解析一次,避免分支在请求间移动。完整解析、下载与校验成功后才发布新锁。共享声明与锁不匹配时要求显式 resolve,不通过 compose 自动联网或改锁。
-
-远程 conf 的锁定结果应覆盖其显式变量、完整展开顺序及 include 资源的 SHA-256。锁内展开固定后,compose 不重新下载可变清单检查变化。
-
-独立资源首次解析建立校验值,后续 resolve 保留仍匹配的记录。相同 URL 返回新内容不自动刷新版本;fetch 校验失败中止,只有 update 可接受新版本。资源在锁定字节已不可取回且无缓存时报告失败。
-
-本地覆写在共享锁验证后应用。保留远端来源及版本请求时沿用锁定 commit;改为其他远端时使用显式 commit,或为本次开发执行解析浮动 ref。会话解析结果可留在可抛弃私有缓存中,不生成本地锁。开发 recipe 改变资源声明时需为本次计划重新准备并校验资源,不改共享锁。
-
-## 9. 目标同步与恢复(预设计)
-
-每个本机目标保存独立的私有受管文件账本,状态绑定目标位置,不同机器或目标不能互作删除依据。只管理文件,不拥有整个目录。删除集合是上次成功文件集减去本次文件集;仅清理删除后为空的目录。
-
-未受管文件默认不修改。新结果与未受管文件同路径时报告冲突,显式接管由调用方授权。userdb、build、installation.yaml、user.yaml 等引擎运行状态始终受保护。账本不进入共享锁,compose 不修改部署状态。
-
-写目标前预检冲突、准备事务专属的不可变文件视图并持久化恢复计划;旧账本继续表示上次成功状态。同目标操作互斥,中断后依原计划向前恢复,未恢复前不启动新同步。全部文件操作成功后原子提交新账本,再清理事务视图。恢复视图缺失时报告状态损坏,不继续删除目标;不承诺自动回滚目录。
-
-## 10. 增量执行(预设计)
-
-### 10.1 正确性基准与来源链
-
-同一声明、锁与源快照下,增量结果须与全量结果一致,包括文件集、删除、覆盖、Rx 替换及诊断语义。缓存缺失、失效依据不足或语义版本不兼容时退回全量执行。
-
-每个输出保留完整来源与有序操作链。例如 A 写 x.yaml,B 覆盖:移除 B 后应恢复 A,不能只删旧输出。补丁修改或撤销从相应基底重放,不从已合并文件反向恢复。
-
-结果内容可以从新计划中最后一次整文件写入开始重放后续补丁;被覆盖贡献的必要校验不能因此略去。新增、删除或重排条目时重新确定获胜写入与补丁链;没有文件基底时使用补丁目标创建语义。
-
-### 10.2 依赖与失效
-
-| 变化 | 需要重查的范围 |
-|---|---|
-| URL、commit、资源版本 | 对应准备视图及读取它的操作 |
-| recipe、options、过滤规则 | 文件选择、目标路径及补丁;包含旧路径退出与新路径进入 |
-| 条目新增、删除、重排 | 获胜来源、补丁顺序及跨包消费者 |
-| 本地文件修改 | 读取该文件的操作及其目标 |
-| 文件新增、删除、改名 | 目录/glob 匹配集及来源回退 |
-| 跨包来源变化 | 所有读取该来源的条目 |
-| 执行语义版本变化 | 用旧语义生成的私有缓存 |
-
-glob 同时依赖模式、搜索范围与目录成员,不能只记录上次匹配文件。跨包操作绑定实际读取的源码版本,不能只看消费者自己的 commit。
-
-本地变更通知、文件元数据和调用方变化集仅作优化提示;漏事件或证据不足时重新枚举、比较字节或重算,不以目录树哈希代替这些语义。复用中间结果还需比较参数、补丁基底与执行语义版本。
-
-### 10.3 缓存与发布
-
-增量来源依赖、变化记录及中间结果是可抛弃私有状态,不进入锁。它们与不可变源码快照分开管理;存储布局不属于用户配置协议。
-
-复用的文件在修改前必须成为独立可写副本,不能通过硬链接修改已发布结果。完整候选验证成功后才发布文件集和内容,同步账本仍只在同步成功后提交。
-
-当前实现复用取包对象、完整源码缓存与未变化输出,仍按全量组合语义执行操作链;不承诺最小重算集合或持久化增量依赖缓存。
+本次独立包验证:macOS 报告 50 项测试通过,真实 GitHub HTTPS 用例实际执行;generic iOS Simulator `build-for-testing` 与 iOS 模拟器 `test` 通过,模拟器报告 49 项通过、1 项联网用例按默认开关跳过、0 失败;格式检查及 actionlint 通过,CI 的模拟器自动选择脚本实际执行成功。移除模块后的 RimeKit 报告 110 项测试(包含既有跳过项)通过,其 iOS 构建保持通过。验证来自本地执行,GitHub 工作流运行与 Release 发布由仓库接入远端后触发。
