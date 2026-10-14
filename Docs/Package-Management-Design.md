@@ -649,6 +649,6 @@ Pinewind 从 RimeKit `ee75bfc` 提取为同级的独立仓库,保留 Pinewind �
 
 迁移保持模块名、公开 API、用户配置与锁文件名、缓存身份和依赖版本。源码与测试的 35 个文件按迁移基点逐字节核对,测试资源继续由 PinewindCoreTests 自己的 Bundle.module 提供;设计文档中的旧聚合测试数字仅为历史记录。
 
-CI 参照 RimeKit 设置 Sources/Tests 严格格式检查、macOS 全包测试、generic iOS Simulator 构建与模拟器测试,使用独立包的 `Pinewind` scheme,收集 xcresult、测试日志与崩溃报告。Release 对 `v*.*.*` 标签检查 main 可达性,构建与测试后生成 GitHub Release;Dependabot 每周检查 SwiftPM 与 Actions 更新。独立包继续保持 macOS 15 / iOS 16 的已验证基线;Linux / Windows 属于后续移植工作,需先适配 Darwin 目录交换、哈希与文件系统语义,再建立平台门禁。
+独立包继续保持 macOS 15 / iOS 16 的已验证基线;Linux / Windows 属于后续移植工作,需先适配 Darwin 目录交换、哈希与文件系统语义,再建立平台门禁。变更流程、测试夹具及 CI/发布维护约定见 [贡献指南](../CONTRIBUTING.md)。
 
 本次独立包验证:macOS 报告 50 项测试通过,真实 GitHub HTTPS 用例实际执行;generic iOS Simulator `build-for-testing` 与 iOS 模拟器 `test` 通过,模拟器报告 49 项通过、1 项联网用例按默认开关跳过、0 失败;格式检查及 actionlint 通过,CI 的模拟器自动选择脚本实际执行成功。移除模块后的 RimeKit 报告 110 项测试(包含既有跳过项)通过,其 iOS 构建保持通过。验证来自本地执行,GitHub 工作流运行与 Release 发布由仓库接入远端后触发。
