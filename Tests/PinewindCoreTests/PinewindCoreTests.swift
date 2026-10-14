@@ -470,6 +470,16 @@ struct CompositionTests {
       #expect(generations.count == 1)
     }
 
+    @Test func malformedJunctionPathsThrowTypedErrors() throws {
+      let urls = [
+        try #require(URL(string: "https://example.com/output")),
+        URL(fileURLWithPath: FileManager.default.temporaryDirectory.path + "/bad\0path"),
+      ]
+      for url in urls {
+        #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
+      }
+    }
+
     @Test func emptyOutputDirectoryIsAdoptedAsAJunction() async throws {
       let f = try Fixture()
       defer { f.remove() }

@@ -18,6 +18,7 @@
 
     static func validate(_ output: URL) throws {
       if let target = try currentTarget(output) {
+        let target = try resolvedURL(target)
         guard
           try canonicalPath(target.deletingLastPathComponent())
             == canonicalPath(storage(for: output)),
@@ -89,10 +90,10 @@
     }
 
     private static func nativePath(_ url: URL) throws -> String {
-      guard url.isFileURL,
+      guard url.isFileURL, !url.path.contains("\0"),
         let representation = url.withUnsafeFileSystemRepresentation({ pointer in
           pointer.map { String(cString: $0) }
-        }), !representation.contains("\0")
+        })
       else { throw PinewindError("composition path has no filesystem representation") }
       var path = representation.replacingOccurrences(of: "/", with: "\\")
       if path.hasPrefix("\\"), path.dropFirst().dropFirst().hasPrefix(":") { path.removeFirst() }
