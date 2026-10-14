@@ -461,7 +461,7 @@ struct CompositionTests {
       let first = try f.read("dicts/0.txt")
       #expect(first == bytesA || first == bytesB)
       for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
-      let active = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       #expect(FileManager.default.fileExists(atPath: active.path))
     }
 
@@ -493,11 +493,11 @@ struct CompositionTests {
       if hasFiles { try f.write("default.yaml", "value: repaired\n", in: f.input) }
       let plan = try f.plan([.userFiles(FileFilter())])
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
-      let old = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      let old = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       try FileManager.default.removeItem(at: old)
       #expect(!FileManager.default.fileExists(atPath: f.output.path))
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
-      let repaired = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      let repaired = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       #expect(repaired != old)
       #expect(FileManager.default.fileExists(atPath: repaired.path))
       if hasFiles { #expect(try f.read("default.yaml") == "value: repaired\n") }
@@ -509,7 +509,7 @@ struct CompositionTests {
       try f.write("default.yaml", "value: alias\n", in: f.input)
       let plan = try f.plan([.userFiles(FileFilter())])
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
-      let active = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       let alias = f.root.appendingPathComponent("parent-alias")
       try FileManager.default.createDirectory(at: alias, withIntermediateDirectories: false)
       try WindowsDirectoryPublisher.redirect(alias, to: f.root)
