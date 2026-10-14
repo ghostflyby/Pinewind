@@ -52,12 +52,7 @@ jobs:
           key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
           restore-keys: |
             ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
-          deriveddata-directory: ci-output/DerivedData
-          sourcepackages-directory: ci-output/SourcePackages
           swiftpm-package-resolved-file: Package.resolved
-          swiftpm-cache-key: ios-spm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
-          swiftpm-cache-restore-keys: |
-            ios-spm-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-
           restore-mtime-targets: |
             Tests/**/*
             Package.resolved
@@ -87,9 +82,6 @@ jobs:
           spm-package: .
           scheme: Pinewind
           destination: platform=iOS Simulator,id=${{ env.SIM_ID }}
-          action: test
-          derived-data-path: ci-output/DerivedData
-          cloned-source-packages-path: ci-output/SourcePackages
           result-bundle-path: ci-output/Pinewind.xcresult
           parallel-testing-enabled: false
           disable-automatic-package-resolution: true
