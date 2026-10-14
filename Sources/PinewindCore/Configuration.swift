@@ -124,7 +124,7 @@ public struct SourceIdentity: Hashable, Codable, Sendable {
 
   static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
-      guard url.path.hasPrefix("/") else {
+      guard !url.path.hasPrefix("~"), (url.path as NSString).isAbsolutePath else {
         throw PinewindError("file sources require absolute paths")
       }
       guard url.host == nil || url.host == "" || url.host == "localhost" else {

@@ -17,8 +17,9 @@ private struct Fixture {
   var b: URL { root.appendingPathComponent("b") }
 
   init(_ name: String? = nil) throws {
-    root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "pinewind-test-" + UUID().uuidString)
+    root = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+      .appendingPathComponent(
+        "pinewind-test-" + UUID().uuidString)
     let fm = FileManager.default
     try fm.createDirectory(at: root, withIntermediateDirectories: true)
     do {
@@ -370,6 +371,35 @@ struct CompositionTests {
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     #expect(changed.changedPaths == ["default.yaml"])
     #expect(try f.read("default.yaml") == "value: new\n")
+  }
+
+  @Test func crlfPatchMarkersAreReplacedAndLineEndingsArePreserved() throws {
+    let original = Data("__patch:\r\n# Rx: demo {\r\n  - old: true\r\n# }\r\n".utf8)
+    let bytes = try PatchRenderer.apply(original, rx: "demo", body: "- new: true")
+    let text = try #require(String(data: bytes, encoding: .utf8))
+    #expect(!text.contains("old: true"))
+    #expect(text.components(separatedBy: "# Rx:").count == 2)
+    #expect(text.contains("  - new: true\r\n"))
+    #expect(try PatchRenderer.apply(bytes, rx: "demo", body: "- new: true") == bytes)
+  }
+
+  @Test func compositionRejectsFilesystemRootAndCaseAliases() throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    #expect(throws: PinewindError.self) {
+      try SafePath.validateRoots(input: f.input, output: URL(fileURLWithPath: "/"), sources: [])
+    }
+    #if os(Windows)
+      let alias = URL(fileURLWithPath: f.input.path.uppercased())
+      #expect(throws: PinewindError.self) {
+        try SafePath.validateRoots(
+          input: f.input, output: alias.appendingPathComponent("out"), sources: [])
+      }
+      try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
+      try f.write("keep.txt", "keep", in: f.output)
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(try f.read("keep.txt") == "keep")
+    #endif
   }
 
   @Test func publishingNeverRemovesTheVisibleGeneration() async throws {

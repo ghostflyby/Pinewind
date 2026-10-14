@@ -74,12 +74,13 @@
     }
 
     private static func withHandle<T>(
-      _ url: URL, access: DWORD, _ body: (HANDLE) throws -> T
+      _ url: URL, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
     ) throws -> T {
       let handle = nativePath(url).withCString(encodedAs: UTF16.self) {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
-          DWORD(OPEN_EXISTING), DWORD(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS),
+          DWORD(OPEN_EXISTING),
+          DWORD(FILE_FLAG_BACKUP_SEMANTICS) | (following ? 0 : DWORD(FILE_FLAG_OPEN_REPARSE_POINT)),
           nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
@@ -87,6 +88,37 @@
       }
       defer { _ = CloseHandle(handle) }
       return try body(handle)
+    }
+
+    /// Resolve the nearest existing ancestor through the filesystem, including
+    /// short names, junctions and case aliases, then append absent components.
+    static func canonicalPath(_ url: URL) throws -> String {
+      var ancestor = url.standardizedFileURL
+      var missing: [String] = []
+      while !FileManager.default.fileExists(atPath: ancestor.path) {
+        let parent = ancestor.deletingLastPathComponent()
+        guard parent.path != ancestor.path else {
+          throw PinewindError("cannot resolve composition path")
+        }
+        missing.append(ancestor.lastPathComponent)
+        ancestor = parent
+      }
+      var resolved = try withHandle(ancestor, access: 0, following: true) { handle in
+        var buffer = [WCHAR](repeating: 0, count: 32_768)
+        let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
+        guard count > 0, Int(count) < buffer.count else {
+          throw PinewindError("cannot resolve composition path (Windows error \(GetLastError()))")
+        }
+        var path = String(decoding: buffer.prefix(Int(count)), as: UTF16.self)
+        if path.hasPrefix("\\\\?\\UNC\\") {
+          path = "\\\\" + path.dropFirst(8)
+        } else if path.hasPrefix("\\\\?\\") {
+          path.removeFirst(4)
+        }
+        return URL(fileURLWithPath: path)
+      }
+      for component in missing.reversed() { resolved.appendPathComponent(component) }
+      return resolved.standardizedFileURL.path.lowercased()
     }
 
     private static func currentTarget(_ output: URL) throws -> URL? {

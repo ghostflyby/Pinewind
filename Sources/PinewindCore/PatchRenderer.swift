@@ -18,7 +18,9 @@ enum PatchRenderer {
     } else {
       text = ""
     }
-    var lines = text.components(separatedBy: "\n")
+    let newline = text.contains("\r\n") ? "\r\n" : "\n"
+    var lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+      .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
     if lines.last == "" { lines.removeLast() }
     // Match Rx markers literally, including metacharacters and option ordering.
     let start = "# Rx: " + rx + " {"
@@ -68,7 +70,7 @@ enum PatchRenderer {
     }
     let content = [start] + body.components(separatedBy: "\n").map { "  " + $0 } + ["# }"]
     lines.insert(contentsOf: content, at: end)
-    let output = lines.joined(separator: "\n") + "\n"
+    let output = lines.joined(separator: newline) + newline
     let mapping = try reader.mapping(reader.document(output))
     guard mapping["__patch"]?.sequence != nil else {
       throw PinewindError("patch produced invalid __patch data")

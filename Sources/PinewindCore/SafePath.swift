@@ -18,22 +18,41 @@ enum SafePath {
     try validate(path)
     let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
     let candidate = canonicalRoot.appendingPathComponent(path)
-    let canonical = candidate.resolvingSymlinksInPath()
-    guard canonical.path.hasPrefix(canonicalRoot.path + "/") else {
+    guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
       throw PinewindError("path escapes its source root: \(path)")
     }
     return candidate
   }
 
   static func validateRoots(input: URL, output: URL, sources: [URL]) throws {
+    guard !output.lastPathComponent.isEmpty, output.lastPathComponent != "/" else {
+      throw PinewindError("composition output must not be a filesystem root")
+    }
+    #if os(Windows)
+      guard !output.lastPathComponent.hasSuffix(":") else {
+        throw PinewindError("composition output must not be a filesystem root")
+      }
+    #endif
     let roots = [input] + sources
-    let out = output.standardizedFileURL.resolvingSymlinksInPath().path
+    let out = try canonical(output)
     for root in roots {
-      let path = root.standardizedFileURL.resolvingSymlinksInPath().path
-      guard path != out, !out.hasPrefix(path + "/"), !path.hasPrefix(out + "/") else {
+      let path = try canonical(root)
+      guard path != out, !out.hasPrefix(prefix(path)), !path.hasPrefix(prefix(out)) else {
         throw PinewindError("composition root must not overlap any input source")
       }
     }
+  }
+
+  private static func prefix(_ path: String) -> String {
+    path.hasSuffix("/") ? path : path + "/"
+  }
+
+  private static func canonical(_ url: URL) throws -> String {
+    #if os(Windows)
+      return try WindowsDirectoryPublisher.canonicalPath(url)
+    #else
+      return url.standardizedFileURL.resolvingSymlinksInPath().path
+    #endif
   }
 
   static func files(in root: URL) throws -> [String] {
