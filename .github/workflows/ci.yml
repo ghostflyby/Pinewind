@@ -30,6 +30,30 @@ jobs:
       - name: swift test
         run: swift test --no-parallel
 
+  linux-test:
+    name: Linux · swift test
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install C dependencies
+        run: |
+          apt-get update
+          apt-get install -y zlib1g-dev libssl-dev pkg-config ca-certificates
+      - name: swift test
+        run: swift test --no-parallel
+
+  windows-test:
+    name: Windows · swift test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: SwiftyLab/setup-swift@v1
+        with:
+          swift-version: '6.2'
+      - name: swift test
+        run: swift test --no-parallel
+
   ios-test:
     name: iOS · build and simulator test
     runs-on: macos-latest
