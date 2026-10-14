@@ -18,12 +18,13 @@ public struct CompositionResult: Sendable {
   public let reusedPaths: [String]
 }
 
-/// Renders a candidate generation and atomically exchanges it with the active
+/// Renders a candidate generation and atomically publishes it as the active
 /// output. Previous bytes are only reused after comparing the fully rendered
 /// candidate, so deletions, local edits and lost change notifications stay correct.
 public actor Composer {
   public init() {}
 
+  /// On Windows, outputRoot must be absent, empty, or a junction managed by Pinewind.
   public func compose(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
     -> CompositionResult
   {

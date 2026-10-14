@@ -16,7 +16,7 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     .package(
       url: "https://github.com/ghostflyby/swift-glob.git",
-      revision: "263caacce41361bf8a27c92da528bb399a999673"),
+      revision: "9618e09a860a37101ca3138e7ba6b826e92e821f"),
     .package(url: "https://github.com/Cocoanetics/GitKit", from: "2.2.0", traits: ["Archive"]),
     .package(
       url: "https://github.com/Cocoanetics/SwiftBash",

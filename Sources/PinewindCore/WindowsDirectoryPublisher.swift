@@ -62,7 +62,15 @@
     }
 
     private static func nativePath(_ url: URL) -> String {
-      url.withUnsafeFileSystemRepresentation { String(cString: $0!) }
+      var path = url.withUnsafeFileSystemRepresentation { String(cString: $0!) }
+        .replacingOccurrences(of: "/", with: "\\")
+      if path.hasPrefix("\\"), path.dropFirst().dropFirst().hasPrefix(":") { path.removeFirst() }
+      if path.hasPrefix("\\\\?\\UNC\\") {
+        path = "\\\\" + path.dropFirst(8)
+      } else if path.hasPrefix("\\\\?\\") {
+        path.removeFirst(4)
+      }
+      return path
     }
 
     private static func withHandle<T>(
