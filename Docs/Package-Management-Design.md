@@ -34,7 +34,7 @@ plum 是 rime 生态的事实标准配置管理器,但其模型有一个结构�
 3. 用户配置树保持 **rime 配置目录的任意子结构**——不强迫任何固定骨架,文件的仓库相对路径即其在组合产物中的路径;
 4. 以 **Swift 库**形态交付:目录位置、镜像、后端全部是调用方注入的参数;CLI 与 App(Pteromyini)只是两类调用方。
 
-项目/产品名已定为 **松风 / Pinewind**;核心库 `PinewindCore`,CLI 命令 `pinewind`,与输入法产品 Pteromyini 分别命名。核心库落位 RimeKit 包内(实现期另立 target),CLI 与 App 均为库的调用方。
+项目/产品名已定为 **松风 / Pinewind**;独立 Swift Package 与仓库名 `Pinewind`,核心库 `PinewindCore`,CLI 命令 `pinewind`,与输入法产品 Pteromyini 分别命名。源码、测试与本设计文档从 RimeKit 迁入独立仓库;CLI 与 App 均为库的调用方,应用层分别消费 Pinewind 与 RimeKit。
 
 “松风”取意于王维《酬张少府》的“松风吹解带,山月照弹琴”(参见[原诗](https://www.gushici.net/shici/31/4886.html));英文名 Pinewind 与松林之风的意象对应。配置文件统一使用产品的小写前缀:共享声明 `pinewind.yaml`、可选本地覆写 `pinewind.local.yaml`、库管理的不透明锁 `pinewind.lock`。
 
@@ -238,7 +238,7 @@ conf 前端使用 **SwiftBash**(cocoanetics/swiftbash;MIT;SPM 远程依赖 `0.1.
 **依赖与平台事实**
 
 - 产品级消费:`BashInterpreter`(所需命令按需由 `BashCommandKit` 提供);SwiftPM 解析期取回家族(ShellKit/SwiftPorts/SwiftScript 及传递依赖;其中 GitKit 自带 vendored libgit2,可作 §5.2 后端的参照),解释器所需家族目标进入构建图;
-- swift-tools 6.2;探测的 SwiftBash 平台基线为 macOS 13 / iOS 16,当前 RimeKit 为 macOS 15 / iOS 16。SwiftBash 产品依赖不加 `.when(platforms:)`,macOS / iOS 均提供原生清单与 conf 导入;
+- swift-tools 6.2;探测的 SwiftBash 平台基线为 macOS 13 / iOS 16,当前 Pinewind 保持迁移前的 macOS 15 / iOS 16 基线。SwiftBash 产品依赖不加 `.when(platforms:)`,macOS / iOS 均提供原生清单与 conf 导入;
 - 0.x 阶段 API 随 minor 变动,`upToNextMinor` 锁家族同步升级。
 
 ## 5. 取包后端(v1:GitKit + HTTPS Git)
@@ -604,7 +604,7 @@ glob 不只依赖上次匹配到的文件,还依赖搜索范围与模式;否则�
 
 ## 14. M1 首轮实现(2026-10-13)
 
-SPM 新增独立 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,glob 使用 davbeck/swift-glob 1.x 的 Pattern,这些产品依赖都不作 macOS 条件化。
+独立 Swift Package `Pinewind` 提供 library product / target `PinewindCore`,不依赖 RimeKit 引擎或 librime。YAML 通过 Yams 的节点图解析,conf 使用 SwiftBash 0.1.x 的 BashInterpreter,glob 使用 davbeck/swift-glob 1.x 的 Pattern,这些产品依赖都不作 macOS 条件化。下文 M1/M2 的原始交付验证数字记录的是拆包前的 RimeKit 聚合测试,独立包验证与平台边界见 §16。
 
 已实现:
 
@@ -642,3 +642,13 @@ let result = try await Composer().compose(plan, inputRoot: input, outputRoot: co
 新增 13 项 Git 后端测试,使用自编文件树与 libgit2 建仓库,不调用 git CLI。覆盖分支/附注 tag 与歧义、精确 commit 与新版本 fetch、缓存复用/离线重建、祖先 commit 的私有引用保留、未完成快照替换、实例间串行缓存访问、符号链接失败与旧视图保护、取消、不合法来源与独立下载的 HTTP 状态。地址回归检查 manifest 与锁往返后传入 advertise/fetch 的实际 URL,覆盖非 GitHub 带/不带 `.git` 后缀与 GitHub 规范化,并检查缓存身份复用;组合回归覆盖后缀差异下的跨包寻址与 Rx 身份。联网用例通过 `PINEWIND_NETWORK_TESTS=1` 显式启用,实际获取 rime-prelude 并对照同 commit 的 HTTPS 文件字节。
 
 验证:全包测试报告计数 160 项(包含既有跳过项),联网用例实际执行通过;iOS Simulator 的库与测试目标 `build-for-testing` 通过,部署下限仍为 iOS 16。独立调用方在清空 PATH、禁止 fork/exec 的 sandbox 中完成 HTTPS 引用解析、fetch 与源码导出。GitKit 的高层 Archive product 不进入 Core 构建/链接闭包;SwiftPM 的 swift-syntax URL identity 警告仍为已有问题。
+
+## 16. 独立包迁移(2026-10-14)
+
+Pinewind 从 RimeKit `ee75bfc` 提取为同级的独立仓库,保留 Pinewind 源码、测试、设计文档及 MPL-2.0 许可证的相关 Git 历史。独立 manifest 提供 `PinewindCore` library product,直接依赖 Yams、SwiftBash 的 BashInterpreter、swift-glob 与 GitKit 的 CGitKit;不包含 librime 或 SwiftXPC。RimeKit 删除对应 product、target、源码、测试及直接依赖,两者不互相依赖。调用方分别消费两个包,由应用层把组合目录交给引擎部署。
+
+迁移保持模块名、公开 API、用户配置与锁文件名、缓存身份和依赖版本。源码与测试的 35 个文件按迁移基点逐字节核对,测试资源继续由 PinewindCoreTests 自己的 Bundle.module 提供;设计文档中的旧聚合测试数字仅为历史记录。
+
+CI 参照 RimeKit 设置 Sources/Tests 严格格式检查、macOS 全包测试、generic iOS Simulator 构建与模拟器测试,使用独立包的 `Pinewind` scheme,收集 xcresult、测试日志与崩溃报告。Release 对 `v*.*.*` 标签检查 main 可达性,构建与测试后生成 GitHub Release;Dependabot 每周检查 SwiftPM 与 Actions 更新。独立包继续保持 macOS 15 / iOS 16 的已验证基线;Linux / Windows 属于后续移植工作,需先适配 Darwin 目录交换、哈希与文件系统语义,再建立平台门禁。
+
+本次独立包验证:macOS 报告 50 项测试通过,真实 GitHub HTTPS 用例实际执行;generic iOS Simulator `build-for-testing` 与 iOS 模拟器 `test` 通过,模拟器报告 49 项通过、1 项联网用例按默认开关跳过、0 失败;格式检查及 actionlint 通过,CI 的模拟器自动选择脚本实际执行成功。移除模块后的 RimeKit 报告 110 项测试(包含既有跳过项)通过,其 iOS 构建保持通过。验证来自本地执行,GitHub 工作流运行与 Release 发布由仓库接入远端后触发。

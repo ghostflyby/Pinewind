@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: swift-format lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift-format lint
+        run: xcrun swift-format lint --strict --recursive Sources Tests
+
+  macos-test:
+    name: macOS · swift test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        run: swift test --no-parallel
+
+  ios-build:
+    name: iOS · build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: xcodebuild build-for-testing (generic iOS Simulator)
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -scheme Pinewind \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipMacroValidation -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1
+
+  ios-test:
+    name: iOS · simulator test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select simulator
+        run: |
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
+          python3 - "$RUNNER_TEMP/simulators.json" >> "$GITHUB_ENV" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as file:
+              devices = json.load(file)["devices"]
+          for runtime, entries in devices.items():
+              if ".iOS-" not in runtime:
+                  continue
+              for device in entries:
+                  if device["name"].startswith("iPhone") and device.get("isAvailable", False):
+                      print("SIM_ID=" + device["udid"])
+                      sys.exit(0)
+          sys.exit("No available iPhone simulator")
+          PY
+      - name: xcodebuild test
+        run: |
+          set -o pipefail
+          mkdir -p ci-output
+          xcodebuild test \
+            -scheme Pinewind \
+            -destination "platform=iOS Simulator,id=$SIM_ID" \
+            -resultBundlePath ci-output/Pinewind.xcresult \
+            -parallel-testing-enabled NO \
+            -skipMacroValidation -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee ci-output/ios-test.log
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p diagnostics
+          if [ -d ci-output/Pinewind.xcresult ]; then
+            cp -R ci-output/Pinewind.xcresult diagnostics/
+            xcrun xcresulttool get test-results summary --path ci-output/Pinewind.xcresult \
+              > diagnostics/test-summary.json 2>&1 || true
+          fi
+          if [ -f ci-output/ios-test.log ]; then
+            cp ci-output/ios-test.log diagnostics/
+          fi
+          cp ~/Library/Logs/DiagnosticReports/*.ips diagnostics/ 2>/dev/null || true
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-diagnostics
+          path: diagnostics
+          if-no-files-found: warn
+      - name: Failure diagnostics dump
+        if: failure()
+        run: |
+          if [ -f diagnostics/test-summary.json ]; then
+            cat diagnostics/test-summary.json
+          fi
+          if [ -f diagnostics/ios-test.log ]; then
+            tail -n 100 diagnostics/ios-test.log
+          fi
