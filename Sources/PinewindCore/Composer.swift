@@ -34,19 +34,35 @@ public actor Composer {
     guard inputRoot.isFileURL, outputRoot.isFileURL else {
       throw PinewindError("composition roots must be file URLs")
     }
+    #if os(Windows)
+      try SafePath.validateOutputRoot(outputRoot)
+      let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
+      try SafePath.validateRoots(
+        input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
+      try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+      return try WindowsDirectoryPublisher.withPublicationLock(in: storage) {
+        try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+      }
+    #else
+      return try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+    #endif
+  }
+
+  private func composeGeneration(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
+    -> CompositionResult
+  {
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
+    #if os(Windows)
+      try WindowsDirectoryPublisher.validate(outputRoot)
+    #endif
     let fm = FileManager.default
     let exists = fm.fileExists(atPath: outputRoot.path)
     let previous = exists ? try SafePath.files(in: outputRoot) : []
     let parent = outputRoot.deletingLastPathComponent()
     try fm.createDirectory(at: parent, withIntermediateDirectories: true)
     #if os(Windows)
-      try WindowsDirectoryPublisher.validate(outputRoot)
       let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
-      try SafePath.validateRoots(
-        input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
-      try fm.createDirectory(at: storage, withIntermediateDirectories: true)
       let candidate = storage.appendingPathComponent(
         "generation-" + UUID().uuidString, isDirectory: true)
     #else

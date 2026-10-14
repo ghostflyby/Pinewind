@@ -24,7 +24,7 @@ enum SafePath {
     return candidate
   }
 
-  static func validateRoots(input: URL, output: URL, sources: [URL]) throws {
+  static func validateOutputRoot(_ output: URL) throws {
     guard !output.lastPathComponent.isEmpty, output.lastPathComponent != "/" else {
       throw PinewindError("composition output must not be a filesystem root")
     }
@@ -33,6 +33,10 @@ enum SafePath {
         throw PinewindError("composition output must not be a filesystem root")
       }
     #endif
+  }
+
+  static func validateRoots(input: URL, output: URL, sources: [URL]) throws {
+    try validateOutputRoot(output)
     let roots = [input] + sources
     let out = try canonical(output)
     for root in roots {

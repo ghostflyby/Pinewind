@@ -2,7 +2,7 @@
 
 Pinewind 是 Rime 包管理与配置组合的 Swift 库,提供 `PinewindCore` product。它将用户文件与远程包分开保存,按声明次序生成组合目录,供调用方交给输入法引擎部署。
 
-支持 macOS 15 / iOS 16 及以上版本、Linux 和 Windows。需要 Swift 6.2 或更高版本;Windows 使用 Swift 6.3.1 或更高版本。
+支持 macOS 15 / iOS 16 及以上版本、Linux 和 Windows。需要 Swift 6.2 或更高版本;Windows 使用 Swift 6.3.1 或更高版本。 Windows 支持暂依赖 swift-glob 的修补 fork,已提交[上游 PR](https://github.com/davbeck/swift-glob/pull/23);上游发布修复后将恢复版本依赖。
 
 ## 接入
 

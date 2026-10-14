@@ -19,8 +19,8 @@
     static func validate(_ output: URL) throws {
       if let target = try currentTarget(output) {
         guard
-          target.deletingLastPathComponent().standardizedFileURL.path.lowercased()
-            == storage(for: output).standardizedFileURL.path.lowercased(),
+          try canonicalPath(target.deletingLastPathComponent())
+            == canonicalPath(storage(for: output)),
           isGeneration(target.lastPathComponent)
         else { throw PinewindError("composition output is not a Pinewind generation junction") }
       } else if FileManager.default.fileExists(atPath: output.path) {
@@ -32,38 +32,69 @@
 
     static func publish(_ candidate: URL, at output: URL) throws {
       let fm = FileManager.default
-      if fm.fileExists(atPath: output.path) {
+      if try currentTarget(output) != nil || fm.fileExists(atPath: output.path) {
         try redirect(output, to: candidate)
       } else {
         let link = output.deletingLastPathComponent().appendingPathComponent(
           ".pinewind-link-" + UUID().uuidString)
         try fm.createDirectory(at: link, withIntermediateDirectories: false)
         defer {
-          _ = nativePath(link).withCString(encodedAs: UTF16.self) { RemoveDirectoryW($0) }
+          if let path = try? nativePath(link) {
+            _ = path.withCString(encodedAs: UTF16.self) { RemoveDirectoryW($0) }
+          }
         }
         try redirect(link, to: candidate)
         try fm.moveItem(at: link, to: output)
       }
-      // A held reader may prevent deletion on Windows. Retry owned leftovers
-      // on a later publication; never remove the current generation.
+      // Publication and candidate construction share the output lock. A held
+      // reader may prevent deletion; retry owned leftovers on a later publication.
+      guard let active = try? currentTarget(output),
+        let activePath = try? canonicalPath(active),
+        let candidatePath = try? canonicalPath(candidate)
+      else { return }
       for old
         in (try? fm.contentsOfDirectory(
           at: storage(for: output), includingPropertiesForKeys: nil)) ?? []
-      where old.standardizedFileURL.path.lowercased()
-        != candidate.standardizedFileURL.path.lowercased()
-        && isGeneration(old.lastPathComponent)
-      {
+      where isGeneration(old.lastPathComponent) {
+        guard let path = try? canonicalPath(old), path != activePath, path != candidatePath else {
+          continue
+        }
         try? fm.removeItem(at: old)
       }
+    }
+
+    /// Hold from reading the previous generation through candidate construction,
+    /// publication and cleanup, including across independent instances/processes.
+    static func withPublicationLock<T>(in storage: URL, _ body: () throws -> T) throws -> T {
+      let file = storage.appendingPathComponent("publication.lock")
+      let handle = try nativePath(file).withCString(encodedAs: UTF16.self) {
+        CreateFileW(
+          $0, DWORD(GENERIC_READ | GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE), nil,
+          DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
+      }
+      guard let handle, handle != INVALID_HANDLE_VALUE else {
+        throw PinewindError("cannot open composition lock (Windows error \(GetLastError()))")
+      }
+      defer { _ = CloseHandle(handle) }
+      var overlapped = OVERLAPPED()
+      guard LockFileEx(handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK), 0, 1, 0, &overlapped) else {
+        throw PinewindError("cannot lock composition output (Windows error \(GetLastError()))")
+      }
+      defer { _ = UnlockFileEx(handle, 0, 1, 0, &overlapped) }
+      return try body()
     }
 
     private static func isGeneration(_ name: String) -> Bool {
       name.hasPrefix("generation-") && UUID(uuidString: String(name.dropFirst(11))) != nil
     }
 
-    private static func nativePath(_ url: URL) -> String {
-      var path = url.withUnsafeFileSystemRepresentation { String(cString: $0!) }
-        .replacingOccurrences(of: "/", with: "\\")
+    private static func nativePath(_ url: URL) throws -> String {
+      guard url.isFileURL,
+        let representation = url.withUnsafeFileSystemRepresentation({ pointer in
+          pointer.map { String(cString: $0) }
+        }), !representation.contains("\0")
+      else { throw PinewindError("composition path has no filesystem representation") }
+      var path = representation.replacingOccurrences(of: "/", with: "\\")
       if path.hasPrefix("\\"), path.dropFirst().dropFirst().hasPrefix(":") { path.removeFirst() }
       if path.hasPrefix("\\\\?\\UNC\\") {
         path = "\\\\" + path.dropFirst(8)
@@ -76,7 +107,7 @@
     private static func withHandle<T>(
       _ url: URL, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
     ) throws -> T {
-      let handle = nativePath(url).withCString(encodedAs: UTF16.self) {
+      let handle = try nativePath(url).withCString(encodedAs: UTF16.self) {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
           DWORD(OPEN_EXISTING),
@@ -125,8 +156,8 @@
       return resolved
     }
 
-    private static func currentTarget(_ output: URL) throws -> URL? {
-      let attributes = nativePath(output).withCString(encodedAs: UTF16.self) {
+    static func currentTarget(_ output: URL) throws -> URL? {
+      let attributes = try nativePath(output).withCString(encodedAs: UTF16.self) {
         GetFileAttributesW($0)
       }
       if attributes == DWORD(INVALID_FILE_ATTRIBUTES) {
@@ -164,8 +195,8 @@
       }
     }
 
-    private static func redirect(_ output: URL, to candidate: URL) throws {
-      let printName = nativePath(candidate)
+    static func redirect(_ output: URL, to candidate: URL) throws {
+      let printName = try nativePath(candidate)
       let substituteName =
         printName.hasPrefix("\\\\")
         ? "\\??\\UNC\\" + printName.dropFirst(2) : "\\??\\" + printName

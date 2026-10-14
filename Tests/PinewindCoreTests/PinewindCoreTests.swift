@@ -435,6 +435,92 @@ struct CompositionTests {
     #expect(observations.failures.isEmpty)
   }
 
+  #if os(Windows)
+    @Test func independentComposersKeepPublishedAndPendingGenerations() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      let entries = [ManifestEntry.userFiles(FileFilter())]
+      let bytesA = String(repeating: "a", count: 256 * 1024)
+      let bytesB = String(repeating: "b", count: 256 * 1024)
+      for index in 0..<8 { try f.write("dicts/\(index).txt", bytesA, in: f.input) }
+      let planA = try f.plan(entries)
+      for index in 0..<8 { try f.write("dicts/\(index).txt", bytesB, in: f.input) }
+      let planB = try f.plan(entries)
+      _ = try await Composer().compose(planA, inputRoot: f.input, outputRoot: f.output)
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for plan in [planA, planB] {
+          group.addTask {
+            let composer = Composer()
+            for _ in 0..<20 {
+              _ = try await composer.compose(plan, inputRoot: f.input, outputRoot: f.output)
+            }
+          }
+        }
+        try await group.waitForAll()
+      }
+      let first = try f.read("dicts/0.txt")
+      #expect(first == bytesA || first == bytesB)
+      for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
+      let active = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      #expect(FileManager.default.fileExists(atPath: active.path))
+      let generations = try FileManager.default.contentsOfDirectory(
+        at: WindowsDirectoryPublisher.storage(for: f.output), includingPropertiesForKeys: nil
+      )
+      .filter { $0.lastPathComponent.hasPrefix("generation-") }
+      #expect(generations.count == 1)
+    }
+
+    @Test func emptyOutputDirectoryIsAdoptedAsAJunction() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: false)
+      try f.write("default.yaml", "value: adopted\n", in: f.input)
+      _ = try await Composer().compose(
+        f.plan([.userFiles(FileFilter())]), inputRoot: f.input, outputRoot: f.output)
+      #expect(try WindowsDirectoryPublisher.currentTarget(f.output) != nil)
+      #expect(try f.read("default.yaml") == "value: adopted\n")
+    }
+
+    @Test(arguments: [false, true])
+    func danglingManagedJunctionIsRepaired(hasFiles: Bool) async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      if hasFiles { try f.write("default.yaml", "value: repaired\n", in: f.input) }
+      let plan = try f.plan([.userFiles(FileFilter())])
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let old = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      try FileManager.default.removeItem(at: old)
+      #expect(!FileManager.default.fileExists(atPath: f.output.path))
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let repaired = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      #expect(repaired != old)
+      #expect(FileManager.default.fileExists(atPath: repaired.path))
+      if hasFiles { #expect(try f.read("default.yaml") == "value: repaired\n") }
+    }
+
+    @Test func managedJunctionTargetAcceptsAncestorJunctionAliases() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try f.write("default.yaml", "value: alias\n", in: f.input)
+      let plan = try f.plan([.userFiles(FileFilter())])
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let active = try #require(WindowsDirectoryPublisher.currentTarget(f.output))
+      let alias = f.root.appendingPathComponent("parent-alias")
+      try FileManager.default.createDirectory(at: alias, withIntermediateDirectories: false)
+      try WindowsDirectoryPublisher.redirect(alias, to: f.root)
+      defer { try? FileManager.default.removeItem(at: alias) }
+      let aliasedTarget = alias.appendingPathComponent(
+        active.deletingLastPathComponent().lastPathComponent
+      )
+      .appendingPathComponent(active.lastPathComponent)
+      try WindowsDirectoryPublisher.redirect(f.output, to: aliasedTarget)
+      try WindowsDirectoryPublisher.validate(f.output)
+      let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      #expect(result.changedPaths.isEmpty)
+      #expect(try f.read("default.yaml") == "value: alias\n")
+    }
+  #endif
+
   @Test func globDetectsNewFilesAndRemovesDeletedOutputs() async throws {
     let f = try Fixture()
     defer { f.remove() }
