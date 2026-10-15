@@ -44,7 +44,7 @@
           ".pinewind-link-" + UUID().uuidString)
         try fm.createDirectory(at: link, withIntermediateDirectories: false)
         defer {
-          if let path = try? nativePath(link) {
+          if let path = try? windowsNativePath(link) {
             _ = path.withCString(encodedAs: UTF16.self) { RemoveDirectoryW($0) }
           }
         }
@@ -72,7 +72,7 @@
     /// publication and cleanup, including across independent instances/processes.
     static func withPublicationLock<T>(in storage: URL, _ body: () throws -> T) throws -> T {
       let file = storage.appendingPathComponent("publication.lock")
-      let handle = try nativePath(file).withCString(encodedAs: UTF16.self) {
+      let handle = try windowsNativePath(file).withCString(encodedAs: UTF16.self) {
         CreateFileW(
           $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
           nil,
@@ -94,26 +94,10 @@
       name.hasPrefix("generation-") && UUID(uuidString: String(name.dropFirst(11))) != nil
     }
 
-    private static func nativePath(_ url: URL) throws -> String {
-      guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
-        let representation = url.withUnsafeFileSystemRepresentation({ pointer in
-          pointer.map { String(cString: $0) }
-        })
-      else { throw PinewindError("composition path has no filesystem representation") }
-      var path = representation.replacingOccurrences(of: "/", with: "\\")
-      if path.hasPrefix("\\"), path.dropFirst().dropFirst().hasPrefix(":") { path.removeFirst() }
-      if path.hasPrefix("\\\\?\\UNC\\") {
-        path = "\\\\" + path.dropFirst(8)
-      } else if path.hasPrefix("\\\\?\\") {
-        path.removeFirst(4)
-      }
-      return path
-    }
-
     private static func withHandle<T>(
       _ url: URL, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
     ) throws -> T {
-      let handle = try nativePath(url).withCString(encodedAs: UTF16.self) {
+      let handle = try windowsNativePath(url).withCString(encodedAs: UTF16.self) {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
           DWORD(OPEN_EXISTING),
@@ -163,7 +147,7 @@
     }
 
     static func currentTarget(_ output: URL) throws -> URL? {
-      let attributes = try nativePath(output).withCString(encodedAs: UTF16.self) {
+      let attributes = try windowsNativePath(output).withCString(encodedAs: UTF16.self) {
         GetFileAttributesW($0)
       }
       if attributes == DWORD(INVALID_FILE_ATTRIBUTES) {
@@ -202,7 +186,7 @@
     }
 
     static func redirect(_ output: URL, to candidate: URL) throws {
-      let printName = try nativePath(candidate)
+      let printName = try windowsNativePath(candidate)
       let substituteName =
         printName.hasPrefix("\\\\")
         ? "\\??\\UNC\\" + printName.dropFirst(2) : "\\??\\" + printName
