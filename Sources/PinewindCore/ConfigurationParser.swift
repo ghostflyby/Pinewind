@@ -102,46 +102,59 @@ enum ConfigurationParser {
       throw reader.error("order must be a sequence")
     }
     let entries = try order.map { node -> ManifestEntry in
-      if node.tag == Tag(.str) {
-        let name = try reader.string(node)
-        if name == "self" { return .userFiles(FileFilter()) }
+      switch try decodeOrderEntry(node, reader: reader) {
+      case .userFiles(let filter): return .userFiles(filter)
+      case .importConf(let conf): return .importConf(conf)
+      case .package(let name, let fields):
         return .package(
-          try package(name: name, inline: [:], names: names, reader: reader, at: node))
-      }
-      let allowed = packageKeys.union(["self", "name", "import", "variables"])
-      let fields = try reader.mapping(node, allowed: allowed)
-      let selectors = ["self", "name", "url", "import"].filter { fields[$0] != nil }
-      guard selectors.count == 1, let selector = selectors.first else {
-        throw reader.error("each entry requires exactly one of self, name, url, import", at: node)
-      }
-      switch selector {
-      case "self":
-        guard fields.count == 1, let value = fields["self"] else {
-          throw reader.error("self filters belong inside the self mapping", at: node)
-        }
-        return .userFiles(
-          try reader.filter(reader.mapping(value, allowed: ["include", "exclude"])))
-      case "import":
-        guard Set(fields.keys).isSubset(of: ["import", "variables"]), let value = fields["import"]
-        else {
-          throw reader.error("conf imports only accept import and variables", at: node)
-        }
-        return .importConf(
-          try ConfImport(
-            source: reader.string(value),
-            variables: fields["variables"].map(reader.stringMap) ?? [:]))
-      default:
-        guard fields["variables"] == nil else {
-          throw reader.error("variables is only valid on imports", at: node)
-        }
-        let name = try fields["name"].map(reader.string)
-        return .package(
-          try package(
-            name: name, inline: fields.filter { $0.key != "name" },
-            names: names, reader: reader, at: node))
+          try package(name: name, inline: fields, names: names, reader: reader, at: node))
       }
     }
     return Manifest(entries: entries)
+  }
+
+  enum DecodedOrderEntry {
+    case userFiles(FileFilter)
+    case importConf(ConfImport)
+    case package(name: String?, fields: [String: Node])
+  }
+
+  // Both editable documents and effective manifests use the same authored selector grammar.
+  static func decodeOrderEntry(_ node: Node, reader: YAMLReader) throws -> DecodedOrderEntry {
+    if node.tag == Tag(.str) {
+      let name = try reader.string(node)
+      if name == "self" { return .userFiles(FileFilter()) }
+      return .package(name: name, fields: [:])
+    }
+    let allowed = packageKeys.union(["self", "name", "import", "variables"])
+    let fields = try reader.mapping(node, allowed: allowed)
+    let selectors = ["self", "name", "url", "import"].filter { fields[$0] != nil }
+    guard selectors.count == 1, let selector = selectors.first else {
+      throw reader.error("each entry requires exactly one of self, name, url, import", at: node)
+    }
+    switch selector {
+    case "self":
+      guard fields.count == 1, let value = fields["self"] else {
+        throw reader.error("self filters belong inside the self mapping", at: node)
+      }
+      return .userFiles(
+        try reader.filter(reader.mapping(value, allowed: ["include", "exclude"])))
+    case "import":
+      guard Set(fields.keys).isSubset(of: ["import", "variables"]), let value = fields["import"]
+      else {
+        throw reader.error("conf imports only accept import and variables", at: node)
+      }
+      return .importConf(
+        try ConfImport(
+          source: reader.string(value),
+          variables: fields["variables"].map(reader.stringMap) ?? [:]))
+    default:
+      guard fields["variables"] == nil else {
+        throw reader.error("variables is only valid on imports", at: node)
+      }
+      let name = try fields["name"].map(reader.string)
+      return .package(name: name, fields: fields.filter { $0.key != "name" })
+    }
   }
 
   static func validateFields(_ fields: [String: Node], reader: YAMLReader) throws {
