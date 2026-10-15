@@ -395,12 +395,14 @@ struct CompositionTests {
     #expect(throws: PinewindError.self) {
       try SafePath.validateRoots(input: f.input, output: URL(fileURLWithPath: "/"), sources: [])
     }
-    #if os(Windows)
-      let alias = URL(fileURLWithPath: f.input.path.uppercased())
+    let alias = URL(fileURLWithPath: f.input.path.uppercased())
+    if FileManager.default.fileExists(atPath: alias.path) {
       #expect(throws: PinewindError.self) {
         try SafePath.validateRoots(
           input: f.input, output: alias.appendingPathComponent("out"), sources: [])
       }
+    }
+    #if os(Windows)
       try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
       try f.write("keep.txt", "keep", in: f.output)
       #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }

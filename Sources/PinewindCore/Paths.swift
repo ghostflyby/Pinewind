@@ -128,20 +128,20 @@ enum NativePath {
   }
   static func from(_ url: URL) throws -> FilePath {
     guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
-      let value = url.withUnsafeFileSystemRepresentation({ pointer in
+      let representation = url.withUnsafeFileSystemRepresentation({ pointer in
         pointer.flatMap { String(validatingCString: $0) }
       })
     else { throw PinewindError(.invalidPath, "expected a representable file URL") }
     #if os(Windows)
-      var value = value.replacingOccurrences(of: "/", with: "\\")
+      var value = representation.replacingOccurrences(of: "/", with: "\\")
       if value.hasPrefix("\\"), value.dropFirst(2).hasPrefix(":") { value.removeFirst() }
-    #endif
-    #if !os(Windows)
+      let path = FilePath(value)
+    #else
       guard url.host == nil || url.host == "" || url.host == "localhost" else {
         throw PinewindError(.invalidPath, "file URL must address the local filesystem")
       }
+      let path = FilePath(representation)
     #endif
-    let path = FilePath(value)
     try requireAbsolute(path)
     return path
   }

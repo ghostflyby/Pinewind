@@ -63,7 +63,7 @@ enum NativeLock {
     #if os(Windows)
       let handle = file.withPlatformString {
         CreateFileW(
-          $0, DWORD(GENERIC_READ | GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
+          $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
           nil, DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {

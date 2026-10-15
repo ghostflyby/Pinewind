@@ -127,7 +127,7 @@
         }
         return FilePath(path)
       }
-      for component in missing.reversed() { resolved.appendPathComponent(component) }
+      for component in missing.reversed() { resolved.append(component) }
       return resolved
     }
 

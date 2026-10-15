@@ -60,8 +60,20 @@ enum SafePath {
       return try WindowsDirectoryPublisher.canonicalPath(url)
     #else
       try NativePath.requireAbsolute(url)
-      let resolved = try url.foundationURL.resolvingSymlinksInPath().standardizedFileURL
-      return try NativePath.from(resolved).string
+      var ancestor = url
+      var missing: [String] = []
+      while !FileManager.default.fileExists(atPath: ancestor.string) {
+        let parent = ancestor.removingLastComponent()
+        guard parent != ancestor, let component = ancestor.lastComponent else {
+          throw PinewindError(.invalidPath, "cannot resolve filesystem path", source: url.string)
+        }
+        missing.append(component.string)
+        ancestor = parent
+      }
+      var resolved = try NativePath.from(
+        ancestor.foundationURL.resolvingSymlinksInPath().standardizedFileURL)
+      for component in missing.reversed() { resolved.append(component) }
+      return resolved.string
     #endif
   }
 
