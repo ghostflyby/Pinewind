@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .build
-          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: |
             windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
       - name: swift test
