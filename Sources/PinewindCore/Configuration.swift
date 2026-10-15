@@ -171,9 +171,11 @@ public struct SourceIdentity: Hashable, Sendable {
       guard !url.path.hasPrefix("~"), (url.path as NSString).isAbsolutePath else {
         throw PinewindError("file sources require absolute paths")
       }
-      guard url.host == nil || url.host == "" || url.host == "localhost" else {
-        throw PinewindError("file URLs must refer to the local machine")
-      }
+      #if !os(Windows)
+        guard url.host == nil || url.host == "" || url.host == "localhost" else {
+          throw PinewindError("file URLs must refer to the local machine")
+        }
+      #endif
       return url.standardizedFileURL
     }
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),

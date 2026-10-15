@@ -90,12 +90,19 @@ jobs:
         id: windows-image
         run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
       - name: Cache SwiftPM build and dependencies
+        id: windows-swiftpm-cache
         uses: actions/cache@v6
         with:
           path: .build
           key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
         run: swift test --no-parallel
+      - name: Preserve Windows build cache after failure
+        if: failure() && steps.windows-swiftpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .build
+          key: ${{ steps.windows-swiftpm-cache.outputs.cache-primary-key }}
 
   ios-test:
     name: iOS · build and simulator test

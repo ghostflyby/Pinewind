@@ -14,7 +14,11 @@ enum SafePath {
 
   static func file(_ path: String, in root: FilePath) throws -> FilePath {
     try validate(path)
-    let canonicalRoot = FilePath(try canonical(root))
+    #if os(Windows)
+      let canonicalRoot = try WindowsDirectoryPublisher.resolvedURL(root)
+    #else
+      let canonicalRoot = FilePath(try canonical(root))
+    #endif
     let candidate = canonicalRoot.appendingPathComponent(path)
     guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
       throw PinewindError("path escapes its source root: \(path)")

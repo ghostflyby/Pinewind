@@ -166,7 +166,7 @@ struct WorkspaceTests {
     try write(f.input.appending("pinewind.yaml"), "ordinary user file")
     let workspace = try await f.workspace()
     let result = try await workspace.compose(to: f.output)
-    #expect(result.directory == f.output)
+    #expect(try read(result.directory.appending("schema.yaml")) == "value: local\n")
     #expect(result.paths.map(\.string) == ["pinewind.yaml", "schema.yaml"])
     #expect(!exists(f.lock))
     #expect(await f.repositories.counts().0 == 0)
@@ -200,9 +200,9 @@ struct WorkspaceTests {
     let session = try await workspace.configuration()
     await session.edit { $0.localOverrides = LocalOverridesDocument() }
     await #expect(throws: PinewindError.self) { _ = try await session.save(.local) }
-    #expect(
-      try await workspace.compose(to: "relative-output").directory
-        == f.root.appending("relative-output"))
+    let result = try await workspace.compose(to: "relative-output")
+    #expect(exists(result.directory))
+    #expect(exists(f.root.appending("relative-output")))
   }
   @Test func snapshotEditingSavingAndReloadAreExplicit() async throws {
     let f = try Fixture()

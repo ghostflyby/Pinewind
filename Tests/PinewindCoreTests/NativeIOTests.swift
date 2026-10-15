@@ -12,6 +12,19 @@ import Testing
 
 @Suite("Native filesystem contracts", .timeLimit(.minutes(1)))
 struct NativeIOTests {
+  #if os(Windows)
+    @Test func windowsRootsAndUNCFileURLsUseNativePathSemantics() throws {
+      let base = FilePath("C:\\workspace")
+      for path in [FilePath("C:package"), FilePath("\\package")] {
+        #expect(throws: PinewindError.self) { _ = try NativePath.absolute(path, relativeTo: base) }
+      }
+      let endpoint = URL(string: "file://server/share/package")!
+      let path = try NativePath.from(endpoint)
+      try NativePath.requireAbsolute(path)
+      #expect(try SourceIdentity.normalize(endpoint).host == "server")
+      #expect(try NativePath.from(path.foundationURL) == path)
+    }
+  #endif
   @Test func unicodeURLBridgePreservesLiteralPercentAndFragmentCharacters() throws {
     let root = native(
       FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
