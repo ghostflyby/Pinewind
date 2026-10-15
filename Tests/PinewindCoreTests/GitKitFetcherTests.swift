@@ -247,7 +247,12 @@ struct GitKitFetcherTests {
     }
   }
 
-  @Test func downloadsHTTPSResourcesAndReportsHTTPFailures() async throws {
+  #if canImport(FoundationNetworking)
+    @Test(.disabled("Corelibs Foundation does not create download files for custom URLProtocol"))
+  #else
+    @Test
+  #endif
+  func downloadsHTTPSResourcesAndReportsHTTPFailures() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
     let session = URLSession(configuration: config)
@@ -259,6 +264,14 @@ struct GitKitFetcherTests {
     await #expect(throws: PinewindError.self) {
       try await backend.downloadFile(url: URL(string: "https://resource.test/missing")!)
     }
+  }
+
+  @Test func downloadTransportFailuresKeepErrorCodesAndCancellation() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [ResourceProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    let backend = GitKitPackageFetcher(session: session)
     do {
       _ = try await backend.downloadFile(url: URL(string: "https://resource.test/offline")!)
       Issue.record("expected a transport failure")

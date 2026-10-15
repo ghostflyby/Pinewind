@@ -121,7 +121,7 @@ let result = try await workspace.compose(plan, to: previewOutputPath)
 
 ```swift
 let updated = try await workspace.update(.packages(Set(resolution.packages.map(\.id))))
-let resources = Set(resolution.packages.flatMap(\.resourceIDs))
+let resources = Set(updated.packages.flatMap(\.resourceIDs))
 let refreshed = try await workspace.update(.resources(resources))
 ```
 
