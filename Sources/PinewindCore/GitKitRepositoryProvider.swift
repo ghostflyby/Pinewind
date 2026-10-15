@@ -152,8 +152,17 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     }
     try NativePath.requireAbsolute(destination)
     try Task.checkCancellation()
-    let (temporary, response) = try await session.download(
-      for: URLRequest(url: url), delegate: HTTPSRedirectGuard())
+    let temporary: URL
+    let response: URLResponse
+    do {
+      (temporary, response) = try await session.download(
+        for: URLRequest(url: url), delegate: HTTPSRedirectGuard())
+    } catch {
+      if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+        throw CancellationError()
+      }
+      throw PinewindError.wrap(error, source: url.absoluteString)
+    }
     defer { try? FileManager.default.removeItem(at: temporary) }
     guard let response = response as? HTTPURLResponse, response.url?.scheme?.lowercased() == "https"
     else {

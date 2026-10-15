@@ -259,6 +259,16 @@ struct GitKitFetcherTests {
     await #expect(throws: PinewindError.self) {
       try await backend.downloadFile(url: URL(string: "https://resource.test/missing")!)
     }
+    do {
+      _ = try await backend.downloadFile(url: URL(string: "https://resource.test/offline")!)
+      Issue.record("expected a transport failure")
+    } catch let error as PinewindError {
+      #expect(error.code == .io)
+      #expect(error.source == "https://resource.test/offline")
+    }
+    await #expect(throws: CancellationError.self) {
+      try await backend.downloadFile(url: URL(string: "https://resource.test/cancelled")!)
+    }
   }
 
   @Test func cancelledPreparationDoesNotWriteCacheOrPublish() async throws {
@@ -445,6 +455,13 @@ private final class ResourceProtocol: URLProtocol {
   }
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
   override func startLoading() {
+    if request.url?.path == "/offline" || request.url?.path == "/cancelled" {
+      client?.urlProtocol(
+        self,
+        didFailWithError: URLError(
+          request.url?.path == "/cancelled" ? .cancelled : .cannotConnectToHost))
+      return
+    }
     let status = request.url?.path == "/ok" ? 200 : 404
     let response = HTTPURLResponse(
       url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
