@@ -176,6 +176,7 @@ extension FileManager {
   func copyItem(at source: FilePath, to destination: FilePath) throws {
     try Cancellation.check()
     try copyItem(at: source.foundationURL, to: destination.foundationURL)
+    try Cancellation.check()
   }
   func moveItem(at source: FilePath, to destination: FilePath) throws {
     try moveItem(at: source.foundationURL, to: destination.foundationURL)

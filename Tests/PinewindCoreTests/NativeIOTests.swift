@@ -41,6 +41,9 @@ struct NativeIOTests {
     try FileManager.default.createDirectory(
       at: root.appending("outside"), withIntermediateDirectories: true)
     try Data("protected".utf8).write(to: root.appending("outside/value"))
+    #expect(
+      try SafePath.overlaps(
+        root.appending("source"), root.appending("missing/../source/output")))
     try FileManager.default.createSymbolicLink(
       at: root.appending("source/link").foundationURL,
       withDestinationURL: root.appending("outside").foundationURL)

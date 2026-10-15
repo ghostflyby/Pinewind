@@ -73,6 +73,8 @@ enum SafePath {
       var resolved = try NativePath.from(
         ancestor.foundationURL.resolvingSymlinksInPath().standardizedFileURL)
       for component in missing.reversed() { resolved.append(component) }
+      let normalized = resolved.lexicallyNormalized()
+      if normalized != resolved { return try canonical(normalized) }
       return resolved.string
     #endif
   }

@@ -128,6 +128,8 @@
         return FilePath(path)
       }
       for component in missing.reversed() { resolved.append(component) }
+      let normalized = resolved.lexicallyNormalized()
+      if normalized != resolved { return try resolvedURL(normalized) }
       return resolved
     }
 
