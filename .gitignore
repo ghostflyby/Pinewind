@@ -3,8 +3,6 @@
 /.swiftpm/
 /Packages/
 /DerivedData/
-/diagnostics/
-/ci-output/
 xcuserdata/
 *.xcuserstate
 .netrc
