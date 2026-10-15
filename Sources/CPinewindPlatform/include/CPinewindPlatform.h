@@ -7,6 +7,8 @@
 #ifndef CPINEWIND_PLATFORM_H
 #define CPINEWIND_PLATFORM_H
 
+#include <string.h>
+
 // Returns zero on success or the native errno on failure.
 int pinewind_exchange_directories(const char *candidate, const char *output);
 

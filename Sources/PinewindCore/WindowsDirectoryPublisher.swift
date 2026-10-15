@@ -17,6 +17,7 @@
     }
 
     static func validate(_ output: URL) throws {
+      var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedURL(target)
         guard
@@ -24,7 +25,10 @@
             == canonicalPath(storage(for: output)),
           isGeneration(target.lastPathComponent)
         else { throw PinewindError("composition output is not a Pinewind generation junction") }
-      } else if FileManager.default.fileExists(atPath: output.path) {
+      } else if FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory) {
+        guard isDirectory.boolValue else {
+          throw PinewindError("Windows composition output must be a directory")
+        }
         guard try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty else {
           throw PinewindError("Windows composition output must be empty or managed by Pinewind")
         }

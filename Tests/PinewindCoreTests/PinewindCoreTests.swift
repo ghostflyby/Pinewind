@@ -474,6 +474,15 @@ struct CompositionTests {
       #expect(try WindowsDirectoryPublisher.currentTarget(literal) == nil)
     }
 
+    @Test func ordinaryOutputFileReportsTypedErrorAndRemainsIntact() throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      let bytes = Data("keep".utf8)
+      try bytes.write(to: f.output)
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(try Data(contentsOf: f.output) == bytes)
+    }
+
     @Test func emptyOutputDirectoryIsAdoptedAsAJunction() async throws {
       let f = try Fixture()
       defer { f.remove() }

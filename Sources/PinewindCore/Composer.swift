@@ -107,7 +107,8 @@ public actor Composer {
         let status = pinewind_exchange_directories(candidate.path, outputRoot.path)
         guard status == 0 else {
           throw PinewindError(
-            "cannot atomically exchange composition directories (errno \(status))")
+            "cannot atomically exchange composition directories: \(String(cString: strerror(status))) (errno \(status))"
+          )
         }
       } else {
         try fm.moveItem(at: candidate, to: outputRoot)
