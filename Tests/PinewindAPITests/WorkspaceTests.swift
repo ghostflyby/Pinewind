@@ -123,7 +123,7 @@ private struct Fixture {
   }
 }
 
-@Suite("Public Workspace API")
+@Suite("Public Workspace API", .timeLimit(.minutes(1)))
 struct WorkspaceTests {
   #if !os(Windows)
     @Test func publicationThroughDirectoryAliasKeepsTheAliasAndUpdatesItsTarget() async throws {

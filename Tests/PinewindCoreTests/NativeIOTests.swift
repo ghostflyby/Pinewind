@@ -10,7 +10,7 @@ import Testing
 
 @testable import PinewindCore
 
-@Suite("Native filesystem contracts")
+@Suite("Native filesystem contracts", .timeLimit(.minutes(1)))
 struct NativeIOTests {
   @Test func unicodeURLBridgePreservesLiteralPercentAndFragmentCharacters() throws {
     let root = native(
