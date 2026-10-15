@@ -110,7 +110,7 @@ struct ConfigurationTests {
     #expect(request.options == ["schema": "new"])
   }
 
-  @Test func localWorkingTreeIgnoresInheritedRefAndNeverWritesLock() throws {
+  @Test func localWorkingTreeIgnoresInheritedRefAndNeverWritesLock() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
     try fixture.write(
@@ -127,8 +127,9 @@ struct ConfigurationTests {
       version: 1
       names:
         dev: {url: \(fixture.a.absoluteString)}
-      """, in: fixture.input)
-    let manifest = try Manifest.load(inputRoot: fixture.input)
+      """, in: fixture.root.appendingPathComponent("state"))
+    let manifest = try await Manifest.load(
+      inputRoot: fixture.input, localStateRoot: fixture.root.appendingPathComponent("state"))
     guard case .package(let request) = manifest.entries[0] else {
       Issue.record("expected package")
       return
@@ -140,10 +141,13 @@ struct ConfigurationTests {
         atPath: fixture.input.appendingPathComponent("pinewind.lock").path))
   }
 
-  @Test func missingManifestDefaultsToSelfAndEmptyOrderStaysEmpty() throws {
+  @Test func missingManifestDefaultsToSelfAndEmptyOrderStaysEmpty() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
-    #expect(try Manifest.load(inputRoot: fixture.input).entries == [.userFiles(FileFilter())])
+    #expect(
+      try await Manifest.load(
+        inputRoot: fixture.input, localStateRoot: fixture.root.appendingPathComponent("state")
+      ).entries == [.userFiles(FileFilter())])
     #expect(try Manifest.parse("version: 1\norder: []").entries.isEmpty)
   }
 
@@ -750,7 +754,8 @@ struct ConfTests {
   @Test func expandedImportsKeepSelfInterleavedWithPackages() async throws {
     let f = try Fixture("ImportOrder")
     defer { f.remove() }
-    let manifest = try Manifest.load(inputRoot: f.input)
+    let manifest = try await Manifest.load(
+      inputRoot: f.input, localStateRoot: f.root.appendingPathComponent("state"))
     let expanded = try await PlumImporter().expand(manifest, inputRoot: f.input)
     #expect(
       expanded.entries == [

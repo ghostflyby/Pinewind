@@ -47,6 +47,12 @@ enum SafePath {
     }
   }
 
+  static func overlaps(_ first: URL, _ second: URL) throws -> Bool {
+    let a = try canonical(first)
+    let b = try canonical(second)
+    return a == b || a.hasPrefix(prefix(b)) || b.hasPrefix(prefix(a))
+  }
+
   private static func prefix(_ path: String) -> String {
     path.hasSuffix("/") ? path : path + "/"
   }

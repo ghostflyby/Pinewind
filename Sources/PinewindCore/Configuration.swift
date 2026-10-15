@@ -91,19 +91,35 @@ public struct Manifest: Hashable, Codable, Sendable {
     try ConfigurationParser.parse(yaml, overrides: localOverrides, source: source)
   }
 
-  public static func load(inputRoot: URL, applyLocalOverrides: Bool = true) throws -> Manifest {
-    let fm = FileManager.default
-    let file = inputRoot.appendingPathComponent("pinewind.yaml")
-    guard fm.fileExists(atPath: file.path) else {
-      return Manifest(entries: [.userFiles(FileFilter())])
+  public static func load(
+    inputRoot: URL, localStateRoot: URL, applyLocalOverrides: Bool = true
+  ) async throws -> Manifest {
+    guard inputRoot.isFileURL, localStateRoot.isFileURL else {
+      throw PinewindError("configuration roots must be file URLs")
     }
-    let local = inputRoot.appendingPathComponent("pinewind.local.yaml")
-    let overrides =
-      applyLocalOverrides && fm.fileExists(atPath: local.path)
-      ? try String(contentsOf: local, encoding: .utf8) : nil
-    return try parse(
-      String(contentsOf: file, encoding: .utf8),
-      localOverrides: overrides, source: file.path)
+    guard try !SafePath.overlaps(inputRoot, localStateRoot) else {
+      throw PinewindError("local state must not overlap the configuration input directory")
+    }
+    let file = inputRoot.appendingPathComponent("pinewind.yaml")
+    let local = localStateRoot.appendingPathComponent("pinewind.local.yaml")
+    let requests =
+      [FileAccessRequest(url: file, intent: .read)]
+      + (applyLocalOverrides ? [FileAccessRequest(url: local, intent: .read)] : [])
+    return try await FileAccessCoordinator.platform(localStateRoot: localStateRoot).coordinate(
+      requests
+    ) { urls in
+      guard let bytes = try Configuration.read(urls[0]) else {
+        return Manifest(entries: [.userFiles(FileFilter())])
+      }
+      func text(_ bytes: Data) throws -> String {
+        guard let text = String(data: bytes, encoding: .utf8) else {
+          throw PinewindError("configuration must be UTF-8 YAML")
+        }
+        return text
+      }
+      let overrides = applyLocalOverrides ? try Configuration.read(urls[1]).map(text) : nil
+      return try parse(text(bytes), localOverrides: overrides, source: urls[0].path)
+    }
   }
 }
 
