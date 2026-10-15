@@ -168,14 +168,7 @@ public struct SourceIdentity: Hashable, Sendable {
 
   static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
-      guard !url.path.hasPrefix("~"), (url.path as NSString).isAbsolutePath else {
-        throw PinewindError("file sources require absolute paths")
-      }
-      #if !os(Windows)
-        guard url.host == nil || url.host == "" || url.host == "localhost" else {
-          throw PinewindError("file URLs must refer to the local machine")
-        }
-      #endif
+      _ = try NativePath.from(url)
       return url.standardizedFileURL
     }
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),

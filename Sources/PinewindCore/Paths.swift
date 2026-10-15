@@ -135,6 +135,13 @@ enum NativePath {
     #if os(Windows)
       var value = representation.replacingOccurrences(of: "/", with: "\\")
       if value.hasPrefix("\\"), value.dropFirst(2).hasPrefix(":") { value.removeFirst() }
+      // Corelibs' filesystem representation omits the file URL's authority.
+      // Preserve it when constructing a native UNC path.
+      if let host = url.host, !host.isEmpty, !value.hasPrefix("\\\\"),
+        host != "localhost" || !FilePath(value).isAbsolute
+      {
+        value = "\\\\" + host + "\\" + value.drop(while: { $0 == "\\" })
+      }
       let path = FilePath(value)
     #else
       guard url.host == nil || url.host == "" || url.host == "localhost" else {
