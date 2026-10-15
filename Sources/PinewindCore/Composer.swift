@@ -4,8 +4,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import Darwin
 import Foundation
+
+#if !os(Windows)
+  import CPinewindPlatform
+#endif
 
 public struct CompositionResult: Sendable {
   public let directory: URL
@@ -15,12 +18,13 @@ public struct CompositionResult: Sendable {
   public let reusedPaths: [String]
 }
 
-/// Renders a candidate generation and atomically exchanges it with the active
+/// Renders a candidate generation and atomically publishes it as the active
 /// output. Previous bytes are only reused after comparing the fully rendered
 /// candidate, so deletions, local edits and lost change notifications stay correct.
 public actor Composer {
   public init() {}
 
+  /// On Windows, outputRoot must be absent, empty, or a junction managed by Pinewind.
   public func compose(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
     -> CompositionResult
   {
@@ -30,16 +34,43 @@ public actor Composer {
     guard inputRoot.isFileURL, outputRoot.isFileURL else {
       throw PinewindError("composition roots must be file URLs")
     }
+    #if os(Windows)
+      try SafePath.validateOutputRoot(outputRoot)
+      let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
+      try SafePath.validateRoots(
+        input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
+      try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+      return try WindowsDirectoryPublisher.withPublicationLock(in: storage) {
+        try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+      }
+    #else
+      return try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+    #endif
+  }
+
+  private func composeGeneration(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
+    -> CompositionResult
+  {
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
+    #if os(Windows)
+      try WindowsDirectoryPublisher.validate(outputRoot)
+    #endif
     let fm = FileManager.default
     let exists = fm.fileExists(atPath: outputRoot.path)
     let previous = exists ? try SafePath.files(in: outputRoot) : []
     let parent = outputRoot.deletingLastPathComponent()
     try fm.createDirectory(at: parent, withIntermediateDirectories: true)
-    let candidate = parent.appendingPathComponent(".pinewind-" + UUID().uuidString)
+    #if os(Windows)
+      let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
+      let candidate = storage.appendingPathComponent(
+        "generation-" + UUID().uuidString, isDirectory: true)
+    #else
+      let candidate = parent.appendingPathComponent(".pinewind-" + UUID().uuidString)
+    #endif
     try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
-    defer { try? fm.removeItem(at: candidate) }
+    var retained = false
+    defer { if !retained { try? fm.removeItem(at: candidate) } }
     var reused: [String] = []
     var changed: [String] = []
     for path in plan.paths {
@@ -48,8 +79,14 @@ public actor Composer {
       try fm.createDirectory(
         at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
       try render(operations, to: destination)
-      let old = try SafePath.file(path, in: outputRoot)
-      if exists, fm.fileExists(atPath: old.path), try SnapshotFiles.sameContents(old, destination) {
+      var matchesPrevious = false
+      if exists {
+        let old = try SafePath.file(path, in: outputRoot)
+        matchesPrevious =
+          try fm.fileExists(atPath: old.path)
+          && SnapshotFiles.sameContents(old, destination)
+      }
+      if matchesPrevious {
         reused.append(path)
       } else {
         changed.append(path)
@@ -62,17 +99,21 @@ public actor Composer {
         directory: outputRoot, paths: plan.paths,
         changedPaths: [], removedPaths: [], reusedPaths: reused)
     }
-    if exists {
-      // Darwin directory exchange keeps an existing, nonempty output visible.
-      guard
-        renameatx_np(AT_FDCWD, candidate.path, AT_FDCWD, outputRoot.path, UInt32(RENAME_SWAP)) == 0
-      else {
-        throw PinewindError(
-          "cannot atomically exchange composition directories: \(String(cString: strerror(errno)))")
+    #if os(Windows)
+      try WindowsDirectoryPublisher.publish(candidate, at: outputRoot)
+      retained = true
+    #else
+      if exists {
+        let status = pinewind_exchange_directories(candidate.path, outputRoot.path)
+        guard status == 0 else {
+          throw PinewindError(
+            "cannot atomically exchange composition directories: \(String(cString: strerror(status))) (errno \(status))"
+          )
+        }
+      } else {
+        try fm.moveItem(at: candidate, to: outputRoot)
       }
-    } else {
-      try fm.moveItem(at: candidate, to: outputRoot)
-    }
+    #endif
     return CompositionResult(
       directory: outputRoot, paths: plan.paths,
       changedPaths: changed, removedPaths: removed, reusedPaths: reused)

@@ -27,6 +27,71 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Identify macOS build environment
+        id: swiftpm-environment
+        run: |
+          fingerprint=$(
+            {
+              swift --version
+              xcodebuild -version
+              xcrun --sdk macosx --show-sdk-build-version
+              sw_vers -buildVersion
+            } | shasum -a 256 | cut -d ' ' -f 1
+          )
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Cache SwiftPM build and dependencies
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+      - name: swift test
+        run: swift test --no-parallel
+
+  linux-test:
+    name: Linux · swift test
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install C dependencies
+        run: |
+          apt-get update
+          apt-get install -y zlib1g-dev libssl-dev pkg-config ca-certificates
+      - name: Identify Linux build environment
+        id: swiftpm-environment
+        run: |
+          fingerprint=$(
+            {
+              swift --version
+              dpkg-query -W
+            } | sha256sum | cut -d ' ' -f 1
+          )
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Cache SwiftPM build and dependencies
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: linux-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+      - name: swift test
+        run: swift test --no-parallel
+
+  windows-test:
+    name: Windows · swift test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: SwiftyLab/setup-swift@v1
+        id: swift
+        with:
+          swift-version: '6.3.1'
+      - name: Identify Windows image
+        id: windows-image
+        run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
+      - name: Cache SwiftPM build and dependencies
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
         run: swift test --no-parallel
 
@@ -58,63 +123,60 @@ jobs:
             Package.resolved
       - name: Select simulator
         run: |
-          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
-          python3 - "$RUNNER_TEMP/simulators.json" >> "$GITHUB_ENV" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1]) as file:
-              devices = json.load(file)["devices"]
-          for runtime, entries in devices.items():
-              if ".iOS-" not in runtime:
-                  continue
-              for device in entries:
-                  if device["name"].startswith("iPhone") and device.get("isAvailable", False):
-                      print("SIM_ID=" + device["udid"])
-                      sys.exit(0)
-          sys.exit("No available iPhone simulator")
-          PY
+          if ! sim_id=$(
+            xcrun simctl list devices available --json | jq -er '
+              first(
+                .devices | to_entries[]
+                | select(.key | contains(".iOS-"))
+                | .value[]
+                | select(.isAvailable and (.name | startswith("iPhone")))
+                | .udid
+              )
+            '
+          ); then
+            echo "::error::Cannot select an available iPhone simulator"
+            exit 1
+          fi
+          echo "SIM_ID=$sim_id" >> "$GITHUB_ENV"
       - name: Prepare diagnostics directory
-        run: mkdir -p ci-output
+        run: mkdir -p "$RUNNER_TEMP/pinewind-ios-diagnostics"
       - name: Build and test on iOS Simulator
         uses: sersoft-gmbh/xcodebuild-action@v4
         with:
           spm-package: .
           scheme: Pinewind
           destination: platform=iOS Simulator,id=${{ env.SIM_ID }}
-          result-bundle-path: ci-output/Pinewind.xcresult
+          result-bundle-path: ${{ runner.temp }}/pinewind-ios-diagnostics/Pinewind.xcresult
           parallel-testing-enabled: false
           disable-automatic-package-resolution: true
           skip-macro-validation: true
           skip-package-plugin-validation: true
           build-settings: CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO
-          output-formatter: tee ci-output/ios-test.log
+          output-formatter: tee "${{ runner.temp }}/pinewind-ios-diagnostics/ios-test.log"
       - name: Collect diagnostics
         if: always()
         run: |
-          mkdir -p diagnostics
-          if [ -d ci-output/Pinewind.xcresult ]; then
-            cp -R ci-output/Pinewind.xcresult diagnostics/
-            xcrun xcresulttool get test-results summary --path ci-output/Pinewind.xcresult \
-              > diagnostics/test-summary.json 2>&1 || true
+          diagnostics="$RUNNER_TEMP/pinewind-ios-diagnostics"
+          mkdir -p "$diagnostics"
+          if [ -d "$diagnostics/Pinewind.xcresult" ]; then
+            xcrun xcresulttool get test-results summary --path "$diagnostics/Pinewind.xcresult" \
+              > "$diagnostics/test-summary.json" 2>&1 || true
           fi
-          if [ -f ci-output/ios-test.log ]; then
-            cp ci-output/ios-test.log diagnostics/
-          fi
-          cp ~/Library/Logs/DiagnosticReports/*.ips diagnostics/ 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/*.ips "$diagnostics/" 2>/dev/null || true
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ios-simulator-diagnostics
-          path: diagnostics
+          path: ${{ runner.temp }}/pinewind-ios-diagnostics
           if-no-files-found: warn
       - name: Failure diagnostics dump
         if: failure()
         run: |
-          if [ -f diagnostics/test-summary.json ]; then
-            cat diagnostics/test-summary.json
+          diagnostics="$RUNNER_TEMP/pinewind-ios-diagnostics"
+          if [ -f "$diagnostics/test-summary.json" ]; then
+            cat "$diagnostics/test-summary.json"
           fi
-          if [ -f diagnostics/ios-test.log ]; then
-            tail -n 100 diagnostics/ios-test.log
+          if [ -f "$diagnostics/ios-test.log" ]; then
+            tail -n 100 "$diagnostics/ios-test.log"
           fi

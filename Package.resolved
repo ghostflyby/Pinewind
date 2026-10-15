@@ -1,5 +1,5 @@
 {
-  "originHash" : "54ee55a3e4c053d4ecb7c2c5f96ba6d247dda3d764837360a59017f2c521340b",
+  "originHash" : "cd28f922c2a507a8bf1fe67ce4b2a5520c48136b61912d5d051326786577b632",
   "pins" : [
     {
       "identity" : "csqlite",
@@ -114,8 +114,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/davbeck/swift-glob.git",
       "state" : {
-        "revision" : "f039a675d39ba178f710980a64dd0a142e83dcde",
-        "version" : "1.0.0"
+        "revision" : "db32ccb46de66f83afad415ccb1609d08dfa5266"
       }
     },
     {

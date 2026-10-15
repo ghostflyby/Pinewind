@@ -17,8 +17,9 @@ private struct Fixture {
   var b: URL { root.appendingPathComponent("b") }
 
   init(_ name: String? = nil) throws {
-    root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "pinewind-test-" + UUID().uuidString)
+    root = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+      .appendingPathComponent(
+        "pinewind-test-" + UUID().uuidString)
     let fm = FileManager.default
     try fm.createDirectory(at: root, withIntermediateDirectories: true)
     do {
@@ -355,23 +356,183 @@ struct CompositionTests {
     let entries = try [ManifestEntry.package(f.request(f.a))]
     let composer = Composer()
     _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    let before =
-      try f.output.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
-      as? NSObject
+    let file = f.output.appendingPathComponent("default.yaml")
+    let sentinel = Date(timeIntervalSince1970: 946_684_800)
+    try FileManager.default.setAttributes([.modificationDate: sentinel], ofItemAtPath: file.path)
     let unchanged = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     let after =
-      try f.output.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
-      as? NSObject
+      try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
     #expect(unchanged.changedPaths.isEmpty)
     #expect(unchanged.reusedPaths == ["default.yaml"])
-    #expect(before != nil && before == after)
+    #expect(after == sentinel)
     try f.write("default.yaml", "value: new\n", in: f.a)
     let changed = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     #expect(changed.changedPaths == ["default.yaml"])
     #expect(try f.read("default.yaml") == "value: new\n")
   }
+
+  @Test func crlfPatchMarkersAreReplacedAndLineEndingsArePreserved() throws {
+    let original = Data("__patch:\r\n# Rx: demo {\r\n  - old: true\r\n# }\r\n".utf8)
+    let bytes = try PatchRenderer.apply(original, rx: "demo", body: "- new: true")
+    let text = try #require(String(data: bytes, encoding: .utf8))
+    #expect(!text.contains("old: true"))
+    #expect(text.components(separatedBy: "# Rx:").count == 2)
+    #expect(text.contains("  - new: true\r\n"))
+    #expect(try PatchRenderer.apply(bytes, rx: "demo", body: "- new: true") == bytes)
+  }
+
+  @Test func compositionRejectsFilesystemRootAndCaseAliases() throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    #expect(throws: PinewindError.self) {
+      try SafePath.validateRoots(input: f.input, output: URL(fileURLWithPath: "/"), sources: [])
+    }
+    #if os(Windows)
+      let alias = URL(fileURLWithPath: f.input.path.uppercased())
+      #expect(throws: PinewindError.self) {
+        try SafePath.validateRoots(
+          input: f.input, output: alias.appendingPathComponent("out"), sources: [])
+      }
+      try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
+      try f.write("keep.txt", "keep", in: f.output)
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(try f.read("keep.txt") == "keep")
+    #endif
+  }
+
+  @Test func publishingNeverRemovesTheVisibleGeneration() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let composer = Composer()
+    let entries = [ManifestEntry.userFiles(FileFilter())]
+    try f.write("default.yaml", "value: a\n", in: f.input)
+    _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    let file = f.output.appendingPathComponent("default.yaml")
+    let reader = Task.detached { () -> (failures: [String], reads: Int) in
+      var failures: [String] = []
+      var reads = 0
+      while !Task.isCancelled {
+        do {
+          let value = try String(contentsOf: file, encoding: .utf8)
+          reads += 1
+          if value != "value: a\n" && value != "value: b\n" { failures.append(value) }
+        } catch { failures.append(String(describing: error)) }
+        await Task.yield()
+      }
+      return (failures, reads)
+    }
+    defer { reader.cancel() }
+    for index in 0..<20 {
+      try f.write(
+        "default.yaml", index.isMultiple(of: 2) ? "value: b\n" : "value: a\n", in: f.input)
+      _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    }
+    reader.cancel()
+    let observations = await reader.value
+    #expect(observations.reads > 0)
+    #expect(observations.failures.isEmpty)
+  }
+
+  #if os(Windows)
+    @Test func independentComposersKeepPublishedAndPendingGenerations() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      let entries = [ManifestEntry.userFiles(FileFilter())]
+      let bytesA = String(repeating: "a", count: 256 * 1024)
+      let bytesB = String(repeating: "b", count: 256 * 1024)
+      for index in 0..<8 { try f.write("dicts/\(index).txt", bytesA, in: f.input) }
+      let planA = try f.plan(entries)
+      for index in 0..<8 { try f.write("dicts/\(index).txt", bytesB, in: f.input) }
+      let planB = try f.plan(entries)
+      _ = try await Composer().compose(planA, inputRoot: f.input, outputRoot: f.output)
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for plan in [planA, planB] {
+          group.addTask {
+            let composer = Composer()
+            for _ in 0..<20 {
+              _ = try await composer.compose(plan, inputRoot: f.input, outputRoot: f.output)
+            }
+          }
+        }
+        try await group.waitForAll()
+      }
+      let first = try f.read("dicts/0.txt")
+      #expect(first == bytesA || first == bytesB)
+      for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
+      let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
+      #expect(FileManager.default.fileExists(atPath: active.path))
+    }
+
+    @Test(arguments: ["https://example.com/output", "file:///C:/bad%00path"])
+    func malformedJunctionPathsThrowTypedErrors(_ text: String) throws {
+      let url = try #require(URL(string: text))
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
+      let literal = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "pinewind-percent%00-" + UUID().uuidString)
+      #expect(try WindowsDirectoryPublisher.currentTarget(literal) == nil)
+    }
+
+    @Test func ordinaryOutputFileReportsTypedErrorAndRemainsIntact() throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      let bytes = Data("keep".utf8)
+      try bytes.write(to: f.output)
+      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(try Data(contentsOf: f.output) == bytes)
+    }
+
+    @Test func emptyOutputDirectoryIsAdoptedAsAJunction() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: false)
+      try f.write("default.yaml", "value: adopted\n", in: f.input)
+      _ = try await Composer().compose(
+        f.plan([.userFiles(FileFilter())]), inputRoot: f.input, outputRoot: f.output)
+      #expect(try WindowsDirectoryPublisher.currentTarget(f.output) != nil)
+      #expect(try f.read("default.yaml") == "value: adopted\n")
+    }
+
+    @Test(arguments: [false, true])
+    func danglingManagedJunctionIsRepaired(hasFiles: Bool) async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      if hasFiles { try f.write("default.yaml", "value: repaired\n", in: f.input) }
+      let plan = try f.plan([.userFiles(FileFilter())])
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let old = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
+      try FileManager.default.removeItem(at: old)
+      #expect(!FileManager.default.fileExists(atPath: f.output.path))
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let repaired = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
+      #expect(repaired != old)
+      #expect(FileManager.default.fileExists(atPath: repaired.path))
+      if hasFiles { #expect(try f.read("default.yaml") == "value: repaired\n") }
+    }
+
+    @Test func managedJunctionTargetAcceptsAncestorJunctionAliases() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try f.write("default.yaml", "value: alias\n", in: f.input)
+      let plan = try f.plan([.userFiles(FileFilter())])
+      _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
+      let alias = f.root.appendingPathComponent("parent-alias")
+      try FileManager.default.createDirectory(at: alias, withIntermediateDirectories: false)
+      try WindowsDirectoryPublisher.redirect(alias, to: f.root)
+      defer { try? FileManager.default.removeItem(at: alias) }
+      let aliasedTarget = alias.appendingPathComponent(
+        active.deletingLastPathComponent().lastPathComponent
+      )
+      .appendingPathComponent(active.lastPathComponent)
+      try WindowsDirectoryPublisher.redirect(f.output, to: aliasedTarget)
+      try WindowsDirectoryPublisher.validate(f.output)
+      let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+      #expect(result.changedPaths.isEmpty)
+      #expect(try f.read("default.yaml") == "value: alias\n")
+    }
+  #endif
 
   @Test func globDetectsNewFilesAndRemovesDeletedOutputs() async throws {
     let f = try Fixture()
