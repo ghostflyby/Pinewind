@@ -38,10 +38,14 @@ let package = Package(
       ]),
     .testTarget(
       name: "PinewindAPITests",
-      dependencies: ["PinewindCore", .product(name: "SystemPackage", package: "swift-system")]),
+      dependencies: ["PinewindCore", .product(name: "SystemPackage", package: "swift-system")],
+      resources: [.copy("Fixtures")]),
     .testTarget(
       name: "PinewindCoreTests",
-      dependencies: ["PinewindCore", .product(name: "CGitKit", package: "GitKit")],
+      dependencies: [
+        "PinewindCore", .product(name: "CGitKit", package: "GitKit"),
+        .product(name: "BashInterpreter", package: "SwiftBash"),
+      ],
       resources: [.copy("Fixtures")]),
   ]
 )

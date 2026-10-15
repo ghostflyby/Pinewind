@@ -16,7 +16,7 @@ import Testing
 #endif
 
 @Suite("Pinewind GitKit acquisition")
-struct GitKitFetcherTests {
+struct GitKitRepositoryProviderTests {
   @Test(arguments: [
     (
       "https://GIT.EXAMPLE:443/team/Project.git/", "https://git.example/team/Project.git",
@@ -37,8 +37,10 @@ struct GitKitFetcherTests {
     let f = try GitFixture()
     defer { f.remove() }
     let commit = try f.commit("first")
-    let manifest = try Manifest.parse(
+    let document = try ManifestDocument.parse(
       "version: 1\nnames: {package: {url: \(input), revision: {ref: main}}}\norder: [package]")
+    let configuration = try configurationSnapshot(document)
+    let manifest = try configuration.evaluate(.shared)
     guard case .package(let request) = try #require(manifest.entries.first) else {
       Issue.record("expected a package declaration")
       return
@@ -46,30 +48,33 @@ struct GitKitFetcherTests {
     #expect(request.url.absoluteString == requestURL)
     let resolution = try Resolution(
       declarations: manifest, expanded: manifest,
-      packages: [LockedPackage(request: request, commit: commit)])
-    let lock = f.root.appendingPathComponent("pinewind.lock")
-    try resolution.write(to: lock)
-    let restored = try Resolution.read(from: lock)
-    try restored.validate(against: manifest)
+      packages: [LockedPackage(request: request, commit: CommitID(commit))],
+      snapshot: configuration, preview: false)
+    let restored = try ResolutionCodec.decode(
+      ResolutionCodec.encode(resolution), snapshot: configuration)
     let locked = try #require(restored.packages.first)
     #expect(locked.request.url.absoluteString == requestURL)
-    let backend = GitKitPackageFetcher(
+    let backend = GitKitRepositoryProvider(
       transport: LocalGitTransport(origin: f.origin, expectedURL: URL(string: remoteURL)!))
-    #expect(try await backend.resolveDefaultBranch(url: locked.request.url) == "main")
-    #expect(try await backend.resolveCommit(url: locked.request.url, ref: "main") == commit)
+    #expect(
+      try await backend.resolve(RepositoryRequest(url: locked.request.url)).commit.string == commit)
+    #expect(
+      try await backend.resolve(
+        RepositoryRequest(url: locked.request.url, revision: .branch("main"))
+      ).commit.string == commit)
     let snapshot = try await backend.prepareSource(
-      url: locked.request.url, commit: locked.commit, cacheRoot: f.cache)
+      SourceIdentity(url: locked.request.url, commit: locked.commit), cacheRoot: native(f.cache))
     #expect(try SourceIdentity.normalize(snapshot.identity.url).absoluteString == identityURL)
     #expect(
       snapshot.directory.deletingLastPathComponent().lastPathComponent
-        == GitKitPackageFetcher.cacheKey(URL(string: identityURL)!))
+        == GitKitRepositoryProvider.cacheKey(URL(string: identityURL)!))
     #expect(
       try String(
         contentsOf: snapshot.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
         == "value: first\n")
     try FileManager.default.removeItem(at: f.origin)
     let reused = try await backend.prepareSource(
-      url: URL(string: identityURL)!, commit: commit, cacheRoot: f.cache)
+      SourceIdentity(url: URL(string: identityURL)!, commit: commit), cacheRoot: native(f.cache))
     #expect(reused.directory == snapshot.directory)
   }
 
@@ -79,17 +84,28 @@ struct GitKitFetcherTests {
     let first = try f.commit("first")
     try f.tag("v1", commit: first)
     let backend = f.backend()
-    #expect(try await backend.resolveDefaultBranch(url: f.url) == "main")
-    #expect(try await backend.resolveCommit(url: f.url, ref: "main") == first)
-    #expect(try await backend.resolveCommit(url: f.url, ref: "refs/heads/main") == first)
-    #expect(try await backend.resolveCommit(url: f.url, ref: "v1") == first)
-    #expect(try await backend.resolveCommit(url: f.url, ref: "refs/tags/v1") == first)
+    #expect(try await backend.resolve(RepositoryRequest(url: f.url)).commit.string == first)
+    #expect(
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .branch("main"))).commit
+        .string == first)
+    #expect(
+      try await backend.resolve(
+        RepositoryRequest(url: f.url, revision: .reference("refs/heads/main"))
+      ).commit.string == first)
+    #expect(
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .reference("v1"))).commit
+        .string == first)
+    #expect(
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .tag("v1"))).commit.string
+        == first)
     await #expect(throws: PinewindError.self) {
-      try await backend.resolveCommit(url: f.url, ref: "missing")
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .reference("missing")))
+        .commit.string
     }
     try f.branch("v1", commit: first)
     await #expect(throws: PinewindError.self) {
-      try await backend.resolveCommit(url: f.url, ref: "v1")
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .reference("v1"))).commit
+        .string
     }
   }
 
@@ -98,7 +114,8 @@ struct GitKitFetcherTests {
     defer { f.remove() }
     let first = try f.commit("first")
     let backend = f.backend()
-    let old = try await backend.prepareSource(url: f.url, commit: first, cacheRoot: f.cache)
+    let old = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: first), cacheRoot: native(f.cache))
     #expect(
       try String(contentsOf: old.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
         == "value: first\n")
@@ -106,8 +123,11 @@ struct GitKitFetcherTests {
       !FileManager.default.fileExists(atPath: old.directory.appendingPathComponent(".git").path))
     try Data("value: second\n".utf8).write(to: f.origin.appendingPathComponent("default.yaml"))
     let second = try f.commit("second")
-    #expect(try await backend.resolveCommit(url: f.url, ref: "main") == second)
-    let new = try await backend.prepareSource(url: f.url, commit: second, cacheRoot: f.cache)
+    #expect(
+      try await backend.resolve(RepositoryRequest(url: f.url, revision: .branch("main"))).commit
+        .string == second)
+    let new = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: second), cacheRoot: native(f.cache))
     #expect(old.identity.commit.string == first && new.identity.commit.string == second)
     #expect(old.directory != new.directory)
     #expect(
@@ -116,7 +136,7 @@ struct GitKitFetcherTests {
     #expect(
       try String(contentsOf: new.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
         == "value: second\n")
-    let request = try PackageRequest(url: f.url, commit: first)
+    let request = try PackageRequest(url: f.url, revision: .commit(CommitID(first)))
     let prepared = try PreparedPackage(request: request, directory: old.directory, commit: first)
     let input = f.root.appendingPathComponent("input")
     try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
@@ -134,12 +154,15 @@ struct GitKitFetcherTests {
     defer { f.remove() }
     let commit = try f.commit("first")
     let backend = f.backend()
-    let initial = try await backend.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
+    let initial = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     try FileManager.default.removeItem(at: f.origin)
-    let reused = try await backend.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
+    let reused = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     #expect(initial.directory == reused.directory)
     try FileManager.default.removeItem(at: initial.directory)
-    let rebuilt = try await backend.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
+    let rebuilt = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     #expect(
       try String(
         contentsOf: rebuilt.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
@@ -153,10 +176,12 @@ struct GitKitFetcherTests {
     try Data("value: descendant\n".utf8).write(to: f.origin.appendingPathComponent("default.yaml"))
     let descendant = try f.commit("descendant")
     let backend = f.backend()
-    _ = try await backend.prepareSource(url: f.url, commit: descendant, cacheRoot: f.cache)
-    _ = try await backend.prepareSource(url: f.url, commit: ancestor, cacheRoot: f.cache)
+    _ = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: descendant), cacheRoot: native(f.cache))
+    _ = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: ancestor), cacheRoot: native(f.cache))
     let directory = f.cache.appendingPathComponent("repositories")
-      .appendingPathComponent(GitKitPackageFetcher.cacheKey(f.url) + ".git")
+      .appendingPathComponent(GitKitRepositoryProvider.cacheKey(f.url) + ".git")
     var repository: OpaquePointer?
     #expect(git_repository_open(&repository, directory.path) == 0)
     defer { git_repository_free(repository) }
@@ -172,14 +197,16 @@ struct GitKitFetcherTests {
     defer { f.remove() }
     let commit = try f.commit("first")
     let directory = f.cache.appendingPathComponent("packages").appendingPathComponent(
-      GitKitPackageFetcher.cacheKey(f.url)
+      GitKitRepositoryProvider.cacheKey(f.url)
     ).appendingPathComponent(commit)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try Data("partial".utf8).write(to: directory.appendingPathComponent("partial.txt"))
     let a = f.backend()
     let b = f.backend()
-    async let left = a.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
-    async let right = b.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
+    async let left = a.prepareSource(
+      SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
+    async let right = b.prepareSource(
+      SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     let (first, second) = try await (left, right)
     #expect(first.directory == second.directory)
     #expect(
@@ -194,10 +221,11 @@ struct GitKitFetcherTests {
     _ = try f.commit("first")
     let missing = String(repeating: "a", count: 40)
     await #expect(throws: PinewindError.self) {
-      try await f.backend().prepareSource(url: f.url, commit: missing, cacheRoot: f.cache)
+      try await f.backend().prepareSource(
+        SourceIdentity(url: f.url, commit: missing), cacheRoot: native(f.cache))
     }
     let directory = f.cache.appendingPathComponent("packages").appendingPathComponent(
-      GitKitPackageFetcher.cacheKey(f.url)
+      GitKitRepositoryProvider.cacheKey(f.url)
     ).appendingPathComponent(missing)
     #expect(!FileManager.default.fileExists(atPath: directory.path))
   }
@@ -207,12 +235,14 @@ struct GitKitFetcherTests {
     defer { f.remove() }
     let first = try f.commit("first")
     let backend = f.backend()
-    let good = try await backend.prepareSource(url: f.url, commit: first, cacheRoot: f.cache)
+    let good = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: first), cacheRoot: native(f.cache))
     try FileManager.default.createSymbolicLink(
       atPath: f.origin.appendingPathComponent("link").path, withDestinationPath: "default.yaml")
     let bad = try f.commit("symlink", extra: ["link"])
     await #expect(throws: PinewindError.self) {
-      try await backend.prepareSource(url: f.url, commit: bad, cacheRoot: f.cache)
+      try await backend.prepareSource(
+        SourceIdentity(url: f.url, commit: bad), cacheRoot: native(f.cache))
     }
     #expect(
       try String(contentsOf: good.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
@@ -232,18 +262,22 @@ struct GitKitFetcherTests {
   func rejectsNonHTTPSAndMalformedSources(_ text: String) async throws {
     let url = try #require(URL(string: text))
     await #expect(throws: PinewindError.self) {
-      try await GitKitPackageFetcher().resolveDefaultBranch(url: url)
+      try await GitKitRepositoryProvider().resolve(RepositoryRequest(url: url)).commit.string
     }
   }
 
   @Test func explicitCommitResolutionIsOfflineAndNormalizesCase() async throws {
     let commit = String(repeating: "A", count: 40)
-    let backend = GitKitPackageFetcher()
+    let backend = GitKitRepositoryProvider()
+    let downloader = HTTPSResourceDownloader()
     #expect(
-      try await backend.resolveCommit(url: URL(string: "https://github.com/u/r")!, ref: commit)
+      try await backend.resolve(
+        RepositoryRequest(
+          url: URL(string: "https://github.com/u/r")!, revision: .commit(CommitID(commit)))
+      ).commit.string
         == commit.lowercased())
     await #expect(throws: PinewindError.self) {
-      try await backend.downloadFile(url: URL(string: "http://example.org/file")!)
+      try await downloadedData(using: downloader, from: URL(string: "http://example.org/file")!)
     }
   }
 
@@ -257,12 +291,13 @@ struct GitKitFetcherTests {
     config.protocolClasses = [ResourceProtocol.self]
     let session = URLSession(configuration: config)
     defer { session.invalidateAndCancel() }
-    let backend = GitKitPackageFetcher(session: session)
+    let downloader = HTTPSResourceDownloader(session: session)
     #expect(
-      try await backend.downloadFile(url: URL(string: "https://resource.test/ok")!)
+      try await downloadedData(using: downloader, from: URL(string: "https://resource.test/ok")!)
         == Data("resource".utf8))
     await #expect(throws: PinewindError.self) {
-      try await backend.downloadFile(url: URL(string: "https://resource.test/missing")!)
+      try await downloadedData(
+        using: downloader, from: URL(string: "https://resource.test/missing")!)
     }
   }
 
@@ -271,16 +306,18 @@ struct GitKitFetcherTests {
     config.protocolClasses = [ResourceProtocol.self]
     let session = URLSession(configuration: config)
     defer { session.invalidateAndCancel() }
-    let backend = GitKitPackageFetcher(session: session)
+    let downloader = HTTPSResourceDownloader(session: session)
     do {
-      _ = try await backend.downloadFile(url: URL(string: "https://resource.test/offline")!)
+      _ = try await downloadedData(
+        using: downloader, from: URL(string: "https://resource.test/offline")!)
       Issue.record("expected a transport failure")
     } catch let error as PinewindError {
       #expect(error.code == .io)
       #expect(error.source == "https://resource.test/offline")
     }
     await #expect(throws: CancellationError.self) {
-      try await backend.downloadFile(url: URL(string: "https://resource.test/cancelled")!)
+      try await downloadedData(
+        using: downloader, from: URL(string: "https://resource.test/cancelled")!)
     }
   }
 
@@ -292,7 +329,8 @@ struct GitKitFetcherTests {
     let gate = StartGate()
     let task = Task {
       await gate.wait()
-      return try await backend.prepareSource(url: f.url, commit: commit, cacheRoot: f.cache)
+      return try await backend.prepareSource(
+        SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     }
     task.cancel()
     await gate.release()
@@ -305,21 +343,33 @@ struct GitKitFetcherTests {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "pinewind-network-" + UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
-    let backend = GitKitPackageFetcher()
+    let backend = GitKitRepositoryProvider()
+    let downloader = HTTPSResourceDownloader()
     let url = URL(string: "https://github.com/rime/rime-prelude")!
-    let branch = try await backend.resolveDefaultBranch(url: url)
-    let commit = try await backend.resolveCommit(url: url, ref: "refs/heads/" + branch)
-    let snapshot = try await backend.prepareSource(url: url, commit: commit, cacheRoot: root)
+    let commit = try await backend.resolve(RepositoryRequest(url: url)).commit.string
+    let snapshot = try await backend.prepareSource(
+      SourceIdentity(url: url, commit: commit), cacheRoot: native(root))
     let bytes = try Data(contentsOf: snapshot.directory.appendingPathComponent("default.yaml"))
     #expect(!bytes.isEmpty)
     #expect(
       !FileManager.default.fileExists(
         atPath: snapshot.directory.appendingPathComponent(".git").path))
-    let resource = try await backend.downloadFile(
-      url: URL(
+    let resource = try await downloadedData(
+      using: downloader,
+      from: URL(
         string: "https://raw.githubusercontent.com/rime/rime-prelude/\(commit)/default.yaml")!)
     #expect(resource == bytes)
   }
+}
+
+private func downloadedData(using downloader: HTTPSResourceDownloader, from url: URL) async throws
+  -> Data
+{
+  let file = native(
+    FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+  defer { try? FileManager.default.removeItem(at: file) }
+  try await downloader.download(url, to: file)
+  return try Data(contentsOf: file)
 }
 
 private struct LocalGitTransport: GitTransport {
@@ -373,8 +423,8 @@ private struct GitFixture {
   }
 
   func remove() { try? FileManager.default.removeItem(at: root) }
-  func backend() -> GitKitPackageFetcher {
-    GitKitPackageFetcher(transport: LocalGitTransport(origin: origin))
+  func backend() -> GitKitRepositoryProvider {
+    GitKitRepositoryProvider(transport: LocalGitTransport(origin: origin))
   }
 
   func commit(_ message: String, extra: [String] = []) throws -> String {

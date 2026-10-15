@@ -1,0 +1,2 @@
+download_files: [https://resources.test/extra.txt]
+install_files: [extra.txt]

@@ -56,7 +56,10 @@ enum BlockingIO {
 }
 
 enum NativeLock {
-  static func withLock<T>(_ file: FilePath, _ body: () throws -> T) throws -> T {
+  static func withLock<T>(
+    _ file: FilePath, onContention: (@Sendable () -> Void)? = nil,
+    _ body: () throws -> T
+  ) throws -> T {
     try NativePath.requireAbsolute(file)
     try FileManager.default.createDirectory(
       at: file.removingLastComponent(), withIntermediateDirectories: true)
@@ -77,6 +80,7 @@ enum NativeLock {
         guard GetLastError() == DWORD(ERROR_LOCK_VIOLATION) else {
           throw PinewindError(.io, "cannot acquire operation lock", source: file.string)
         }
+        onContention?()
         try Cancellation.check()
         Thread.sleep(forTimeInterval: 0.02)
       }
@@ -91,6 +95,8 @@ enum NativeLock {
           throw PinewindError(
             .io, "cannot acquire operation lock (errno \(status))", source: file.string)
         }
+        onContention?()
+        try Cancellation.check()
         Thread.sleep(forTimeInterval: 0.02)
       }
       defer { pinewind_unlock_file(descriptor) }

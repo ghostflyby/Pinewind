@@ -53,7 +53,7 @@ struct GlobTests {
     #expect(try !filter.accepts("schemas/test.custom.yaml"))
     #expect(try !filter.accepts("words.txt"))
     #expect(throws: PinewindError.self) {
-      try Manifest.parse("version: 1\norder: [{self: {include: ['[']}}]")
+      try ManifestDocument.parse("version: 1\norder: [{self: {include: ['[']}}]").evaluate()
     }
   }
 }

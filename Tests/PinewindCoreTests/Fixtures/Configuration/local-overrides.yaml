@@ -1,0 +1,7 @@
+version: 1
+names:
+  emoji:
+    recipe: null
+    options: {b: "false"}
+    include: null
+    exclude: []

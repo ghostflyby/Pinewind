@@ -12,6 +12,10 @@ import Testing
 private func url(_ path: FilePath) -> URL {
   URL(filePath: path.string, directoryHint: .notDirectory)
 }
+private func fixtureText(_ path: String) throws -> String {
+  let root = try #require(Bundle.module.url(forResource: "Fixtures", withExtension: nil))
+  return try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+}
 private func write(_ path: FilePath, _ text: String) throws {
   try FileManager.default.createDirectory(
     at: url(path.removingLastComponent()), withIntermediateDirectories: true)
@@ -307,7 +311,7 @@ struct WorkspaceTests {
       firstID,
       files: [
         "recipe.yaml":
-          "download_files: [extra.txt::https://resources.test/extra.txt]\ninstall_files: [extra.txt]\n"
+          try fixtureText("Recipes/explicit-download.recipe.yaml")
       ])
     try f.remote()
     let workspace = try await f.workspace()
@@ -332,7 +336,7 @@ struct WorkspaceTests {
       firstID,
       files: [
         "recipe.yaml":
-          "download_files: [https://resources.test/extra.txt]\ninstall_files: [extra.txt]\n"
+          try fixtureText("Recipes/implicit-download.recipe.yaml")
       ])
     try f.remote()
     let workspace = try await f.workspace()
@@ -391,10 +395,8 @@ struct WorkspaceTests {
     defer { f.remove() }
     let root = URL(string: "https://conf.test/lists/main.conf")!
     let child = URL(string: "https://conf.test/lists/include.conf")!
-    await f.downloads.set(
-      root,
-      "package_list=()\nsource \"${root_dir}/include.conf\"\nsource \"${root_dir}/include.conf\"\n")
-    await f.downloads.set(child, "package_list+=(rime/example)\n")
+    await f.downloads.set(root, try fixtureText("RemoteConf/Repeated/main.conf"))
+    await f.downloads.set(child, try fixtureText("RemoteConf/Repeated/include.conf"))
     try await f.repositories.install(firstID, files: ["default.yaml": "imported"])
     try write(f.manifest, "version: 1\norder:\n  - import: \(root.absoluteString)\n")
     let workspace = try await f.workspace()
@@ -484,19 +486,9 @@ struct WorkspaceTests {
       firstID,
       files: [
         "default.yaml": "shared",
-        "other.recipe.yaml": "recipe: {Rx: other}\ninstall_files: [default.yaml]\n",
+        "other.recipe.yaml": try fixtureText("RepositoryAliases/other.recipe.yaml"),
       ])
-    try write(
-      f.manifest,
-      """
-      version: 1
-      order:
-        - url: https://example.com/team/package.git
-          revision: {branch: main}
-        - url: https://example.com/team/package
-          revision: {branch: main}
-          recipe: other
-      """)
+    try write(f.manifest, fixtureText("RepositoryAliases/manifest.yaml"))
     let workspace = try await f.workspace()
     let resolution = try await workspace.resolve()
     #expect(resolution.packages.count == 2)
@@ -556,8 +548,12 @@ struct WorkspaceTests {
     let initial = try await workspace.resolve()
     let baseline = try Data(contentsOf: url(f.lock))
     await f.downloads.set(remote, "source \"${root_dir}/../outside.conf\"\n")
-    await #expect(throws: (any Error).self) {
+    await #expect {
       _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+    } throws: { error in
+      guard let error = error as? PinewindError else { return false }
+      return error.code == .io && error.source == remote.absoluteString
+        && error.message.contains("permission denied: /outside.conf")
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
     await f.downloads.set(remote, String(repeating: "#padding\n", count: 40))
@@ -565,7 +561,9 @@ struct WorkspaceTests {
       locations: f.locations,
       services: WorkspaceServices(repositories: f.repositories, resources: f.downloads),
       options: WorkspaceOptions(imports: ImportLimits(maximumFileBytes: 64)))
-    await #expect(throws: (any Error).self) { _ = try await bounded.update() }
+    await #expect {
+      _ = try await bounded.update()
+    } throws: { ($0 as? PinewindError)?.code == .resourceLimit }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
   }
   @Test func validationReportsIndependentEntryErrors() async throws {
@@ -621,14 +619,8 @@ struct WorkspaceTests {
     defer { f.remove() }
     let root = URL(string: "https://conf.test/main.conf")!
     let include = URL(string: "https://conf.test/include.conf")!
-    await f.downloads.set(
-      root,
-      """
-      package_list=()
-      if [[ -f "${root_dir}/include.conf" ]]; then source "${root_dir}/include.conf"; fi
-      if [[ -f "${root_dir}/missing.conf" ]]; then package_list+=(rime/missing); fi
-      """)
-    await f.downloads.set(include, "package_list+=(rime/first)\n")
+    await f.downloads.set(root, try fixtureText("RemoteConf/Probes/main.conf"))
+    await f.downloads.set(include, try fixtureText("RemoteConf/Probes/include.conf"))
     try await f.repositories.install(firstID, files: ["default.yaml": "probe"])
     try write(f.manifest, "version: 1\norder: [{import: \(root.absoluteString)}]\n")
     let workspace = try await f.workspace()

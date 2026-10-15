@@ -524,60 +524,65 @@ public actor Workspace {
   private func expand(_ request: ConfImport, index: Int, snapshot: ConfigurationSnapshot)
     async throws -> ResolvedImport
   {
-    let importer = PlumImporter(limits: options.imports)
-    let descriptors: [String]
-    let pins: [PinnedResource]
-    if request.source.hasPrefix(":") {
-      descriptors = try BuiltinPackageLists.descriptors(for: request.source)
-      pins = []
-    } else if let url = URL(string: request.source), url.scheme?.lowercased() == "https" {
-      guard !url.lastPathComponent.isEmpty else {
-        throw PinewindError(.invalidConfiguration, "remote conf URL requires a filename")
+    do {
+      let importer = PlumImporter(limits: options.imports)
+      let descriptors: [String]
+      let pins: [PinnedResource]
+      if request.source.hasPrefix(":") {
+        descriptors = try BuiltinPackageLists.descriptors(for: request.source)
+        pins = []
+      } else if let url = URL(string: request.source), url.scheme?.lowercased() == "https" {
+        guard !url.lastPathComponent.isEmpty else {
+          throw PinewindError(.invalidConfiguration, "remote conf URL requires a filename")
+        }
+        let view = try await BlockingIO.run {
+          try CompositionSnapshot(root: self.locations.cacheRoot.appending("imports"))
+        }
+        defer { withExtendedLifetime(view) {} }
+        let capture = RemoteConfCapture(
+          url: url, directory: view.directory, store: resources, limits: options.imports)
+        let file = view.directory.appending(url.lastPathComponent)
+        descriptors = try await importer.evaluate(
+          file: file, resourceRoot: view.directory, variables: request.variables,
+          fileSystem: RemoteConfFileSystem(capture: capture, directory: view.directory))
+        pins = await capture.resources()
+      } else {
+        guard !request.source.contains("://") else {
+          throw PinewindError(
+            .invalidConfiguration, "conf sources require HTTPS or a relative local path")
+        }
+        let manifest = try snapshot.locations.configuration.manifest.url
+        let path =
+          request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
+        let source = try SafePath.file(
+          path, in: NativePath.from(manifest.deletingLastPathComponent()))
+        let view = try await BlockingIO.run {
+          try CompositionSnapshot(root: snapshot.locations.cacheRoot.appending("imports"))
+        }
+        defer { withExtendedLifetime(view) {} }
+        let rootURL = manifest.deletingLastPathComponent().appendingPathComponent(path)
+          .deletingLastPathComponent()
+        let capture = LocalConfCapture(
+          root: rootURL, directory: view.directory, coordinator: store.coordinator,
+          limits: options.imports)
+        let original = MountedFileSystem(
+          mounts: [
+            .init(virtual: "/conf", host: source.removingLastComponent().string, readOnly: true)
+          ], backing: RealFileSystem())
+        descriptors = try await importer.evaluate(
+          file: view.directory.appending(source.lastPathComponent), resourceRoot: view.directory,
+          variables: request.variables,
+          fileSystem: RemoteConfFileSystem(
+            capture: capture, directory: view.directory, original: original))
+        pins = []
       }
-      let view = try await BlockingIO.run {
-        try CompositionSnapshot(root: self.locations.cacheRoot.appending("imports"))
-      }
-      defer { withExtendedLifetime(view) {} }
-      let capture = RemoteConfCapture(
-        url: url, directory: view.directory, store: resources, limits: options.imports)
-      let file = view.directory.appending(url.lastPathComponent)
-      descriptors = try await importer.evaluate(
-        file: file, resourceRoot: view.directory, variables: request.variables,
-        fileSystem: RemoteConfFileSystem(capture: capture, directory: view.directory))
-      pins = await capture.resources()
-    } else {
-      guard !request.source.contains("://") else {
-        throw PinewindError(
-          .invalidConfiguration, "conf sources require HTTPS or a relative local path")
-      }
-      let manifest = try snapshot.locations.configuration.manifest.url
-      let path =
-        request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
-      let source = try SafePath.file(
-        path, in: NativePath.from(manifest.deletingLastPathComponent()))
-      let view = try await BlockingIO.run {
-        try CompositionSnapshot(root: snapshot.locations.cacheRoot.appending("imports"))
-      }
-      defer { withExtendedLifetime(view) {} }
-      let rootURL = manifest.deletingLastPathComponent().appendingPathComponent(path)
-        .deletingLastPathComponent()
-      let capture = LocalConfCapture(
-        root: rootURL, directory: view.directory, coordinator: store.coordinator,
-        limits: options.imports)
-      let original = MountedFileSystem(
-        mounts: [
-          .init(virtual: "/conf", host: source.removingLastComponent().string, readOnly: true)
-        ], backing: RealFileSystem())
-      descriptors = try await importer.evaluate(
-        file: view.directory.appending(source.lastPathComponent), resourceRoot: view.directory,
-        variables: request.variables,
-        fileSystem: RemoteConfFileSystem(
-          capture: capture, directory: view.directory, original: original))
-      pins = []
+      return try ResolvedImport(
+        id: ImportID(index: index, request: request),
+        packages: descriptors.map(PlumImporter.package),
+        resources: pins)
+    } catch {
+      throw PinewindError.wrap(error, source: request.source)
     }
-    return try ResolvedImport(
-      id: ImportID(index: index, request: request), packages: descriptors.map(PlumImporter.package),
-      resources: pins)
   }
   private func selected(_ id: PackageID, in selection: UpdateSelection?) -> Bool {
     if case .packages(let ids) = selection { return ids.contains { $0.request == id.request } }

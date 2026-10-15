@@ -72,6 +72,7 @@ struct NativeIOTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let lock = root.appending("operation.lock")
     let state = LockTestState()
+    defer { state.release() }
     let holder = Task {
       try await BlockingIO.run {
         try NativeLock.withLock(lock) {
@@ -83,9 +84,13 @@ struct NativeIOTests {
     while !state.isHeld { try await Task.sleep(for: .milliseconds(5)) }
     let waiter = Task {
       try await BlockingIO.run {
-        try NativeLock.withLock(lock) { Issue.record("cancelled waiter acquired the lock") }
+        try NativeLock.withLock(lock, onContention: { state.markContended() }) {
+          Issue.record("cancelled waiter acquired the lock")
+        }
       }
     }
+    defer { waiter.cancel() }
+    while !state.isContended { try await Task.sleep(for: .milliseconds(5)) }
     waiter.cancel()
     await #expect(throws: CancellationError.self) { try await waiter.value }
     state.release()
@@ -103,11 +108,7 @@ struct NativeIOTests {
       let lock = root.appending("process.lock")
       let child = Process()
       child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-      child.arguments = [
-        "-c",
-        "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read(1)",
-        lock.string,
-      ]
+      child.arguments = [try fixtureURL("ProcessLock/hold_lock.py").path, lock.string]
       let output = Pipe()
       let input = Pipe()
       child.standardOutput = output
@@ -118,13 +119,17 @@ struct NativeIOTests {
         child.waitUntilExit()
       }
       let ready = try output.fileHandleForReading.read(upToCount: 6)
-      #expect(ready == Data("ready\n".utf8))
+      try #require(ready == Data("ready\n".utf8))
+      let state = LockTestState()
       let waiter = Task {
         try await BlockingIO.run {
-          try NativeLock.withLock(lock) { Issue.record("cross-process lock was bypassed") }
+          try NativeLock.withLock(lock, onContention: { state.markContended() }) {
+            Issue.record("cross-process lock was bypassed")
+          }
         }
       }
-      try await Task.sleep(for: .milliseconds(30))
+      defer { waiter.cancel() }
+      while !state.isContended { try await Task.sleep(for: .milliseconds(5)) }
       waiter.cancel()
       await #expect(throws: CancellationError.self) { try await waiter.value }
       try input.fileHandleForWriting.write(contentsOf: Data("x".utf8))
@@ -138,6 +143,17 @@ private final class LockTestState: @unchecked Sendable {
   private let mutex = NSLock()
   private var held = false
   private var released = false
+  private var contended = false
+  func markContended() {
+    mutex.lock()
+    contended = true
+    mutex.unlock()
+  }
+  var isContended: Bool {
+    mutex.lock()
+    defer { mutex.unlock() }
+    return contended
+  }
   func markHeld() {
     mutex.lock()
     held = true
