@@ -78,6 +78,7 @@ public enum ManifestEntry: Hashable, Codable, Sendable {
 
 /// The effective, ordered declarations. Shared and locally overridden configurations
 /// are loaded separately; a local edit never writes a lock or hashes the working tree.
+/// Edit authored declarations through Configuration and ManifestDocument instead.
 public struct Manifest: Hashable, Codable, Sendable {
   public let entries: [ManifestEntry]
 

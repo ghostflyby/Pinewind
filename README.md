@@ -32,7 +32,8 @@ Pinewind 是 Rime 包管理与配置组合的 Swift 库,提供 `PinewindCore` pr
 import Foundation
 import PinewindCore
 
-let manifest = try Manifest.load(inputRoot: inputRoot)
+let configuration = try Configuration.load(inputRoot: inputRoot)
+let manifest = try configuration.evaluateEffective()
 let expanded = try await PlumImporter().expand(manifest, inputRoot: inputRoot)
 let plan = try CompositionPlanner().plan(expanded, inputRoot: inputRoot)
 let result = try await Composer().compose(
@@ -42,6 +43,21 @@ let result = try await Composer().compose(
 Windows 的 `composeRoot` 必须不存在、为空或已由 Pinewind 管理,所在文件系统需支持目录 junction。
 
 没有清单时只组合用户文件。清单中的 `self` 与包条目按同一顺序执行:后面的文件覆盖前面的同名文件,每个包安装文件后立即应用自己的补丁。本地文件编辑在下一次规划时生效,不生成本地锁。
+
+`Configuration` 是配置编辑入口,分别保留共享清单与可选本地覆写;求值后的 `Manifest` 供部署流程使用。修改后显式保存:
+
+```swift
+var configuration = try Configuration.load(inputRoot: inputRoot)
+configuration.manifest.names["emoji"] = PackageFields(
+  url: .value(URL(string: "https://github.com/rime/rime-emoji")!),
+  ref: .value("master"))
+configuration.manifest.order.append(.named("emoji"))
+try configuration.saveShared()
+```
+
+字段的 `.inherit`、`.clear`、`.value(...)` 分别表示省略、YAML null 和整体替换。`renamePackage` 同时更新短名引用与本地覆写,仍被引用的定义不能删除。`saveLocalOverrides()` 只保存本地文件,将 `localOverrides` 设为 nil 后调用会删除该文件。保存不更新锁或触发部署;共享锁使用 `evaluateShared()` 的结果,本机部署使用 `evaluateEffective()`。
+
+保存会校验配置,并检查文件自加载后是否被外部修改;检测到冲突时需重新加载。单文件写入使用原子替换,调用方仍需串行协调并发写入者。YAML 保存保持语义,不保留注释、引号样式或空行。只读取缺省配置不会创建文件。
 
 ## HTTPS Git 取包
 
