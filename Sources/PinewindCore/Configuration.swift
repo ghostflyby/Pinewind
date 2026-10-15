@@ -169,7 +169,9 @@ public struct SourceIdentity: Hashable, Sendable {
   static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
       _ = try NativePath.from(url)
-      return url.standardizedFileURL
+      // File URL spelling carries authority and provider information. Filesystem
+      // identity checks use NativePath/SafePath rather than URL normalization.
+      return url
     }
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
       parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
