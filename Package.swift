@@ -15,8 +15,8 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-crypto", from: "3.15.1"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     .package(
-      url: "https://github.com/ghostflyby/swift-glob.git",
-      revision: "9618e09a860a37101ca3138e7ba6b826e92e821f"),
+      url: "https://github.com/davbeck/swift-glob.git",
+      revision: "db32ccb46de66f83afad415ccb1609d08dfa5266"),
     .package(url: "https://github.com/Cocoanetics/GitKit", from: "2.2.0", traits: ["Archive"]),
     .package(
       url: "https://github.com/Cocoanetics/SwiftBash",
