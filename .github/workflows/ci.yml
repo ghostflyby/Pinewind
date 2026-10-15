@@ -49,8 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: SwiftyLab/setup-swift@v1
+        id: swift
         with:
           swift-version: '6.3.1'
+      - name: Identify Windows image
+        id: windows-image
+        run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
+      - name: Cache SwiftPM build and dependencies
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
       - name: swift test
         run: swift test --no-parallel
 
