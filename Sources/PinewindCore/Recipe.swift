@@ -28,13 +28,13 @@ struct Recipe {
   {
     let name = request.recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"
     let file = try SafePath.file(name, in: directory)
-    guard FileManager.default.fileExists(atPath: file.path) else {
+    guard FileManager.default.fileExists(atPath: file.string) else {
       if request.recipe != nil {
-        throw PinewindError("explicit recipe not found", source: file.path)
+        throw PinewindError("explicit recipe not found", source: file.string)
       }
       return nil
     }
-    let reader = YAMLReader(source: file.path)
+    let reader = YAMLReader(source: file.string)
     guard let text = String(data: try read(file), encoding: .utf8) else {
       throw reader.error("recipe must be UTF-8")
     }

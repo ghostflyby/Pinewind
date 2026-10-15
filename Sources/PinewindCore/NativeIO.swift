@@ -7,12 +7,6 @@
 import Foundation
 import SystemPackage
 
-#if os(Windows)
-  import WinSDK
-#else
-  import CPinewindPlatform
-#endif
-
 final class CancellationSignal: @unchecked Sendable {
   private let lock = NSLock()
   private var cancelled = false
@@ -63,44 +57,23 @@ enum NativeLock {
     try NativePath.requireAbsolute(file)
     try FileManager.default.createDirectory(
       at: file.removingLastComponent(), withIntermediateDirectories: true)
-    #if os(Windows)
-      let handle = file.withPlatformString {
-        CreateFileW(
-          $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
-          nil, DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
-      }
-      guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError(.io, "cannot open operation lock", source: file.string)
-      }
-      defer { _ = CloseHandle(handle) }
-      var overlapped = OVERLAPPED()
-      while !LockFileEx(
-        handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY), 0, 1, 0, &overlapped)
-      {
-        guard GetLastError() == DWORD(ERROR_LOCK_VIOLATION) else {
-          throw PinewindError(.io, "cannot acquire operation lock", source: file.string)
-        }
-        onContention?()
-        try Cancellation.check()
-        Thread.sleep(forTimeInterval: 0.02)
-      }
-      defer { _ = UnlockFileEx(handle, 0, 1, 0, &overlapped) }
-    #else
-      var descriptor: Int32 = -1
+    let descriptor: FileDescriptor
+    do { descriptor = try FileDescriptor.openLockFile(file) } catch {
+      throw PinewindError.wrap(error, source: file.string)
+    }
+    // A close error must not turn a completed publication into a reported failure.
+    defer { try? descriptor.close() }
+    do {
       while true {
         try Cancellation.check()
-        let status = file.withPlatformString { pinewind_try_lock_file($0, &descriptor) }
-        if status == 0 { break }
-        guard status == EWOULDBLOCK || status == EAGAIN else {
-          throw PinewindError(
-            .io, "cannot acquire operation lock (errno \(status))", source: file.string)
-        }
+        if try descriptor.tryLockExclusively() { break }
         onContention?()
         try Cancellation.check()
         Thread.sleep(forTimeInterval: 0.02)
       }
-      defer { pinewind_unlock_file(descriptor) }
-    #endif
+    } catch {
+      throw PinewindError.wrap(error, source: file.string)
+    }
     try Cancellation.check()
     return try body()
   }

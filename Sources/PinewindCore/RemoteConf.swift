@@ -54,7 +54,7 @@ actor RemoteConfCapture: ConfResourceCapture {
       ? url : url.deletingLastPathComponent().appendingPathComponent(relative.string)
     let pin = try await store.pin(endpoint, target: relative)
     let dataPath = store.path(pin)
-    let size = try FileHandle(forReadingFrom: dataPath).closeAfterReadingSize()
+    let size = try SnapshotFiles.byteCount(dataPath)
     guard size <= limits.maximumFileBytes, totalBytes + size <= limits.maximumTotalBytes else {
       throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
     }
@@ -69,13 +69,6 @@ actor RemoteConfCapture: ConfResourceCapture {
     pins[relative] = pin
   }
   func resources() -> [PinnedResource] { pins.values.sorted { $0.path < $1.path } }
-}
-
-extension FileHandle {
-  func closeAfterReadingSize() throws -> UInt64 {
-    defer { try? close() }
-    return try seekToEnd()
-  }
 }
 
 /// Lazy reads are fulfilled by the acquisition layer; the shell only sees a read-only mount.
@@ -188,7 +181,7 @@ actor LocalConfCapture: ConfResourceCapture {
     let size = try await coordinator.coordinate([FileAccessRequest(url: source, intent: .read)]) {
       urls in
       let source = try NativePath.from(urls[0])
-      let size = try FileHandle(forReadingFrom: source).closeAfterReadingSize()
+      let size = try SnapshotFiles.byteCount(source)
       guard size <= maximum, size <= remaining else {
         throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
       }

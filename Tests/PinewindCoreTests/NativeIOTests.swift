@@ -66,6 +66,72 @@ struct NativeIOTests {
     #expect(throws: PinewindError.self) { _ = try SafePath.files(in: root.appending("source")) }
   }
 
+  @Test func descriptorLocksContendAndReleaseOnCloseOrThrow() throws {
+    let root = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let file = root.appending("operation.lock")
+    let second = try FileDescriptor.openLockFile(file)
+    try second.closeAfter {
+      let first = try FileDescriptor.openLockFile(file)
+      try first.closeAfter { () throws -> Void in
+        #expect(try first.tryLockExclusively())
+        #expect(try !second.tryLockExclusively())
+      }
+      #expect(try second.tryLockExclusively())
+    }
+    enum Failure: Error { case aborted }
+    #expect(throws: Failure.self) {
+      try NativeLock.withLock(file) { throw Failure.aborted }
+    }
+    try NativeLock.withLock(file) {}
+    #expect(FileManager.default.fileExists(atPath: file.string))
+  }
+
+  @Test func operationLocksRejectDirectoriesAndSymbolicLinks() throws {
+    let root = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+      at: root.appending("directory"), withIntermediateDirectories: true)
+    let target = root.appending("target")
+    try Data("unchanged".utf8).write(to: target)
+    try FileManager.default.createSymbolicLink(
+      at: root.appending("link").foundationURL, withDestinationURL: target.foundationURL)
+    for name in ["directory", "link"] {
+      #expect(throws: PinewindError.self) {
+        try NativeLock.withLock(root.appending(name)) { Issue.record("locked a nonregular file") }
+      }
+    }
+    #expect(try Data(contentsOf: target) == Data("unchanged".utf8))
+  }
+
+  @Test func chunkedFileChecksPreserveBinaryBytesAndDetectTailChanges() throws {
+    let root = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let first = root.appending("first")
+    let second = root.appending("second")
+    var bytes = Data(repeating: 65, count: 65_537)
+    bytes.replaceSubrange(0..<5, with: [0, 13, 10, 26, 255])
+    try bytes.write(to: first)
+    try bytes.write(to: second)
+    #expect(try SnapshotFiles.byteCount(first) == UInt64(bytes.count))
+    #expect(
+      try SnapshotFiles.sha256(first)
+        == "0c33c7aa1c0f8af4691b10a02daeabb0cd1d7377044540444ba3849a9b40fb5a")
+    #expect(try SnapshotFiles.sameContents(first, second))
+    bytes[bytes.count - 1] = 66
+    try bytes.write(to: second)
+    #expect(try !SnapshotFiles.sameContents(first, second))
+    try Data().write(to: first)
+    #expect(try !SnapshotFiles.sameContents(first, second))
+    try Data().write(to: second)
+    #expect(try SnapshotFiles.sameContents(first, second))
+  }
+
   @Test func waitingForNativeLockIsCancellableAcrossInstances() async throws {
     let root = native(
       FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))

@@ -297,7 +297,7 @@ private final class PlanningSnapshot {
   func capture(_ file: FilePath) throws -> FilePath {
     let key = FilePath(try SafePath.canonical(file))
     if let cached = captured[key] { return cached }
-    let destination = storage.directory.appendingPathComponent(String(captured.count))
+    let destination = storage.directory.appending(String(captured.count))
     try FileManager.default.copyItem(at: key, to: destination)
     captured[key] = destination
     return destination

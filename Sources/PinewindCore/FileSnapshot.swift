@@ -15,7 +15,7 @@ final class CompositionSnapshot: Sendable {
 
   init(root: FilePath) throws {
     try NativePath.requireAbsolute(root)
-    directory = root.appendingPathComponent(".pinewind-snapshot-" + UUID().uuidString)
+    directory = root.appending(".pinewind-snapshot-" + UUID().uuidString)
     try FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
   }
@@ -26,31 +26,66 @@ final class CompositionSnapshot: Sendable {
 enum SnapshotFiles {
   private static let chunkSize = 65_536
 
+  static func byteCount(_ file: FilePath) throws -> UInt64 {
+    let descriptor = try FileDescriptor.open(file, .readOnly)
+    return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
+  }
+
   static func sha256(_ file: FilePath) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    var hash = SHA256()
-    while let bytes = try handle.read(upToCount: chunkSize), !bytes.isEmpty {
-      try Cancellation.check()
-      hash.update(data: bytes)
+    let descriptor = try FileDescriptor.open(file, .readOnly)
+    return try descriptor.closeAfter {
+      var hash = SHA256()
+      var buffer = Data(count: chunkSize)
+      while true {
+        let count = try readChunk(descriptor, into: &buffer)
+        if count == 0 { break }
+        buffer.withUnsafeBytes { bytes in
+          hash.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+        }
+      }
+      return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
-    return hash.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   static func sameContents(_ first: FilePath, _ second: FilePath) throws -> Bool {
-    let left = try FileHandle(forReadingFrom: first)
-    defer { try? left.close() }
-    let right = try FileHandle(forReadingFrom: second)
-    defer { try? right.close() }
-    guard try left.seekToEnd() == right.seekToEnd() else { return false }
-    try left.seek(toOffset: 0)
-    try right.seek(toOffset: 0)
-    while true {
-      try Cancellation.check()
-      let a = try left.read(upToCount: chunkSize) ?? Data()
-      let b = try right.read(upToCount: chunkSize) ?? Data()
-      guard a == b else { return false }
-      if a.isEmpty { return true }
+    let left = try FileDescriptor.open(first, .readOnly)
+    return try left.closeAfter {
+      let right = try FileDescriptor.open(second, .readOnly)
+      return try right.closeAfter {
+        guard try left.seek(offset: 0, from: .end) == right.seek(offset: 0, from: .end) else {
+          return false
+        }
+        _ = try left.seek(offset: 0, from: .start)
+        _ = try right.seek(offset: 0, from: .start)
+        var a = Data(count: chunkSize)
+        var b = Data(count: chunkSize)
+        while true {
+          let leftCount = try readChunk(left, into: &a)
+          let rightCount = try readChunk(right, into: &b)
+          guard leftCount == rightCount, a.prefix(leftCount) == b.prefix(rightCount) else {
+            return false
+          }
+          if leftCount == 0 { return true }
+        }
+      }
+    }
+  }
+
+  // read() may return fewer bytes than requested without reaching EOF. Fill a
+  // chunk before comparing so different short-read boundaries do not imply a change.
+  private static func readChunk(_ descriptor: FileDescriptor, into buffer: inout Data) throws
+    -> Int
+  {
+    try buffer.withUnsafeMutableBytes { bytes in
+      var count = 0
+      while count < bytes.count {
+        try Cancellation.check()
+        let read = try descriptor.read(
+          into: UnsafeMutableRawBufferPointer(rebasing: bytes[count...]))
+        if read == 0 { break }
+        count += read
+      }
+      return count
     }
   }
 }

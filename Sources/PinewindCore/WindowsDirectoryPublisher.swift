@@ -16,7 +16,7 @@
     /// the final managed junction into its replaceable generation.
     static func publicationPath(_ output: FilePath) throws -> FilePath {
       let parent = try resolvedURL(output.removingLastComponent())
-      let entry = parent.appending(output.lastPathComponent)
+      let entry = parent.appending(output.lastComponent?.string ?? "")
       guard FileManager.default.fileExists(atPath: entry.string) else { return entry }
       var buffer = [WCHAR](repeating: 0, count: 32_768)
       let count = entry.withPlatformString {
@@ -29,8 +29,8 @@
     }
 
     static func storage(for output: FilePath) -> FilePath {
-      output.deletingLastPathComponent().appendingPathComponent(
-        "." + output.lastPathComponent + ".pinewind-generations", isDirectory: true)
+      output.removingLastComponent().appending(
+        "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
     }
 
     static func validate(_ output: FilePath) throws {
@@ -38,15 +38,15 @@
       if let target = try currentTarget(output) {
         let target = try resolvedURL(target)
         guard
-          try canonicalPath(target.deletingLastPathComponent())
+          try canonicalPath(target.removingLastComponent())
             == canonicalPath(storage(for: output)),
-          isGeneration(target.lastPathComponent)
+          isGeneration(target.lastComponent?.string ?? "")
         else { throw PinewindError("composition output is not a Pinewind generation junction") }
-      } else if FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory) {
+      } else if FileManager.default.fileExists(atPath: output.string, isDirectory: &isDirectory) {
         guard isDirectory.boolValue else {
           throw PinewindError("Windows composition output must be a directory")
         }
-        guard try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty else {
+        guard try FileManager.default.contentsOfDirectory(atPath: output.string).isEmpty else {
           throw PinewindError("Windows composition output must be empty or managed by Pinewind")
         }
       }
@@ -54,10 +54,10 @@
 
     static func publish(_ candidate: FilePath, at output: FilePath) throws {
       let fm = FileManager.default
-      if try currentTarget(output) != nil || fm.fileExists(atPath: output.path) {
+      if try currentTarget(output) != nil || fm.fileExists(atPath: output.string) {
         try redirect(output, to: candidate)
       } else {
-        let link = output.deletingLastPathComponent().appendingPathComponent(
+        let link = output.removingLastComponent().appending(
           ".pinewind-link-" + UUID().uuidString)
         try fm.createDirectory(at: link, withIntermediateDirectories: false)
         defer {
@@ -77,18 +77,12 @@
       for old
         in (try? fm.contentsOfDirectory(
           at: storage(for: output), includingPropertiesForKeys: nil)) ?? []
-      where isGeneration(old.lastPathComponent) {
+      where isGeneration(old.lastComponent?.string ?? "") {
         guard let path = try? canonicalPath(old), path != activePath, path != candidatePath else {
           continue
         }
         try? fm.removeItem(at: old)
       }
-    }
-
-    /// Hold from reading the previous generation through candidate construction,
-    /// publication and cleanup, including across independent instances/processes.
-    static func withPublicationLock<T>(in storage: FilePath, _ body: () throws -> T) throws -> T {
-      try NativeLock.withLock(storage.appendingPathComponent("publication.lock"), body)
     }
 
     private static func isGeneration(_ name: String) -> Bool {
@@ -121,12 +115,12 @@
     static func resolvedURL(_ url: FilePath) throws -> FilePath {
       var ancestor = url
       var missing: [String] = []
-      while !FileManager.default.fileExists(atPath: ancestor.path) {
-        let parent = ancestor.deletingLastPathComponent()
-        guard parent.path != ancestor.path else {
+      while !FileManager.default.fileExists(atPath: ancestor.string) {
+        let parent = ancestor.removingLastComponent()
+        guard parent.string != ancestor.string else {
           throw PinewindError("cannot resolve composition path")
         }
-        missing.append(ancestor.lastPathComponent)
+        missing.append(ancestor.lastComponent?.string ?? "")
         ancestor = parent
       }
       var resolved = try withHandle(ancestor, access: 0, following: true) { handle in
@@ -135,13 +129,8 @@
         guard count > 0, Int(count) < buffer.count else {
           throw PinewindError("cannot resolve composition path (Windows error \(GetLastError()))")
         }
-        var path = String(decoding: buffer.prefix(Int(count)), as: UTF16.self)
-        if path.hasPrefix("\\\\?\\UNC\\") {
-          path = "\\\\" + path.dropFirst(8)
-        } else if path.hasPrefix("\\\\?\\") {
-          path.removeFirst(4)
-        }
-        return FilePath(path)
+        let path = FilePath(String(decoding: buffer.prefix(Int(count)), as: UTF16.self))
+        return FilePath(try windowsNativePath(path))
       }
       for component in missing.reversed() { resolved.append(component) }
       let normalized = resolved.lexicallyNormalized()

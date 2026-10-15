@@ -19,7 +19,7 @@ enum SafePath {
     #else
       let canonicalRoot = FilePath(try canonical(root))
     #endif
-    let candidate = canonicalRoot.appendingPathComponent(path)
+    let candidate = canonicalRoot.appending(path)
     guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
       throw PinewindError("path escapes its source root: \(path)")
     }
@@ -27,14 +27,9 @@ enum SafePath {
   }
 
   static func validateOutputRoot(_ output: FilePath) throws {
-    guard !output.lastPathComponent.isEmpty, output.lastPathComponent != "/" else {
+    guard output.lastComponent != nil else {
       throw PinewindError("composition output must not be a filesystem root")
     }
-    #if os(Windows)
-      guard !output.lastPathComponent.hasSuffix(":") else {
-        throw PinewindError("composition output must not be a filesystem root")
-      }
-    #endif
   }
 
   static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath]) throws {
@@ -92,7 +87,7 @@ enum SafePath {
     try NativePath.requireAbsolute(root)
     let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true else {
-      throw PinewindError("source must be a directory", source: root.path)
+      throw PinewindError("source must be a directory", source: root.string)
     }
     var enumerationError: (any Error)?
     guard
@@ -104,7 +99,7 @@ enum SafePath {
           return false
         })
     else {
-      throw PinewindError("cannot enumerate source", source: root.path)
+      throw PinewindError("cannot enumerate source", source: root.string)
     }
     var result: [String] = []
     let base = try NativePath.from(root.foundationURL.standardizedFileURL)

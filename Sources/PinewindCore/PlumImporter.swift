@@ -43,7 +43,7 @@ struct PlumImporter: Sendable {
       request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
     let file = try SafePath.file(path, in: inputRoot)
     return try await evaluate(
-      file: file, resourceRoot: file.deletingLastPathComponent(), variables: request.variables)
+      file: file, resourceRoot: file.removingLastComponent(), variables: request.variables)
   }
 
   func evaluate(
@@ -54,12 +54,12 @@ struct PlumImporter: Sendable {
   {
     guard variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
     guard
-      (try SafePath.canonical(file.deletingLastPathComponent()))
+      (try SafePath.canonical(file.removingLastComponent()))
         == (try SafePath.canonical(resourceRoot))
     else {
       throw PinewindError("conf must be directly inside its read-only resource root")
     }
-    let name = file.lastPathComponent
+    let name = file.lastComponent?.string ?? ""
     let shell = BashInterpreter.Shell(
       environment: Environment(variables: variables, workingDirectory: "/conf"))
     shell.environment["root_dir"] = "/conf"
@@ -67,7 +67,7 @@ struct PlumImporter: Sendable {
     shell.fileSystem =
       fileSystem
       ?? MountedFileSystem(
-        mounts: [.init(virtual: "/conf", host: resourceRoot.path, readOnly: true)],
+        mounts: [.init(virtual: "/conf", host: resourceRoot.string, readOnly: true)],
         backing: RealFileSystem())
     let budget = ConfSourceBudget(limits: limits)
     shell.installShellBuiltin(BoundedSource(name: "source", budget: budget))
@@ -86,19 +86,19 @@ struct PlumImporter: Sendable {
         errors.finish()
         guard status == .success else {
           let message = await errors.readAllString()
-          throw PinewindError("conf evaluation failed: " + message, source: file.path)
+          throw PinewindError("conf evaluation failed: " + message, source: file.string)
         }
         guard shell.environment.associativeArrays["package_list"] == nil else {
-          throw PinewindError("package_list must be an indexed array", source: file.path)
+          throw PinewindError("package_list must be an indexed array", source: file.string)
         }
         if shell.environment.variables["package_list"] != nil {
-          throw PinewindError("package_list must be an indexed array", source: file.path)
+          throw PinewindError("package_list must be an indexed array", source: file.string)
         }
         return shell.environment.arrays["package_list"]?.elementsInOrder ?? []
       }
       group.addTask {
         try await Task.sleep(for: timeout)
-        throw PinewindError("conf evaluation timed out", source: file.path)
+        throw PinewindError("conf evaluation timed out", source: file.string)
       }
       defer { group.cancelAll() }
       guard let first = try await group.next() else {

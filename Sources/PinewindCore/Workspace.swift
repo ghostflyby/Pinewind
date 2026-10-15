@@ -570,7 +570,8 @@ public actor Workspace {
             .init(virtual: "/conf", host: source.removingLastComponent().string, readOnly: true)
           ], backing: RealFileSystem())
         descriptors = try await importer.evaluate(
-          file: view.directory.appending(source.lastPathComponent), resourceRoot: view.directory,
+          file: view.directory.appending(source.lastComponent!.string),
+          resourceRoot: view.directory,
           variables: request.variables,
           fileSystem: RemoteConfFileSystem(
             capture: capture, directory: view.directory, original: original))

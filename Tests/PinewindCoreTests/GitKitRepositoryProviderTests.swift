@@ -66,11 +66,11 @@ struct GitKitRepositoryProviderTests {
       SourceIdentity(url: locked.request.url, commit: locked.commit), cacheRoot: native(f.cache))
     #expect(try SourceIdentity.normalize(snapshot.identity.url).absoluteString == identityURL)
     #expect(
-      snapshot.directory.deletingLastPathComponent().lastPathComponent
+      snapshot.directory.removingLastComponent().lastComponent?.string
         == GitKitRepositoryProvider.cacheKey(URL(string: identityURL)!))
     #expect(
       try String(
-        contentsOf: snapshot.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+        contentsOf: snapshot.directory.appending("default.yaml"), encoding: .utf8)
         == "value: first\n")
     try FileManager.default.removeItem(at: f.origin)
     let reused = try await backend.prepareSource(
@@ -117,10 +117,10 @@ struct GitKitRepositoryProviderTests {
     let old = try await backend.prepareSource(
       SourceIdentity(url: f.url, commit: first), cacheRoot: native(f.cache))
     #expect(
-      try String(contentsOf: old.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+      try String(contentsOf: old.directory.appending("default.yaml"), encoding: .utf8)
         == "value: first\n")
     #expect(
-      !FileManager.default.fileExists(atPath: old.directory.appendingPathComponent(".git").path))
+      !FileManager.default.fileExists(atPath: old.directory.appending(".git").string))
     try Data("value: second\n".utf8).write(to: f.origin.appendingPathComponent("default.yaml"))
     let second = try f.commit("second")
     #expect(
@@ -131,10 +131,10 @@ struct GitKitRepositoryProviderTests {
     #expect(old.identity.commit.string == first && new.identity.commit.string == second)
     #expect(old.directory != new.directory)
     #expect(
-      try String(contentsOf: old.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+      try String(contentsOf: old.directory.appending("default.yaml"), encoding: .utf8)
         == "value: first\n")
     #expect(
-      try String(contentsOf: new.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+      try String(contentsOf: new.directory.appending("default.yaml"), encoding: .utf8)
         == "value: second\n")
     let request = try PackageRequest(url: f.url, revision: .commit(CommitID(first)))
     let prepared = try PreparedPackage(request: request, directory: old.directory, commit: first)
@@ -165,7 +165,7 @@ struct GitKitRepositoryProviderTests {
       SourceIdentity(url: f.url, commit: commit), cacheRoot: native(f.cache))
     #expect(
       try String(
-        contentsOf: rebuilt.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+        contentsOf: rebuilt.directory.appending("default.yaml"), encoding: .utf8)
         == "value: first\n")
   }
 
@@ -245,12 +245,12 @@ struct GitKitRepositoryProviderTests {
         SourceIdentity(url: f.url, commit: bad), cacheRoot: native(f.cache))
     }
     #expect(
-      try String(contentsOf: good.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
+      try String(contentsOf: good.directory.appending("default.yaml"), encoding: .utf8)
         == "value: first\n")
-    let parent = good.directory.deletingLastPathComponent()
-    #expect(!FileManager.default.fileExists(atPath: parent.appendingPathComponent(bad).path))
+    let parent = good.directory.removingLastComponent()
+    #expect(!FileManager.default.fileExists(atPath: parent.appending(bad).string))
     #expect(
-      try FileManager.default.contentsOfDirectory(atPath: parent.path).allSatisfy {
+      try FileManager.default.contentsOfDirectory(atPath: parent.string).allSatisfy {
         !$0.hasPrefix(".candidate-")
       })
   }
@@ -349,11 +349,11 @@ struct GitKitRepositoryProviderTests {
     let commit = try await backend.resolve(RepositoryRequest(url: url)).commit.string
     let snapshot = try await backend.prepareSource(
       SourceIdentity(url: url, commit: commit), cacheRoot: native(root))
-    let bytes = try Data(contentsOf: snapshot.directory.appendingPathComponent("default.yaml"))
+    let bytes = try Data(contentsOf: snapshot.directory.appending("default.yaml"))
     #expect(!bytes.isEmpty)
     #expect(
       !FileManager.default.fileExists(
-        atPath: snapshot.directory.appendingPathComponent(".git").path))
+        atPath: snapshot.directory.appending(".git").string))
     let resource = try await downloadedData(
       using: downloader,
       from: URL(

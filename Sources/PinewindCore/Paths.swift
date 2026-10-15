@@ -165,12 +165,6 @@ extension FilePath {
       return URL(filePath: value, directoryHint: .notDirectory)
     }
   }
-  var path: String { string }
-  var lastPathComponent: String { lastComponent?.string ?? "" }
-  func appendingPathComponent(_ value: String, isDirectory: Bool = false) -> FilePath {
-    appending(value)
-  }
-  func deletingLastPathComponent() -> FilePath { removingLastComponent() }
 }
 extension FileManager {
   func createDirectory(
@@ -206,10 +200,5 @@ extension Data {
 extension String {
   init(contentsOf path: FilePath, encoding: Encoding) throws {
     try self.init(contentsOf: path.foundationURL, encoding: encoding)
-  }
-}
-extension FileHandle {
-  convenience init(forReadingFrom path: FilePath) throws {
-    try self.init(forReadingFrom: path.foundationURL)
   }
 }

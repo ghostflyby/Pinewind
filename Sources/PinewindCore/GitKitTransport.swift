@@ -41,7 +41,7 @@ struct GitKitTransport: GitTransport {
   }
 
   func containsCommit(_ commit: String, repository: FilePath) throws -> Bool {
-    guard FileManager.default.fileExists(atPath: repository.path) else { return false }
+    guard FileManager.default.fileExists(atPath: repository.string) else { return false }
     return try withRepository(repository) { repo in
       var oid = try parse(commit)
       var object: OpaquePointer?
@@ -54,10 +54,10 @@ struct GitKitTransport: GitTransport {
   }
 
   func fetch(url: URL, repository: FilePath, commit: String) throws {
-    if !FileManager.default.fileExists(atPath: repository.path) {
+    if !FileManager.default.fileExists(atPath: repository.string) {
       GitLibrary.ensureInitialized()
       var repo: OpaquePointer?
-      try check(git_repository_init(&repo, repository.path, 1))
+      try check(git_repository_init(&repo, repository.string, 1))
       git_repository_free(repo)
     }
     try withRepository(repository) { repo in
@@ -105,7 +105,7 @@ struct GitKitTransport: GitTransport {
       options.disable_filters = 1
       options.notify_flags = UInt32(GIT_CHECKOUT_NOTIFY_ALL.rawValue)
       options.notify_cb = { _, _, _, _, _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
-      try destination.path.withCString { path in
+      try destination.string.withCString { path in
         options.target_directory = path
         try check(git_checkout_tree(repo, tree, &options))
       }
@@ -183,9 +183,9 @@ struct GitKitTransport: GitTransport {
     GitLibrary.ensureInitialized()
     try Cancellation.check()
     var repository: OpaquePointer?
-    try check(git_repository_open(&repository, directory.path))
+    try check(git_repository_open(&repository, directory.string))
     guard let repository else {
-      throw PinewindError("Git repository could not be opened", source: directory.path)
+      throw PinewindError("Git repository could not be opened", source: directory.string)
     }
     defer { git_repository_free(repository) }
     return try body(repository)

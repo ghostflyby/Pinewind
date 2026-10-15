@@ -53,25 +53,17 @@ struct Composer {
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
     #if os(Windows)
-      try SafePath.validateOutputRoot(outputRoot)
       let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
       try SafePath.validateRoots(
         input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
       try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
-      return try NativeLock.withLock(
-        outputRoot.removingLastComponent().appending(
-          "." + outputRoot.lastPathComponent + ".pinewind-publication.lock")
-      ) {
-        try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
-      }
-    #else
-      return try NativeLock.withLock(
-        outputRoot.removingLastComponent().appending(
-          "." + outputRoot.lastPathComponent + ".pinewind-publication.lock")
-      ) {
-        try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
-      }
     #endif
+    return try NativeLock.withLock(
+      outputRoot.removingLastComponent().appending(
+        "." + (outputRoot.lastComponent?.string ?? "") + ".pinewind-publication.lock")
+    ) {
+      try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+    }
   }
 
   private func composeGeneration(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath)
@@ -84,16 +76,16 @@ struct Composer {
       try WindowsDirectoryPublisher.validate(outputRoot)
     #endif
     let fm = FileManager.default
-    let exists = fm.fileExists(atPath: outputRoot.path)
+    let exists = fm.fileExists(atPath: outputRoot.string)
     let previous = exists ? try SafePath.files(in: outputRoot) : []
-    let parent = outputRoot.deletingLastPathComponent()
+    let parent = outputRoot.removingLastComponent()
     try fm.createDirectory(at: parent, withIntermediateDirectories: true)
     #if os(Windows)
       let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
-      let candidate = storage.appendingPathComponent(
-        "generation-" + UUID().uuidString, isDirectory: true)
+      let candidate = storage.appending(
+        "generation-" + UUID().uuidString)
     #else
-      let candidate = parent.appendingPathComponent(".pinewind-" + UUID().uuidString)
+      let candidate = parent.appending(".pinewind-" + UUID().uuidString)
     #endif
     try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
     var retained = false
@@ -105,13 +97,13 @@ struct Composer {
       guard let operations = plan.files[path] else { continue }
       let destination = try SafePath.file(path, in: candidate)
       try fm.createDirectory(
-        at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        at: destination.removingLastComponent(), withIntermediateDirectories: true)
       try render(operations, to: destination)
       var matchesPrevious = false
       if exists {
         let old = try SafePath.file(path, in: outputRoot)
         matchesPrevious =
-          try fm.fileExists(atPath: old.path)
+          try fm.fileExists(atPath: old.string)
           && SnapshotFiles.sameContents(old, destination)
       }
       if matchesPrevious {

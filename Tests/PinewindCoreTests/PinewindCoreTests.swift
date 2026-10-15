@@ -233,7 +233,7 @@ struct CompositionTests {
     #expect(try f.read("words.txt") == "before")
     #expect(try f.read("custom.yaml").contains("value: before"))
     plan = nil
-    #expect(!FileManager.default.fileExists(atPath: frozen.deletingLastPathComponent().path))
+    #expect(!FileManager.default.fileExists(atPath: frozen.removingLastComponent().string))
     _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("words.txt") == "after!")
     #expect(try f.read("custom.yaml").contains("value: after"))
@@ -465,7 +465,7 @@ struct CompositionTests {
       #expect(first == bytesA || first == bytesB)
       for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
       let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
-      #expect(FileManager.default.fileExists(atPath: active.path))
+      #expect(FileManager.default.fileExists(atPath: active.string))
     }
 
     @Test(arguments: ["https://example.com/output", "file:///C:/bad%00path"])
@@ -510,7 +510,7 @@ struct CompositionTests {
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
       let repaired = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       #expect(repaired != old)
-      #expect(FileManager.default.fileExists(atPath: repaired.path))
+      #expect(FileManager.default.fileExists(atPath: repaired.string))
       if hasFiles { #expect(try f.read("default.yaml") == "value: repaired\n") }
     }
 
@@ -526,9 +526,9 @@ struct CompositionTests {
       try WindowsDirectoryPublisher.redirect(alias, to: f.root)
       defer { try? FileManager.default.removeItem(at: alias) }
       let aliasedTarget = alias.appendingPathComponent(
-        active.deletingLastPathComponent().lastPathComponent
+        try #require(active.removingLastComponent().lastComponent).string
       )
-      .appendingPathComponent(active.lastPathComponent)
+      .appendingPathComponent(try #require(active.lastComponent).string)
       try WindowsDirectoryPublisher.redirect(f.output, to: aliasedTarget)
       try WindowsDirectoryPublisher.validate(f.output)
       let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
