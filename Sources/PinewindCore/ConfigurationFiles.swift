@@ -6,13 +6,20 @@
 
 import Foundation
 
-/// An editable configuration session. Saving is explicit and never resolves packages or writes locks.
-/// Each file is saved independently. Callers must serialize writers; the external-change check
-/// detects stale sessions, but is not a filesystem compare-and-swap against concurrent editors.
-public struct Configuration: Sendable {
-  public var manifest: ManifestDocument
-  public var localOverrides: LocalOverridesDocument?
-  public let inputRoot: URL
+/// A detached value snapshot; editing its copies does not modify the configuration session.
+public struct ConfigurationSnapshot: Sendable {
+  public let manifest: ManifestDocument
+  public let localOverrides: LocalOverridesDocument?
+}
+
+/// Serializes edits, evaluation and saving within one session. Saving is explicit and never
+/// resolves packages or writes locks. Separate instances and external processes still require
+/// coordination; each file is saved independently, with a stale-file check rather than a
+/// filesystem compare-and-swap against concurrent editors.
+public actor Configuration {
+  private var manifest: ManifestDocument
+  private var localOverrides: LocalOverridesDocument?
+  public nonisolated let inputRoot: URL
   private var sharedBytes: Data?
   private var localBytes: Data?
 
@@ -25,6 +32,21 @@ public struct Configuration: Sendable {
     self.localOverrides = localOverrides
     self.sharedBytes = sharedBytes
     self.localBytes = localBytes
+  }
+
+  public func snapshot() -> ConfigurationSnapshot {
+    ConfigurationSnapshot(manifest: manifest, localOverrides: localOverrides)
+  }
+
+  /// Applies a synchronous edit without actor suspension. A thrown error discards both drafts.
+  public func edit(
+    _ operation: @Sendable (inout ManifestDocument, inout LocalOverridesDocument?) throws -> Void
+  ) rethrows {
+    var shared = manifest
+    var local = localOverrides
+    try operation(&shared, &local)
+    manifest = shared
+    localOverrides = local
   }
 
   /// Missing files remain absent until explicitly saved; no manifest means order: [self].
@@ -62,7 +84,7 @@ public struct Configuration: Sendable {
   }
 
   /// Renames shared definitions, all order references and the corresponding local override together.
-  public mutating func renamePackage(_ old: String, to new: String) throws {
+  public func renamePackage(_ old: String, to new: String) throws {
     if old != new, localOverrides?.names[new] != nil {
       throw PinewindError("local package name '\(new)' is already defined")
     }
@@ -74,13 +96,13 @@ public struct Configuration: Sendable {
     }
   }
 
-  public mutating func removePackage(_ name: String) throws {
+  public func removePackage(_ name: String) throws {
     try manifest.removePackage(name)
     localOverrides?.names.removeValue(forKey: name)
   }
 
   /// Validates shared deployment declarations, then atomically replaces only pinewind.yaml.
-  public mutating func saveShared() throws {
+  public func saveShared() throws {
     _ = try evaluateShared()
     let bytes = Data(try manifest.yaml().utf8)
     try save(bytes, name: "pinewind.yaml", expected: sharedBytes)
@@ -89,7 +111,7 @@ public struct Configuration: Sendable {
 
   /// Saves only pinewind.local.yaml. Setting localOverrides to nil explicitly removes that file.
   /// Removal is a recovery action and does not require a valid deployment configuration.
-  public mutating func saveLocalOverrides() throws {
+  public func saveLocalOverrides() throws {
     if localOverrides != nil { _ = try evaluateEffective() }
     let bytes = try localOverrides.map { Data(try $0.yaml().utf8) }
     try save(bytes, name: "pinewind.local.yaml", expected: localBytes)

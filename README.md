@@ -33,7 +33,7 @@ import Foundation
 import PinewindCore
 
 let configuration = try Configuration.load(inputRoot: inputRoot)
-let manifest = try configuration.evaluateEffective()
+let manifest = try await configuration.evaluateEffective()
 let expanded = try await PlumImporter().expand(manifest, inputRoot: inputRoot)
 let plan = try CompositionPlanner().plan(expanded, inputRoot: inputRoot)
 let result = try await Composer().compose(
@@ -47,17 +47,21 @@ Windows 的 `composeRoot` 必须不存在、为空或已由 Pinewind 管理,所�
 `Configuration` 是配置编辑入口,分别保留共享清单与可选本地覆写;求值后的 `Manifest` 供部署流程使用。修改后显式保存:
 
 ```swift
-var configuration = try Configuration.load(inputRoot: inputRoot)
-configuration.manifest.names["emoji"] = PackageFields(
-  url: .value(URL(string: "https://github.com/rime/rime-emoji")!),
-  ref: .value("master"))
-configuration.manifest.order.append(.named("emoji"))
-try configuration.saveShared()
+let configuration = try Configuration.load(inputRoot: inputRoot)
+await configuration.edit { manifest, _ in
+  manifest.names["emoji"] = PackageFields(
+    url: .value(URL(string: "https://github.com/rime/rime-emoji")!),
+    ref: .value("master"))
+  manifest.order.append(.named("emoji"))
+}
+try await configuration.saveShared()
 ```
 
-字段的 `.inherit`、`.clear`、`.value(...)` 分别表示省略、YAML null 和整体替换。`renamePackage` 同时更新短名引用与本地覆写,仍被引用的定义不能删除。`saveLocalOverrides()` 只保存本地文件,将 `localOverrides` 设为 nil 后调用会删除该文件。保存不更新锁或触发部署;共享锁使用 `evaluateShared()` 的结果,本机部署使用 `evaluateEffective()`。
+`Configuration` 是 actor,同一实例串行执行编辑、求值和保存。`edit` 接收同步闭包,抛错时两份草稿一起回滚;`snapshot()` 返回独立的文档值供界面读取。
 
-保存配置内容前会校验配置;删除本地覆写不要求共享草稿能够部署。保存或删除都会检查文件自加载后是否被外部修改,检测到冲突时需重新加载。单文件写入使用原子替换,调用方仍需串行协调并发写入者。YAML 保存保持语义,不保留注释、引号样式或空行。只读取缺省配置不会创建文件。
+字段的 `.inherit`、`.clear`、`.value(...)` 分别表示省略、YAML null 和整体替换。`renamePackage` 同时更新短名引用与本地覆写,仍被引用的定义不能删除。`saveLocalOverrides()` 只保存本地文件,在 `edit` 中将本地覆写设为 nil 后调用会删除该文件。保存不更新锁或触发部署;共享锁使用 `evaluateShared()` 的结果,本机部署使用 `evaluateEffective()`。
+
+保存配置内容前会校验配置;删除本地覆写不要求共享草稿能够部署。保存或删除都会检查文件自加载后是否被外部修改,检测到冲突时需重新加载。单文件写入使用原子替换,多个实例或外部进程写入同一目录仍需协调;两个配置文件分别保存。YAML 保存保持语义,不保留注释、引号样式或空行。只读取缺省配置不会创建文件。
 
 ## HTTPS Git 取包
 

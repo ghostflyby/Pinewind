@@ -139,7 +139,7 @@ struct ConfigurationDocumentTests {
     #expect(document?.line == manifest?.line)
   }
 
-  @Test func evaluationDoesNotReportGeneratedLinesAsOriginalSourcePositions() throws {
+  @Test func evaluationDoesNotReportGeneratedLinesAsOriginalSourcePositions() async throws {
     let text = """
       # Original layout
       version: 1
@@ -159,140 +159,165 @@ struct ConfigurationDocumentTests {
 
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    var configuration = try Configuration.load(inputRoot: root)
-    configuration.manifest = document
-    #expect(try #require(diagnostic { _ = try configuration.evaluateShared() }).line == nil)
-    configuration.manifest = ManifestDocument()
-    configuration.localOverrides = LocalOverridesDocument(names: ["self": PackageFields()])
-    let local = try #require(diagnostic { _ = try configuration.evaluateEffective() })
-    #expect(local.source == "pinewind.local.yaml")
-    #expect(local.line == nil)
+    let configuration = try Configuration.load(inputRoot: root)
+    await configuration.edit { shared, _ in shared = document }
+    do {
+      _ = try await configuration.evaluateShared()
+      Issue.record("expected evaluation error")
+    } catch let error as PinewindError { #expect(error.line == nil) }
+    await configuration.edit { shared, local in
+      shared = ManifestDocument()
+      local = LocalOverridesDocument(names: ["self": PackageFields()])
+    }
+    do {
+      _ = try await configuration.evaluateEffective()
+      Issue.record("expected local evaluation error")
+    } catch let error as PinewindError {
+      #expect(error.source == "pinewind.local.yaml")
+      #expect(error.line == nil)
+    }
   }
 
-  @Test func removingLocalOverridesIsAllowedWhileSharedDocumentIsIncomplete() throws {
+  @Test func removingLocalOverridesIsAllowedWhileSharedDocumentIsIncomplete() async throws {
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    var configuration = try Configuration.load(inputRoot: root)
-    configuration.localOverrides = LocalOverridesDocument()
-    try configuration.saveLocalOverrides()
-    configuration.manifest.order = [.named("unfinished")]
-    #expect(throws: PinewindError.self) { try configuration.saveLocalOverrides() }
-    configuration.localOverrides = nil
-    try configuration.saveLocalOverrides()
+    let configuration = try Configuration.load(inputRoot: root)
+    await configuration.edit { _, local in local = LocalOverridesDocument() }
+    try await configuration.saveLocalOverrides()
+    await configuration.edit { shared, _ in shared.order = [.named("unfinished")] }
+    await #expect(throws: PinewindError.self) { try await configuration.saveLocalOverrides() }
+    await configuration.edit { _, local in local = nil }
+    try await configuration.saveLocalOverrides()
     #expect(
       !FileManager.default.fileExists(
         atPath: root.appendingPathComponent("pinewind.local.yaml").path))
-    try configuration.saveLocalOverrides()
-    #expect(throws: PinewindError.self) { try configuration.evaluateShared() }
+    try await configuration.saveLocalOverrides()
+    await #expect(throws: PinewindError.self) { try await configuration.evaluateShared() }
     #expect(
       !FileManager.default.fileExists(atPath: root.appendingPathComponent("pinewind.yaml").path))
   }
 
-  @Test func editsCoordinateReferencesAndLocalOverrides() throws {
+  @Test func editsCoordinateReferencesAndLocalOverrides() async throws {
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    var configuration = try Configuration.load(inputRoot: root)
-    configuration.manifest = ManifestDocument(
-      names: ["old": PackageFields(url: .value(remote))],
-      order: [
-        .named("old"), .userFiles(FileFilter()),
-        .named("old", overrides: PackageFields(recipe: .clear)),
-      ])
-    configuration.localOverrides = LocalOverridesDocument(names: [
-      "old": PackageFields(ref: .value("dev"))
-    ])
-    try configuration.renamePackage("old", to: "new")
-    #expect(configuration.manifest.names["old"] == nil)
-    #expect(configuration.localOverrides?.names["new"]?.ref == .value("dev"))
-    #expect(configuration.manifest.order[0] == .named("new"))
-    #expect(
-      configuration.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .clear)))
-    #expect(throws: PinewindError.self) { try configuration.removePackage("new") }
-    try configuration.manifest.moveEntry(from: 2, to: 0)
-    #expect(
-      configuration.manifest.order[0] == .named("new", overrides: PackageFields(recipe: .clear)))
-    let before = configuration.manifest
-    configuration.localOverrides?.names["taken"] = PackageFields()
-    #expect(throws: PinewindError.self) { try configuration.renamePackage("new", to: "taken") }
-    #expect(throws: PinewindError.self) { try configuration.renamePackage("new", to: "self") }
-    #expect(throws: PinewindError.self) { try configuration.manifest.moveEntry(from: -1, to: 0) }
-    #expect(configuration.manifest == before)
-    configuration.manifest.order = []
-    try configuration.removePackage("new")
-    #expect(configuration.localOverrides?.names["new"] == nil)
+    let configuration = try Configuration.load(inputRoot: root)
+    await configuration.edit { shared, local in
+      shared = ManifestDocument(
+        names: ["old": PackageFields(url: .value(remote))],
+        order: [
+          .named("old"), .userFiles(FileFilter()),
+          .named("old", overrides: PackageFields(recipe: .clear)),
+        ])
+      local = LocalOverridesDocument(names: ["old": PackageFields(ref: .value("dev"))])
+    }
+    try await configuration.renamePackage("old", to: "new")
+    let renamed = await configuration.snapshot()
+    #expect(renamed.manifest.names["old"] == nil)
+    #expect(renamed.localOverrides?.names["new"]?.ref == .value("dev"))
+    #expect(renamed.manifest.order[0] == .named("new"))
+    #expect(renamed.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .clear)))
+    await #expect(throws: PinewindError.self) { try await configuration.removePackage("new") }
+    try await configuration.edit { shared, _ in try shared.moveEntry(from: 2, to: 0) }
+    let moved = await configuration.snapshot()
+    #expect(moved.manifest.order[0] == .named("new", overrides: PackageFields(recipe: .clear)))
+    await configuration.edit { _, local in local?.names["taken"] = PackageFields() }
+    await #expect(throws: PinewindError.self) {
+      try await configuration.renamePackage("new", to: "taken")
+    }
+    await #expect(throws: PinewindError.self) {
+      try await configuration.renamePackage("new", to: "self")
+    }
+    await #expect(throws: PinewindError.self) {
+      try await configuration.edit { shared, _ in try shared.moveEntry(from: -1, to: 0) }
+    }
+    let unchanged = await configuration.snapshot()
+    #expect(unchanged.manifest == moved.manifest)
+    await configuration.edit { shared, _ in shared.order = [] }
+    try await configuration.removePackage("new")
+    let removed = await configuration.snapshot()
+    #expect(removed.localOverrides?.names["new"] == nil)
   }
 
-  @Test func savingKeepsLayersSeparateAndUpdatesBaselines() throws {
+  @Test func savingKeepsLayersSeparateAndUpdatesBaselines() async throws {
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    var configuration = try Configuration.load(inputRoot: root)
+    let configuration = try Configuration.load(inputRoot: root)
     #expect(!FileManager.default.fileExists(atPath: root.path))
-    #expect(try configuration.evaluateShared().entries == [.userFiles(FileFilter())])
-    configuration.manifest = ManifestDocument(
-      names: ["emoji": PackageFields(url: .value(remote), ref: .value("main"))],
-      order: [.named("emoji")])
-    configuration.localOverrides = LocalOverridesDocument(names: [
-      "emoji": PackageFields(url: .value(root.appendingPathComponent("package")))
-    ])
-    let shared = try configuration.evaluateShared()
-    #expect(try configuration.evaluateEffective() != shared)
-    try configuration.saveShared()
+    let initial = try await configuration.evaluateShared()
+    #expect(initial.entries == [.userFiles(FileFilter())])
+    await configuration.edit { shared, local in
+      shared = ManifestDocument(
+        names: ["emoji": PackageFields(url: .value(remote), ref: .value("main"))],
+        order: [.named("emoji")])
+      local = LocalOverridesDocument(names: [
+        "emoji": PackageFields(url: .value(root.appendingPathComponent("package")))
+      ])
+    }
+    let shared = try await configuration.evaluateShared()
+    let effective = try await configuration.evaluateEffective()
+    #expect(effective != shared)
+    try await configuration.saveShared()
     #expect(
       !FileManager.default.fileExists(
         atPath: root.appendingPathComponent("pinewind.local.yaml").path))
     let savedShared = try Data(contentsOf: root.appendingPathComponent("pinewind.yaml"))
-    try configuration.saveLocalOverrides()
+    try await configuration.saveLocalOverrides()
     #expect(try Data(contentsOf: root.appendingPathComponent("pinewind.yaml")) == savedShared)
-    #expect(
-      try Configuration.load(inputRoot: root).evaluateEffective()
-        == configuration.evaluateEffective())
-    configuration.localOverrides?.names["emoji"]?.recipe = .value("customize")
-    try configuration.saveLocalOverrides()
-    configuration.localOverrides = nil
-    try configuration.saveLocalOverrides()
-    #expect(try Configuration.load(inputRoot: root).localOverrides == nil)
-    configuration.manifest.names["emoji"]?.ref = .value("dev")
-    try configuration.saveShared()
-    try configuration.saveShared()
-    #expect(try Configuration.load(inputRoot: root).manifest == configuration.manifest)
+    let reloaded = try Configuration.load(inputRoot: root)
+    let reloadedEffective = try await reloaded.evaluateEffective()
+    #expect(reloadedEffective == effective)
+    await configuration.edit { _, local in local?.names["emoji"]?.recipe = .value("customize") }
+    try await configuration.saveLocalOverrides()
+    await configuration.edit { _, local in local = nil }
+    try await configuration.saveLocalOverrides()
+    let withoutLocal = try Configuration.load(inputRoot: root)
+    let withoutLocalSnapshot = await withoutLocal.snapshot()
+    #expect(withoutLocalSnapshot.localOverrides == nil)
+    await configuration.edit { shared, _ in shared.names["emoji"]?.ref = .value("dev") }
+    try await configuration.saveShared()
+    try await configuration.saveShared()
+    let saved = try Configuration.load(inputRoot: root)
+    let savedSnapshot = await saved.snapshot()
+    let current = await configuration.snapshot()
+    #expect(savedSnapshot.manifest == current.manifest)
     #expect(
       !FileManager.default.fileExists(atPath: root.appendingPathComponent("pinewind.lock").path))
   }
 
-  @Test func staleSessionsDetectCreatedModifiedAndDeletedFiles() throws {
+  @Test func staleSessionsDetectCreatedModifiedAndDeletedFiles() async throws {
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     var first = try Configuration.load(inputRoot: root)
-    var stale = first
-    try first.saveShared()
-    #expect(throws: PinewindError.self) { try stale.saveShared() }
+    var stale = try Configuration.load(inputRoot: root)
+    try await first.saveShared()
+    await #expect(throws: PinewindError.self) { try await stale.saveShared() }
     stale = try Configuration.load(inputRoot: root)
     let external = Data("version: 1\norder: []\n".utf8)
     try external.write(to: root.appendingPathComponent("pinewind.yaml"))
-    #expect(throws: PinewindError.self) { try stale.saveShared() }
+    await #expect(throws: PinewindError.self) { try await stale.saveShared() }
     #expect(try Data(contentsOf: root.appendingPathComponent("pinewind.yaml")) == external)
     stale = try Configuration.load(inputRoot: root)
     try FileManager.default.removeItem(at: root.appendingPathComponent("pinewind.yaml"))
-    #expect(throws: PinewindError.self) { try stale.saveShared() }
+    await #expect(throws: PinewindError.self) { try await stale.saveShared() }
     first = try Configuration.load(inputRoot: root)
-    first.localOverrides = LocalOverridesDocument()
-    try first.saveLocalOverrides()
+    await first.edit { _, local in local = LocalOverridesDocument() }
+    try await first.saveLocalOverrides()
     stale = try Configuration.load(inputRoot: root)
-    try Data("version: 1\nnames: {new: {ref: dev}}\n".utf8)
-      .write(to: root.appendingPathComponent("pinewind.local.yaml"))
-    stale.localOverrides = nil
-    #expect(throws: PinewindError.self) { try stale.saveLocalOverrides() }
+    try Data("version: 1\nnames: {new: {ref: dev}}\n".utf8).write(
+      to: root.appendingPathComponent("pinewind.local.yaml"))
+    await stale.edit { _, local in local = nil }
+    await #expect(throws: PinewindError.self) { try await stale.saveLocalOverrides() }
   }
 
-  @Test func invalidEditsNeverReplaceSavedConfiguration() throws {
+  @Test func invalidEditsNeverReplaceSavedConfiguration() async throws {
     let root = temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    var configuration = try Configuration.load(inputRoot: root)
-    try configuration.saveShared()
+    let configuration = try Configuration.load(inputRoot: root)
+    try await configuration.saveShared()
     let file = root.appendingPathComponent("pinewind.yaml")
     let original = try Data(contentsOf: file)
-    configuration.manifest.order = [.named("missing")]
-    #expect(throws: PinewindError.self) { try configuration.saveShared() }
+    await configuration.edit { shared, _ in shared.order = [.named("missing")] }
+    await #expect(throws: PinewindError.self) { try await configuration.saveShared() }
     #expect(try Data(contentsOf: file) == original)
   }
 
@@ -303,10 +328,13 @@ struct ConfigurationDocumentTests {
     try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
     try Data("schema: test\n".utf8).write(to: input.appendingPathComponent("test.yaml"))
     try Data("ignored".utf8).write(to: input.appendingPathComponent("scratch.txt"))
-    var configuration = try Configuration.load(inputRoot: input)
-    configuration.manifest.order = [.userFiles(FileFilter(include: ["*.yaml"]))]
+    let configuration = try Configuration.load(inputRoot: input)
+    await configuration.edit { shared, _ in
+      shared.order = [.userFiles(FileFilter(include: ["*.yaml"]))]
+    }
+    let effective = try await configuration.evaluateEffective()
     let plan = try CompositionPlanner(snapshotRoot: root.appendingPathComponent("snapshots")).plan(
-      configuration.evaluateEffective(), inputRoot: input)
+      effective, inputRoot: input)
     let output = root.appendingPathComponent("output")
     let result = try await Composer().compose(plan, inputRoot: input, outputRoot: output)
     #expect(result.paths == ["test.yaml"])
@@ -315,5 +343,58 @@ struct ConfigurationDocumentTests {
         == "schema: test\n")
     #expect(
       !FileManager.default.fileExists(atPath: input.appendingPathComponent("pinewind.yaml").path))
+  }
+
+  @Test func throwingEditsDiscardBothDraftsAndSnapshotsAreDetached() async throws {
+    let root = temporaryRoot()
+    let configuration = try Configuration.load(inputRoot: root)
+    let before = await configuration.snapshot()
+    await #expect(throws: PinewindError.self) {
+      try await configuration.edit { shared, local in
+        shared.order = []
+        local = LocalOverridesDocument()
+        throw PinewindError("abort edit")
+      }
+    }
+    let after = await configuration.snapshot()
+    #expect(after.manifest == before.manifest)
+    #expect(after.localOverrides == before.localOverrides)
+    var detached = after.manifest
+    detached.order = []
+    let current = await configuration.snapshot()
+    #expect(current.manifest.order == [.userFiles(FileFilter())])
+    #expect(!FileManager.default.fileExists(atPath: root.path))
+  }
+
+  @Test func concurrentEditsAndSavesDoNotLoseUpdatesOrRaceBaselines() async throws {
+    let root = temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configuration = try Configuration.load(inputRoot: root)
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      for index in 0..<32 {
+        group.addTask {
+          await configuration.edit { shared, local in
+            let name = "package-\(index)"
+            shared.names[name] = PackageFields(url: .value(remote))
+            shared.order.append(.named(name))
+            if local == nil { local = LocalOverridesDocument() }
+            local?.names[name] = PackageFields(ref: .value("branch-\(index)"))
+          }
+          try await configuration.saveShared()
+          try await configuration.saveLocalOverrides()
+        }
+      }
+      try await group.waitForAll()
+    }
+    let current = await configuration.snapshot()
+    #expect(current.manifest.names.count == 32)
+    #expect(current.manifest.order.count == 33)
+    #expect(current.localOverrides?.names.count == 32)
+    let saved = try Configuration.load(inputRoot: root)
+    let savedSnapshot = await saved.snapshot()
+    #expect(savedSnapshot.manifest == current.manifest)
+    #expect(savedSnapshot.localOverrides == current.localOverrides)
+    let evaluated = try await configuration.evaluateEffective()
+    #expect(evaluated.entries.count == 33)
   }
 }
