@@ -27,11 +27,13 @@ enum SnapshotFiles {
   private static let chunkSize = 65_536
 
   static func byteCount(_ file: FilePath) throws -> UInt64 {
+    try NativePath.requireAbsolute(file)
     let descriptor = try FileDescriptor.open(file, .readOnly)
     return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
   }
 
   static func sha256(_ file: FilePath) throws -> String {
+    try NativePath.requireAbsolute(file)
     let descriptor = try FileDescriptor.open(file, .readOnly)
     return try descriptor.closeAfter {
       var hash = SHA256()
@@ -48,6 +50,8 @@ enum SnapshotFiles {
   }
 
   static func sameContents(_ first: FilePath, _ second: FilePath) throws -> Bool {
+    try NativePath.requireAbsolute(first)
+    try NativePath.requireAbsolute(second)
     let left = try FileDescriptor.open(first, .readOnly)
     return try left.closeAfter {
       let right = try FileDescriptor.open(second, .readOnly)

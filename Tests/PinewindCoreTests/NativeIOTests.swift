@@ -108,6 +108,11 @@ struct NativeIOTests {
   }
 
   @Test func chunkedFileChecksPreserveBinaryBytesAndDetectTailChanges() throws {
+    #expect {
+      _ = try SnapshotFiles.sha256("relative-file")
+    } throws: {
+      ($0 as? PinewindError)?.code == .invalidPath
+    }
     let root = native(
       FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
     defer { try? FileManager.default.removeItem(at: root) }
