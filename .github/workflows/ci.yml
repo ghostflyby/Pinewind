@@ -102,7 +102,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .build
-          key: ${{ steps.windows-swiftpm-cache.outputs.cache-primary-key }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
 
   ios-test:
     name: iOS · build and simulator test
