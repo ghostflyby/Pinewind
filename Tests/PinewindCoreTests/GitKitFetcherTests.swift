@@ -12,8 +12,7 @@ import Testing
 @testable import PinewindCore
 
 #if canImport(FoundationNetworking)
-  import Foundation
-  import SystemPackageNetworking
+  import FoundationNetworking
 #endif
 
 @Suite("Pinewind GitKit acquisition")
