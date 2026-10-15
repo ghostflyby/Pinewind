@@ -18,7 +18,7 @@ private struct CoordinationFixture {
 }
 
 private actor ControlledCoordinator: FileAccessCoordinating {
-  nonisolated let base: any FileAccessCoordinating
+  let base: any FileAccessCoordinating
   private var pauseNextWrite = true
   private var pendingWrite: CheckedContinuation<Void, Never>?
   private var startedWaiters: [CheckedContinuation<Void, Never>] = []
@@ -41,10 +41,17 @@ private actor ControlledCoordinator: FileAccessCoordinating {
 
   func failNextWrite() { failNext = true }
 
-  private func beginWrite() async {
-    activeWrites += 1
-    maximumWrites = max(maximumWrites, activeWrites)
-    if pauseNextWrite {
+  func coordinate<Value: Sendable>(
+    _ requests: [FileAccessRequest],
+    accessor: @escaping @Sendable ([URL]) throws -> Value
+  ) async throws -> Value {
+    let writing = requests.contains { $0.intent != .read }
+    if writing {
+      activeWrites += 1
+      maximumWrites = max(maximumWrites, activeWrites)
+    }
+    defer { if writing { activeWrites -= 1 } }
+    if writing && pauseNextWrite {
       pauseNextWrite = false
       await withCheckedContinuation { continuation in
         pendingWrite = continuation
@@ -52,71 +59,30 @@ private actor ControlledCoordinator: FileAccessCoordinating {
         startedWaiters.removeAll()
       }
     }
-  }
-
-  private func checkFailure() throws {
-    if failNext {
+    if writing && failNext {
       failNext = false
       throw PinewindError("test coordination failure")
     }
-  }
-
-  private func finishWrite() { activeWrites -= 1 }
-
-  // Swift 6.2 cannot witness a sending generic result with an actor-isolated method.
-  // Only test control state needs isolation; result transfer stays outside the actor.
-  nonisolated func coordinate<Value>(
-    _ requests: [FileAccessRequest],
-    accessor: @escaping @Sendable ([URL]) throws -> sending Value
-  ) async throws -> sending Value {
-    let writing = requests.contains { $0.intent != .read }
-    if writing { await beginWrite() }
-    do {
-      if writing { try await checkFailure() }
-      let value = try await base.coordinate(requests, accessor: accessor)
-      if writing { await finishWrite() }
-      return value
-    } catch {
-      if writing { await finishWrite() }
-      throw error
-    }
+    return try await base.coordinate(requests, accessor: accessor)
   }
 }
 
 private actor RedirectingCoordinator: FileAccessCoordinating {
-  nonisolated let directory: URL
+  let directory: URL
   private(set) var intents: [FileAccessRequest.Intent] = []
   init(directory: URL) { self.directory = directory }
 
-  private func record(_ requests: [FileAccessRequest]) { intents += requests.map(\.intent) }
-
-  nonisolated func coordinate<Value>(
+  func coordinate<Value: Sendable>(
     _ requests: [FileAccessRequest],
-    accessor: @escaping @Sendable ([URL]) throws -> sending Value
-  ) async throws -> sending Value {
-    await record(requests)
+    accessor: @escaping @Sendable ([URL]) throws -> Value
+  ) async throws -> Value {
+    intents += requests.map(\.intent)
     return try accessor(requests.map { directory.appendingPathComponent($0.url.lastPathComponent) })
   }
 }
 
-// Deliberately non-Sendable: the accessor transfers a freshly constructed result exactly once.
-private final class CoordinatedValue {
-  var count = 1
-}
-
 @Suite("Platform file coordination")
 struct FileAccessCoordinatorTests {
-  @Test func accessorCanTransferANonSendableResult() async throws {
-    let f = CoordinationFixture()
-    defer { f.remove() }
-    let coordinator = FileAccessCoordinator.platform(localStateRoot: f.local)
-    let value = try await coordinator.coordinate([
-      FileAccessRequest(url: f.input.appendingPathComponent("absent.yaml"), intent: .read)
-    ]) { _ in CoordinatedValue() }
-    value.count += 1
-    #expect(value.count == 2)
-  }
-
   @Test func accessorsUseCoordinatedURLsAndDistinctWriteDeleteIntents() async throws {
     let f = CoordinationFixture()
     defer { f.remove() }

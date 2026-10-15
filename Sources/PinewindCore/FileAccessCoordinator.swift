@@ -19,12 +19,12 @@ struct FileAccessRequest: Sendable {
 }
 
 /// Internal platform boundary. Accessors run once, synchronously, using the returned URLs in
-/// request order. They must finish all file access before returning a disconnected result.
+/// request order. They must finish all file access before returning the result.
 protocol FileAccessCoordinating: Sendable {
-  func coordinate<Value>(
+  func coordinate<Value: Sendable>(
     _ requests: [FileAccessRequest],
-    accessor: @escaping @Sendable ([URL]) throws -> sending Value
-  ) async throws -> sending Value
+    accessor: @escaping @Sendable ([URL]) throws -> Value
+  ) async throws -> Value
 }
 
 enum FileAccessCoordinator {
@@ -39,10 +39,10 @@ enum FileAccessCoordinator {
 
 #if canImport(Darwin)
   struct AppleFileAccessCoordinator: FileAccessCoordinating {
-    func coordinate<Value>(
+    func coordinate<Value: Sendable>(
       _ requests: [FileAccessRequest],
-      accessor: @escaping @Sendable ([URL]) throws -> sending Value
-    ) async throws -> sending Value {
+      accessor: @escaping @Sendable ([URL]) throws -> Value
+    ) async throws -> Value {
       try Task.checkCancellation()
       let coordinator = NSFileCoordinator()
       let intents = requests.map { request in
@@ -72,10 +72,10 @@ enum FileAccessCoordinator {
   struct LockedFileAccessCoordinator: FileAccessCoordinating {
     let localStateRoot: URL
 
-    func coordinate<Value>(
+    func coordinate<Value: Sendable>(
       _ requests: [FileAccessRequest],
-      accessor: @escaping @Sendable ([URL]) throws -> sending Value
-    ) async throws -> sending Value {
+      accessor: @escaping @Sendable ([URL]) throws -> Value
+    ) async throws -> Value {
       try Task.checkCancellation()
       // Native lock waits and disk I/O run off the cooperative executor.
       return try await withCheckedThrowingContinuation { continuation in
@@ -84,15 +84,14 @@ enum FileAccessCoordinator {
             try FileManager.default.createDirectory(
               at: localStateRoot, withIntermediateDirectories: true)
             let lock = localStateRoot.appendingPathComponent("configuration.lock")
-            try Self.withLock(lock) {
-              continuation.resume(returning: try accessor(requests.map(\.url)))
-            }
+            let value = try Self.withLock(lock) { try accessor(requests.map(\.url)) }
+            continuation.resume(returning: value)
           } catch { continuation.resume(throwing: error) }
         }
       }
     }
 
-    private static func withLock(_ file: URL, _ body: () throws -> Void) throws {
+    private static func withLock<Value>(_ file: URL, _ body: () throws -> Value) throws -> Value {
       #if os(Windows)
         let handle = try windowsNativePath(file).withCString(encodedAs: UTF16.self) {
           CreateFileW(
@@ -124,7 +123,7 @@ enum FileAccessCoordinator {
         }
         defer { pinewind_unlock_file(descriptor) }
       #endif
-      try body()
+      return try body()
     }
   }
 #endif
