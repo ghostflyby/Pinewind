@@ -6,14 +6,15 @@
 
 import CGitKit
 import Foundation
+import SystemPackage
 
 /// Internal seam for deterministic tests. Production callers enter through the
 /// fetcher's HTTPS validation; local transport is used only by fixture adapters.
 protocol GitTransport: Sendable {
   func advertise(url: URL) throws -> [GitReference]
-  func containsCommit(_ commit: String, repository: URL) throws -> Bool
-  func fetch(url: URL, repository: URL, commit: String) throws
-  func export(commit: String, repository: URL, destination: URL) throws
+  func containsCommit(_ commit: String, repository: FilePath) throws -> Bool
+  func fetch(url: URL, repository: FilePath, commit: String) throws
+  func export(commit: String, repository: FilePath, destination: FilePath) throws
 }
 
 struct GitKitTransport: GitTransport {
@@ -39,7 +40,7 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  func containsCommit(_ commit: String, repository: URL) throws -> Bool {
+  func containsCommit(_ commit: String, repository: FilePath) throws -> Bool {
     guard FileManager.default.fileExists(atPath: repository.path) else { return false }
     return try withRepository(repository) { repo in
       var oid = try parse(commit)
@@ -52,7 +53,7 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  func fetch(url: URL, repository: URL, commit: String) throws {
+  func fetch(url: URL, repository: FilePath, commit: String) throws {
     if !FileManager.default.fileExists(atPath: repository.path) {
       GitLibrary.ensureInitialized()
       var repo: OpaquePointer?
@@ -84,7 +85,7 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  func export(commit: String, repository: URL, destination: URL) throws {
+  func export(commit: String, repository: FilePath, destination: FilePath) throws {
     try withRepository(repository) { repo in
       var oid = try parse(commit)
       var object: OpaquePointer?
@@ -103,7 +104,7 @@ struct GitKitTransport: GitTransport {
       // A commit snapshot contains blob bytes, without platform EOL/smudge filters.
       options.disable_filters = 1
       options.notify_flags = UInt32(GIT_CHECKOUT_NOTIFY_ALL.rawValue)
-      options.notify_cb = { _, _, _, _, _, _ in Task.isCancelled ? GIT_EUSER.rawValue : 0 }
+      options.notify_cb = { _, _, _, _, _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
       try destination.path.withCString { path in
         options.target_directory = path
         try check(git_checkout_tree(repo, tree, &options))
@@ -152,7 +153,7 @@ struct GitKitTransport: GitTransport {
 
   private func validate(tree: OpaquePointer?, repository: OpaquePointer?, prefix: String) throws {
     for index in 0..<git_tree_entrycount(tree) {
-      try Task.checkCancellation()
+      try Cancellation.check()
       guard let entry = git_tree_entry_byindex(tree, index), let name = git_tree_entry_name(entry)
       else {
         throw PinewindError("Git tree contains an invalid entry")
@@ -176,10 +177,11 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  private func withRepository<T>(_ directory: URL, _ body: (OpaquePointer) throws -> T) throws -> T
+  private func withRepository<T>(_ directory: FilePath, _ body: (OpaquePointer) throws -> T) throws
+    -> T
   {
     GitLibrary.ensureInitialized()
-    try Task.checkCancellation()
+    try Cancellation.check()
     var repository: OpaquePointer?
     try check(git_repository_open(&repository, directory.path))
     guard let repository else {
@@ -198,8 +200,8 @@ struct GitKitTransport: GitTransport {
       var callbacks = git_remote_callbacks()
       try check(git_remote_init_callbacks(&callbacks, UInt32(GIT_REMOTE_CALLBACKS_VERSION)))
       callbacks.payload = Unmanaged.passUnretained(context).toOpaque()
-      callbacks.transfer_progress = { _, _ in Task.isCancelled ? GIT_EUSER.rawValue : 0 }
-      callbacks.sideband_progress = { _, _, _ in Task.isCancelled ? GIT_EUSER.rawValue : 0 }
+      callbacks.transfer_progress = { _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
+      callbacks.sideband_progress = { _, _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
       callbacks.transport = { out, owner, payload in
         guard let payload else { return GIT_EUSER.rawValue }
         let context = Unmanaged<TransferContext>.fromOpaque(payload).takeUnretainedValue()
@@ -211,7 +213,7 @@ struct GitKitTransport: GitTransport {
         return withUnsafeMutablePointer(to: &definition) { git_transport_smart(out, owner, $0) }
       }
       callbacks.credentials = { out, rawURL, username, allowed, payload in
-        guard !Task.isCancelled, let rawURL, let payload,
+        guard !Cancellation.isCancelled, let rawURL, let payload,
           let url = URL(string: String(cString: rawURL)), url.scheme?.lowercased() == "https"
         else {
           return GIT_EUSER.rawValue
@@ -245,12 +247,14 @@ struct GitKitTransport: GitTransport {
   }
 
   private func check(_ status: Int32) throws {
-    try Task.checkCancellation()
+    try Cancellation.check()
     guard status >= 0 else {
       let message =
         git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
         ?? "unknown error"
-      throw PinewindError("Git operation failed (\(status)): \(message)")
+      throw PinewindError(
+        status == GIT_EAUTH.rawValue ? .authenticationFailed : .io,
+        "Git operation failed (\(status)): \(message)")
     }
   }
 }

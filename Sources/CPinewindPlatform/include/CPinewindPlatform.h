@@ -15,7 +15,7 @@ int pinewind_exchange_directories(const char *candidate, const char *output);
 
 // The stable lock file remains on disk. Closing its descriptor releases the lock.
 // Returns zero on success or errno; the descriptor belongs to the caller on success.
-int pinewind_lock_file(const char *path, int *descriptor);
+int pinewind_try_lock_file(const char *path, int *descriptor);
 void pinewind_unlock_file(int descriptor);
 
 #endif

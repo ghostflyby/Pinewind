@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -85,7 +86,7 @@ struct ConfigurationTests {
       names:
         emoji:
           url: https://github.com/rime/rime-emoji.git
-          ref: master
+          revision: {ref: master}
           recipe: customize
           options: {schema: old, other: value}
       order:
@@ -96,7 +97,7 @@ struct ConfigurationTests {
       version: 1
       names:
         emoji:
-          ref: null
+          revision: null
           recipe: null
       """
     let manifest = try Manifest.parse(yaml, localOverrides: local)
@@ -118,7 +119,7 @@ struct ConfigurationTests {
       """
       version: 1
       names:
-        dev: {url: https://github.com/rime/rime-emoji, ref: master}
+        dev: {url: https://github.com/rime/rime-emoji, revision: {ref: master}}
       order: [dev, self]
       """, in: fixture.input)
     try fixture.write(
@@ -163,7 +164,7 @@ struct ConfigurationTests {
     let remote = """
       version: 1
       names:
-        dev: {url: https://github.com/rime/rime-emoji, \(key): \(value)}
+        dev: {url: https://github.com/rime/rime-emoji, revision: {\(key): \(value)}}
       order: [dev]
       """
     let override = "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}"
@@ -174,9 +175,9 @@ struct ConfigurationTests {
     }
     #expect(local.url == f.a && local.ref == nil && local.commit == nil)
     for yaml in [
-      "version: 1\norder: [{url: \(f.a.absoluteString), \(key): \(value)}]",
-      "version: 1\nnames: {dev: {url: \(f.a.absoluteString), \(key): \(value)}}\norder: [dev]",
-      "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, \(key): \(value)}]",
+      "version: 1\norder: [{url: \(f.a.absoluteString), revision: {\(key): \(value)}}]",
+      "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
+      "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
       #expect(throws: PinewindError.self) { try Manifest.parse(yaml) }
     }
@@ -184,7 +185,7 @@ struct ConfigurationTests {
       try Manifest.parse(
         remote,
         localOverrides:
-          "version: 1\nnames: {dev: {url: \(f.a.absoluteString), \(key): \(value)}}")
+          "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}")
     }
   }
 
@@ -275,7 +276,7 @@ struct CompositionTests {
     let f = try Fixture("FoldedInstall")
     defer { f.remove() }
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["opencc/emoji.txt", "schemas/test.yaml"])
+    #expect(plan.paths.map(\.string) == ["opencc/emoji.txt", "schemas/test.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("opencc/emoji.txt") == "emoji\n")
   }
@@ -286,7 +287,7 @@ struct CompositionTests {
     try f.write(
       "recipe.yaml", "patch_files: {nested/test.custom.yaml: [{schema: test}]}", in: f.a)
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["nested/test.custom.yaml"])
+    #expect(plan.paths.map(\.string) == ["nested/test.custom.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     let text = try f.read("nested/test.custom.yaml")
     #expect(text.hasPrefix("__patch:\n"))
@@ -318,7 +319,7 @@ struct CompositionTests {
     try f.write("scratch.local.yaml", "local", in: f.input)
     let plan = try f.plan([.userFiles(FileFilter())])
     let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
-    #expect(result.paths == ["lua/helper.lua", "nested/table.txt"])
+    #expect(result.paths.map(\.string) == ["lua/helper.lua", "nested/table.txt"])
     #expect(try f.read("lua/helper.lua") == "return 1")
   }
 
@@ -332,7 +333,8 @@ struct CompositionTests {
       try f.write(path, "data", in: f.a)
     }
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["default.yaml", "model.gram", "opencc/data.ocd2", "words.txt"])
+    #expect(
+      plan.paths.map(\.string) == ["default.yaml", "model.gram", "opencc/data.ocd2", "words.txt"])
   }
 
   @Test func uninstallRestoresEarlierProviderAndReorderChangesWinner() async throws {
@@ -368,12 +370,12 @@ struct CompositionTests {
     let after =
       try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
     #expect(unchanged.changedPaths.isEmpty)
-    #expect(unchanged.reusedPaths == ["default.yaml"])
+    #expect(unchanged.reusedPaths.map(\.string) == ["default.yaml"])
     #expect(after == sentinel)
     try f.write("default.yaml", "value: new\n", in: f.a)
     let changed = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    #expect(changed.changedPaths == ["default.yaml"])
+    #expect(changed.changedPaths.map(\.string) == ["default.yaml"])
     #expect(try f.read("default.yaml") == "value: new\n")
   }
 
@@ -550,8 +552,8 @@ struct CompositionTests {
     try FileManager.default.removeItem(at: f.a.appendingPathComponent("dicts/old.yaml"))
     let result = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    #expect(result.paths == ["dicts/new.yaml"])
-    #expect(result.removedPaths == ["dicts/old.yaml"])
+    #expect(result.paths.map(\.string) == ["dicts/new.yaml"])
+    #expect(result.removedPaths.map(\.string) == ["dicts/old.yaml"])
   }
 
   @Test func patchRunsImmediatelyAndLaterSelfCanReplaceIt() async throws {
@@ -665,7 +667,7 @@ struct CompositionTests {
       PreparedPackage(request: sharedAgain, directory: f.b, commit: commit),
     ]
     let plan = try f.plan([.package(consumer)], packages: views)
-    #expect(plan.paths == ["consumer.custom.yaml", "shared.yaml"])
+    #expect(plan.paths.map(\.string) == ["consumer.custom.yaml", "shared.yaml"])
     let patch = try #require(plan.files["consumer.custom.yaml"]?.first)
     guard case .patch(let rx, _) = patch.action else {
       Issue.record("expected a recipe patch")
@@ -695,7 +697,7 @@ struct CompositionTests {
     let request = try PackageRequest(
       url: f.a, recipe: "customize", options: ["schema": "$(echo literal)"])
     let plan = try f.plan([.package(request)])
-    #expect(plan.paths == ["$(echo literal).custom.yaml"])
+    #expect(plan.paths.map(\.string) == ["$(echo literal).custom.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(
       !FileManager.default.fileExists(
@@ -723,7 +725,7 @@ struct CompositionTests {
       request: request, directory: f.a, commit: String(repeating: "a", count: 40),
       resources: [resource])
     let plan = try f.plan([.package(request)], packages: [prepared])
-    #expect(plan.paths == [path])
+    #expect(plan.paths.map(\.string) == [path])
     try f.write(path, "changed", in: f.a)
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read(path) == "abc")

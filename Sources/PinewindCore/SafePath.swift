@@ -5,18 +5,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
 enum SafePath {
   static func validate(_ path: String) throws {
-    let components = path.split(separator: "/", omittingEmptySubsequences: false)
-    guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"), !path.contains("\\"),
-      components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
-    else { throw PinewindError("unsafe relative path '\(path)'") }
+    _ = try RelativePath(path)
   }
 
-  static func file(_ path: String, in root: URL) throws -> URL {
+  static func file(_ path: String, in root: FilePath) throws -> FilePath {
     try validate(path)
-    let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+    let canonicalRoot = FilePath(try canonical(root))
     let candidate = canonicalRoot.appendingPathComponent(path)
     guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
       throw PinewindError("path escapes its source root: \(path)")
@@ -24,7 +22,7 @@ enum SafePath {
     return candidate
   }
 
-  static func validateOutputRoot(_ output: URL) throws {
+  static func validateOutputRoot(_ output: FilePath) throws {
     guard !output.lastPathComponent.isEmpty, output.lastPathComponent != "/" else {
       throw PinewindError("composition output must not be a filesystem root")
     }
@@ -35,7 +33,7 @@ enum SafePath {
     #endif
   }
 
-  static func validateRoots(input: URL, output: URL, sources: [URL]) throws {
+  static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath]) throws {
     try validateOutputRoot(output)
     let roots = [input] + sources
     let out = try canonical(output)
@@ -47,7 +45,7 @@ enum SafePath {
     }
   }
 
-  static func overlaps(_ first: URL, _ second: URL) throws -> Bool {
+  static func overlaps(_ first: FilePath, _ second: FilePath) throws -> Bool {
     let a = try canonical(first)
     let b = try canonical(second)
     return a == b || a.hasPrefix(prefix(b)) || b.hasPrefix(prefix(a))
@@ -57,28 +55,31 @@ enum SafePath {
     path.hasSuffix("/") ? path : path + "/"
   }
 
-  private static func canonical(_ url: URL) throws -> String {
+  static func canonical(_ url: FilePath) throws -> String {
     #if os(Windows)
       return try WindowsDirectoryPublisher.canonicalPath(url)
     #else
-      return url.standardizedFileURL.resolvingSymlinksInPath().path
+      try NativePath.requireAbsolute(url)
+      let resolved = try url.foundationURL.resolvingSymlinksInPath().standardizedFileURL
+      return try NativePath.from(resolved).string
     #endif
   }
 
-  static func files(in root: URL) throws -> [String] {
+  static func files(in root: FilePath) throws -> [String] {
     #if os(Windows)
       let root = try WindowsDirectoryPublisher.resolvedURL(root)
     #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
-    let values = try root.resourceValues(forKeys: [.isDirectoryKey])
+    try NativePath.requireAbsolute(root)
+    let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true else {
       throw PinewindError("source must be a directory", source: root.path)
     }
     var enumerationError: (any Error)?
     guard
       let iterator = fm.enumerator(
-        at: root, includingPropertiesForKeys: keys,
+        at: try root.foundationURL, includingPropertiesForKeys: keys,
         options: [],
         errorHandler: { _, error in
           enumerationError = error
@@ -88,8 +89,9 @@ enum SafePath {
       throw PinewindError("cannot enumerate source", source: root.path)
     }
     var result: [String] = []
-    let base = root.standardizedFileURL.path
+    let base = try NativePath.from(root.foundationURL.standardizedFileURL)
     for case let file as URL in iterator {
+      try Cancellation.check()
       let values = try file.resourceValues(forKeys: Set(keys))
       if values.isSymbolicLink == true {
         throw PinewindError(
@@ -100,7 +102,9 @@ enum SafePath {
         continue
       }
       if values.isRegularFile == true {
-        let path = String(file.standardizedFileURL.path.dropFirst(base.count + 1))
+        let native = try NativePath.from(file.standardizedFileURL)
+        let path = native.components.dropFirst(base.components.count).map(\.string).joined(
+          separator: "/")
         try validate(path)
         result.append(path)
       }

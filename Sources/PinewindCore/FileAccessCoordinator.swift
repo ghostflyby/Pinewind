@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
 #if os(Windows)
   import WinSDK
@@ -28,16 +29,25 @@ protocol FileAccessCoordinating: Sendable {
 }
 
 enum FileAccessCoordinator {
-  static func platform(localStateRoot: URL) -> any FileAccessCoordinating {
+  static func platform(stateRoot: FilePath) -> any FileAccessCoordinating {
     #if canImport(Darwin)
       AppleFileAccessCoordinator()
     #else
-      LockedFileAccessCoordinator(localStateRoot: localStateRoot)
+      LockedFileAccessCoordinator(stateRoot: stateRoot)
     #endif
   }
 }
 
 #if canImport(Darwin)
+  private final class CoordinationCancellation: @unchecked Sendable {
+    let coordinator: NSFileCoordinator
+    let signal = CancellationSignal()
+    init(_ coordinator: NSFileCoordinator) { self.coordinator = coordinator }
+    func cancel() {
+      signal.cancel()
+      coordinator.cancel()
+    }
+  }
   struct AppleFileAccessCoordinator: FileAccessCoordinating {
     func coordinate<Value: Sendable>(
       _ requests: [FileAccessRequest],
@@ -55,75 +65,45 @@ enum FileAccessCoordinator {
         }
       }
       defer { withExtendedLifetime(coordinator) {} }
-      return try await withCheckedThrowingContinuation { continuation in
-        coordinator.coordinate(with: intents, queue: OperationQueue()) { error in
-          if let error {
-            continuation.resume(throwing: error)
-            return
-          }
-          do { continuation.resume(returning: try accessor(intents.map(\.url))) } catch {
-            continuation.resume(throwing: error)
+      let cancellation = CoordinationCancellation(coordinator)
+      return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          coordinator.coordinate(with: intents, queue: OperationQueue()) { error in
+            if cancellation.signal.isCancelled {
+              continuation.resume(throwing: CancellationError())
+              return
+            }
+            if let error {
+              continuation.resume(throwing: PinewindError.wrap(error))
+              return
+            }
+            do {
+              let value = try Cancellation.$signal.withValue(cancellation.signal) {
+                try Cancellation.check()
+                return try accessor(intents.map(\.url))
+              }
+              continuation.resume(returning: value)
+            } catch { continuation.resume(throwing: PinewindError.wrap(error)) }
           }
         }
+      } onCancel: {
+        cancellation.cancel()
       }
     }
   }
 #else
   struct LockedFileAccessCoordinator: FileAccessCoordinating {
-    let localStateRoot: URL
+    let stateRoot: FilePath
 
     func coordinate<Value: Sendable>(
       _ requests: [FileAccessRequest],
       accessor: @escaping @Sendable ([URL]) throws -> Value
     ) async throws -> Value {
-      try Task.checkCancellation()
-      // Native lock waits and disk I/O run off the cooperative executor.
-      return try await withCheckedThrowingContinuation { continuation in
-        OperationQueue().addOperation {
-          do {
-            try FileManager.default.createDirectory(
-              at: localStateRoot, withIntermediateDirectories: true)
-            let lock = localStateRoot.appendingPathComponent("configuration.lock")
-            let value = try Self.withLock(lock) { try accessor(requests.map(\.url)) }
-            continuation.resume(returning: value)
-          } catch { continuation.resume(throwing: error) }
+      try await BlockingIO.run {
+        try NativeLock.withLock(stateRoot.appending("configuration.lock")) {
+          try accessor(requests.map(\.url))
         }
       }
-    }
-
-    private static func withLock<Value>(_ file: URL, _ body: () throws -> Value) throws -> Value {
-      #if os(Windows)
-        let handle = try windowsNativePath(file).withCString(encodedAs: UTF16.self) {
-          CreateFileW(
-            $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE),
-            DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE), nil,
-            DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
-        }
-        guard let handle, handle != INVALID_HANDLE_VALUE else {
-          throw PinewindError("cannot open configuration lock (Windows error \(GetLastError()))")
-        }
-        defer { _ = CloseHandle(handle) }
-        var overlapped = OVERLAPPED()
-        guard LockFileEx(handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK), 0, 1, 0, &overlapped) else {
-          throw PinewindError("cannot lock configuration (Windows error \(GetLastError()))")
-        }
-        defer { _ = UnlockFileEx(handle, 0, 1, 0, &overlapped) }
-      #else
-        var descriptor: Int32 = -1
-        let status = file.withUnsafeFileSystemRepresentation { path in
-          path.map { pinewind_lock_file($0, &descriptor) }
-        }
-        guard let status else {
-          throw PinewindError("configuration lock has no filesystem representation")
-        }
-        guard status == 0 else {
-          throw PinewindError(
-            "cannot lock configuration: \(String(cString: strerror(status))) (errno \(status))",
-            source: file.path)
-        }
-        defer { pinewind_unlock_file(descriptor) }
-      #endif
-      return try body()
     }
   }
 #endif

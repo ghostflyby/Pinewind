@@ -5,50 +5,71 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
 #if !os(Windows)
   import CPinewindPlatform
 #endif
 
 public struct CompositionResult: Sendable {
-  public let directory: URL
-  public let paths: [String]
-  public let changedPaths: [String]
-  public let removedPaths: [String]
-  public let reusedPaths: [String]
+  public let directory: FilePath
+  public let paths: [RelativePath]
+  public let changedPaths: [RelativePath]
+  public let removedPaths: [RelativePath]
+  public let reusedPaths: [RelativePath]
+  init(
+    directory: FilePath, paths: [String], changedPaths: [String], removedPaths: [String],
+    reusedPaths: [String]
+  ) throws {
+    self.directory = directory
+    self.paths = try paths.map(RelativePath.init)
+    self.changedPaths = try changedPaths.map(RelativePath.init)
+    self.removedPaths = try removedPaths.map(RelativePath.init)
+    self.reusedPaths = try reusedPaths.map(RelativePath.init)
+  }
+
 }
 
 /// Renders a candidate generation and atomically publishes it as the active
 /// output. Previous bytes are only reused after comparing the fully rendered
 /// candidate, so deletions, local edits and lost change notifications stay correct.
-public actor Composer {
-  public init() {}
-
+struct Composer {
   /// On Windows, outputRoot must be absent, empty, or a junction managed by Pinewind.
-  public func compose(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
+  func compose(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath) throws
     -> CompositionResult
   {
-    // Snapshot URLs do not retain their owner. Keep it alive through all reads,
+    // Captured paths do not retain their owner. Keep it alive through all reads,
     // including optimized builds that may end a property's lifetime at last use.
     defer { withExtendedLifetime(plan.snapshot) {} }
-    guard inputRoot.isFileURL, outputRoot.isFileURL else {
-      throw PinewindError("composition roots must be file URLs")
-    }
+    try Cancellation.check()
+    try NativePath.requireAbsolute(inputRoot)
+    try NativePath.requireAbsolute(outputRoot)
+    try SafePath.validateRoots(
+      input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
     #if os(Windows)
       try SafePath.validateOutputRoot(outputRoot)
       let storage = WindowsDirectoryPublisher.storage(for: outputRoot)
       try SafePath.validateRoots(
         input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
       try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
-      return try WindowsDirectoryPublisher.withPublicationLock(in: storage) {
+      return try NativeLock.withLock(
+        outputRoot.removingLastComponent().appending(
+          "." + outputRoot.lastPathComponent + ".pinewind-publication.lock")
+      ) {
         try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
       }
     #else
-      return try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+      return try NativeLock.withLock(
+        outputRoot.removingLastComponent().appending(
+          "." + outputRoot.lastPathComponent + ".pinewind-publication.lock")
+      ) {
+        try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+      }
     #endif
   }
 
-  private func composeGeneration(_ plan: CompositionPlan, inputRoot: URL, outputRoot: URL) throws
+  private func composeGeneration(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath)
+    throws
     -> CompositionResult
   {
     try SafePath.validateRoots(
@@ -73,7 +94,8 @@ public actor Composer {
     defer { if !retained { try? fm.removeItem(at: candidate) } }
     var reused: [String] = []
     var changed: [String] = []
-    for path in plan.paths {
+    for path in plan.stringPaths {
+      try Cancellation.check()
       guard let operations = plan.files[path] else { continue }
       let destination = try SafePath.file(path, in: candidate)
       try fm.createDirectory(
@@ -92,21 +114,30 @@ public actor Composer {
         changed.append(path)
       }
     }
-    let current = Set(plan.paths)
+    let current = Set(plan.stringPaths)
     let removed = previous.filter { !current.contains($0) }
     if exists && changed.isEmpty && removed.isEmpty {
-      return CompositionResult(
-        directory: outputRoot, paths: plan.paths,
+      try plan.binding?.validate()
+      try Cancellation.check()
+      return try CompositionResult(
+        directory: outputRoot, paths: plan.stringPaths,
         changedPaths: [], removedPaths: [], reusedPaths: reused)
     }
+    try plan.binding?.validate()
+    try Cancellation.check()
     #if os(Windows)
       try WindowsDirectoryPublisher.publish(candidate, at: outputRoot)
       retained = true
     #else
       if exists {
-        let status = pinewind_exchange_directories(candidate.path, outputRoot.path)
+        let status = candidate.withPlatformString { source in
+          outputRoot.withPlatformString { destination in
+            pinewind_exchange_directories(source, destination)
+          }
+        }
         guard status == 0 else {
           throw PinewindError(
+            .unsupportedFilesystem,
             "cannot atomically exchange composition directories: \(String(cString: strerror(status))) (errno \(status))"
           )
         }
@@ -114,17 +145,18 @@ public actor Composer {
         try fm.moveItem(at: candidate, to: outputRoot)
       }
     #endif
-    return CompositionResult(
-      directory: outputRoot, paths: plan.paths,
+    return try CompositionResult(
+      directory: outputRoot, paths: plan.stringPaths,
       changedPaths: changed, removedPaths: removed, reusedPaths: reused)
   }
 
-  private func render(_ operations: [CompositionOperation], to destination: URL) throws {
+  private func render(_ operations: [CompositionOperation], to destination: FilePath) throws {
     // Execute the full reference chain in M1. Future cached replays may elide
     // overwritten contributions only after preserving validation semantics.
     var bytes: Data?
-    var base: URL?
+    var base: FilePath?
     for operation in operations {
+      try Cancellation.check()
       switch operation.action {
       case .write(let file):
         base = file

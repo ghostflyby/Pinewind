@@ -6,15 +6,18 @@
 
 import BashInterpreter
 import Foundation
+import SystemPackage
 
 /// Conf evaluation uses a fresh SwiftBash shell and a read-only resource mount.
 /// Built-in lists are native data; local confs use the interpreter. Remote resource views
 /// will be supplied by the HTTP acquisition layer, never by enabling shell networking.
-public struct PlumImporter: Sendable {
-  public let timeout: Duration
-  public init(timeout: Duration = .seconds(5)) { self.timeout = timeout }
+struct PlumImporter: Sendable {
+  let limits: ImportLimits
+  var timeout: Duration { limits.timeout }
+  init(timeout: Duration = .seconds(5)) { limits = ImportLimits(timeout: timeout) }
+  init(limits: ImportLimits) { self.limits = limits }
 
-  public func expand(_ manifest: Manifest, inputRoot: URL) async throws -> Manifest {
+  func expand(_ manifest: Manifest, inputRoot: FilePath) async throws -> Manifest {
     var entries: [ManifestEntry] = []
     for entry in manifest.entries {
       if case .importConf(let request) = entry {
@@ -28,7 +31,7 @@ public struct PlumImporter: Sendable {
     return Manifest(entries: entries)
   }
 
-  public func evaluate(_ request: ConfImport, inputRoot: URL) async throws -> [String] {
+  func evaluate(_ request: ConfImport, inputRoot: FilePath) async throws -> [String] {
     guard request.variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
     if request.source.hasPrefix(":") {
       return try BuiltinPackageLists.descriptors(for: request.source)
@@ -43,13 +46,16 @@ public struct PlumImporter: Sendable {
       file: file, resourceRoot: file.deletingLastPathComponent(), variables: request.variables)
   }
 
-  public func evaluate(file: URL, resourceRoot: URL, variables: [String: String] = [:]) async throws
+  func evaluate(
+    file: FilePath, resourceRoot: FilePath, variables: [String: String] = [:],
+    fileSystem: (any FileSystem)? = nil
+  ) async throws
     -> [String]
   {
     guard variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
     guard
-      file.deletingLastPathComponent().resolvingSymlinksInPath()
-        == resourceRoot.resolvingSymlinksInPath()
+      (try SafePath.canonical(file.deletingLastPathComponent()))
+        == (try SafePath.canonical(resourceRoot))
     else {
       throw PinewindError("conf must be directly inside its read-only resource root")
     }
@@ -58,10 +64,12 @@ public struct PlumImporter: Sendable {
       environment: Environment(variables: variables, workingDirectory: "/conf"))
     shell.environment["root_dir"] = "/conf"
     shell.errexit = true
-    shell.fileSystem = MountedFileSystem(
-      mounts: [.init(virtual: "/conf", host: resourceRoot.path, readOnly: true)],
-      backing: RealFileSystem())
-    let budget = ConfSourceBudget()
+    shell.fileSystem =
+      fileSystem
+      ?? MountedFileSystem(
+        mounts: [.init(virtual: "/conf", host: resourceRoot.path, readOnly: true)],
+        backing: RealFileSystem())
+    let budget = ConfSourceBudget(limits: limits)
     shell.installShellBuiltin(BoundedSource(name: "source", budget: budget))
     shell.installShellBuiltin(BoundedSource(name: ".", budget: budget))
     // No external command catalog or network permissions are installed.
@@ -100,7 +108,7 @@ public struct PlumImporter: Sendable {
     }
   }
 
-  public static func package(_ descriptor: String) throws -> PackageRequest {
+  static func package(_ descriptor: String) throws -> PackageRequest {
     let sections = descriptor.split(separator: ":", omittingEmptySubsequences: false).map(
       String.init)
     guard !sections[0].isEmpty else { throw PinewindError("empty plum package descriptor") }
@@ -129,7 +137,7 @@ public struct PlumImporter: Sendable {
       options[String(pair[0])] = String(pair[1])
     }
     return try PackageRequest(
-      url: url, ref: source.count == 2 ? source[1] : nil,
+      url: url, revision: source.count == 2 ? .reference(source[1]) : nil,
       recipe: sections.count > 1 && !sections[1].isEmpty ? sections[1] : nil, options: options)
   }
 }
@@ -137,14 +145,18 @@ public struct PlumImporter: Sendable {
 /// Shared across interpreter subshell copies; a bounded include count also stops
 /// cyclic source chains without changing the semantics of repeated includes.
 private actor ConfSourceBudget {
+  let limits: ImportLimits
+  init(limits: ImportLimits) { self.limits = limits }
   private var calls = 0
   private var bytes = 0
 
   func charge(_ size: Int) throws {
     calls += 1
     bytes += size
-    guard calls <= 64, size <= 1_048_576, bytes <= 4_194_304 else {
-      throw PinewindError("conf include resource limit exceeded")
+    guard calls <= limits.maximumSources, size <= limits.maximumFileBytes,
+      bytes <= limits.maximumTotalBytes
+    else {
+      throw PinewindError(.resourceLimit, "conf include resource limit exceeded")
     }
   }
 }

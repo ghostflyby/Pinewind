@@ -6,17 +6,18 @@
 
 #if os(Windows)
   import Foundation
+  import SystemPackage
   import WinSDK
 
   /// A stable junction points to a complete private generation. Updating its
   /// reparse data switches targets without renaming or removing the active root.
   enum WindowsDirectoryPublisher {
-    static func storage(for output: URL) -> URL {
+    static func storage(for output: FilePath) -> FilePath {
       output.deletingLastPathComponent().appendingPathComponent(
         "." + output.lastPathComponent + ".pinewind-generations", isDirectory: true)
     }
 
-    static func validate(_ output: URL) throws {
+    static func validate(_ output: FilePath) throws {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedURL(target)
@@ -35,7 +36,7 @@
       }
     }
 
-    static func publish(_ candidate: URL, at output: URL) throws {
+    static func publish(_ candidate: FilePath, at output: FilePath) throws {
       let fm = FileManager.default
       if try currentTarget(output) != nil || fm.fileExists(atPath: output.path) {
         try redirect(output, to: candidate)
@@ -70,24 +71,8 @@
 
     /// Hold from reading the previous generation through candidate construction,
     /// publication and cleanup, including across independent instances/processes.
-    static func withPublicationLock<T>(in storage: URL, _ body: () throws -> T) throws -> T {
-      let file = storage.appendingPathComponent("publication.lock")
-      let handle = try windowsNativePath(file).withCString(encodedAs: UTF16.self) {
-        CreateFileW(
-          $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
-          nil,
-          DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
-      }
-      guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError("cannot open composition lock (Windows error \(GetLastError()))")
-      }
-      defer { _ = CloseHandle(handle) }
-      var overlapped = OVERLAPPED()
-      guard LockFileEx(handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK), 0, 1, 0, &overlapped) else {
-        throw PinewindError("cannot lock composition output (Windows error \(GetLastError()))")
-      }
-      defer { _ = UnlockFileEx(handle, 0, 1, 0, &overlapped) }
-      return try body()
+    static func withPublicationLock<T>(in storage: FilePath, _ body: () throws -> T) throws -> T {
+      try NativeLock.withLock(storage.appendingPathComponent("publication.lock"), body)
     }
 
     private static func isGeneration(_ name: String) -> Bool {
@@ -95,7 +80,7 @@
     }
 
     private static func withHandle<T>(
-      _ url: URL, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
+      _ url: FilePath, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
     ) throws -> T {
       let handle = try windowsNativePath(url).withCString(encodedAs: UTF16.self) {
         CreateFileW(
@@ -113,12 +98,12 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: URL) throws -> String {
-      try resolvedURL(url).standardizedFileURL.path.lowercased()
+    static func canonicalPath(_ url: FilePath) throws -> String {
+      try resolvedURL(url).string.replacingOccurrences(of: "\\", with: "/").lowercased()
     }
 
-    static func resolvedURL(_ url: URL) throws -> URL {
-      var ancestor = url.standardizedFileURL
+    static func resolvedURL(_ url: FilePath) throws -> FilePath {
+      var ancestor = url
       var missing: [String] = []
       while !FileManager.default.fileExists(atPath: ancestor.path) {
         let parent = ancestor.deletingLastPathComponent()
@@ -140,13 +125,13 @@
         } else if path.hasPrefix("\\\\?\\") {
           path.removeFirst(4)
         }
-        return URL(fileURLWithPath: path)
+        return FilePath(path)
       }
       for component in missing.reversed() { resolved.appendPathComponent(component) }
       return resolved
     }
 
-    static func currentTarget(_ output: URL) throws -> URL? {
+    static func currentTarget(_ output: FilePath) throws -> FilePath? {
       let attributes = try windowsNativePath(output).withCString(encodedAs: UTF16.self) {
         GetFileAttributesW($0)
       }
@@ -181,11 +166,11 @@
         else { throw PinewindError("invalid composition junction target") }
         path.removeFirst(4)
         if path.hasPrefix("UNC\\") { path = "\\\\" + path.dropFirst(4) }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return FilePath(path)
       }
     }
 
-    static func redirect(_ output: URL, to candidate: URL) throws {
+    static func redirect(_ output: FilePath, to candidate: FilePath) throws {
       let printName = try windowsNativePath(candidate)
       let substituteName =
         printName.hasPrefix("\\\\")

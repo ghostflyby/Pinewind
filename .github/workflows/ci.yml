@@ -46,6 +46,8 @@ jobs:
           key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
         run: swift test --no-parallel
+      - name: Public API compile contracts
+        run: python3 Scripts/check-api-boundaries.py
 
   linux-test:
     name: Linux · swift test

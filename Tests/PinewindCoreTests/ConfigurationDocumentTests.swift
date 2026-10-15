@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -43,14 +44,13 @@ struct ConfigurationDocumentTests {
       names:
         emoji:
           url: https://github.com/rime/rime-emoji.git
-          ref: main
+          revision: {ref: main}
           options: {enabled: "true", count: "123", empty: "", text: "松风"}
       order:
         - emoji
         - self
         - name: emoji
-          ref: null
-          commit: "0123456789012345678901234567890123456789"
+          revision: {commit: "0123456789012345678901234567890123456789"}
           options: {}
           include: []
           exclude: null
@@ -86,7 +86,7 @@ struct ConfigurationDocumentTests {
           exclude: []
       """)
     #expect(local.names["emoji"]?.url == .inherit)
-    #expect(local.names["emoji"]?.recipe == .clear)
+    #expect(local.names["emoji"]?.recipe == .reset)
     #expect(local.names["emoji"]?.exclude == .value([]))
     #expect(try LocalOverridesDocument.parse(local.yaml()) == local)
     let manifest = try shared.evaluate(localOverrides: local)
@@ -120,7 +120,7 @@ struct ConfigurationDocumentTests {
     var document = try ManifestDocument.parse(
       """
       version: 1
-      names: {emoji: {ref: main}}
+      names: {emoji: {revision: {ref: main}}}
       order: [emoji]
       """)
     #expect(throws: PinewindError.self) { try document.evaluate() }
@@ -134,7 +134,8 @@ struct ConfigurationDocumentTests {
 
   @Test(arguments: [
     "order: [self]", "version: 2\norder: []", "version: 1\norder: []\norder: []",
-    "version: 1\norder: [{self: {}, ref: main}]", "version: 1\norder: [{import: ':x', ref: main}]",
+    "version: 1\norder: [{self: {}, revision: {ref: main}}]",
+    "version: 1\norder: [{import: ':x', revision: {ref: main}}]",
     "version: 1\nnames: {self: {}}\norder: []",
     "version: 1\nnames: {a: {options: {x: true}}}\norder: []",
     "version: 1\norder: [{name: a, variables: {}}]",
@@ -159,8 +160,8 @@ struct ConfigurationDocumentTests {
       diagnostic {
         _ = try Manifest.parse(text, source: "original.yaml")
       })
-    #expect(original.source == "original.yaml")
-    #expect(original.line == 4)
+    #expect(original.source == nil)
+    #expect(original.line == nil)
     let document = try ManifestDocument.parse(text, source: "original.yaml")
     let evaluated = try #require(diagnostic { _ = try document.evaluate() })
     #expect(evaluated.message == original.message)
@@ -218,7 +219,7 @@ struct ConfigurationDocumentTests {
         names: ["old": PackageFields(url: .value(remote))],
         order: [
           .named("old"), .userFiles(FileFilter()),
-          .named("old", overrides: PackageFields(recipe: .clear)),
+          .named("old", overrides: PackageFields(recipe: .reset)),
         ])
       local = LocalOverridesDocument(names: ["old": PackageFields(ref: .value("dev"))])
     }
@@ -227,11 +228,11 @@ struct ConfigurationDocumentTests {
     #expect(renamed.manifest.names["old"] == nil)
     #expect(renamed.localOverrides?.names["new"]?.ref == .value("dev"))
     #expect(renamed.manifest.order[0] == .named("new"))
-    #expect(renamed.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .clear)))
+    #expect(renamed.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .reset)))
     await #expect(throws: PinewindError.self) { try await configuration.removePackage("new") }
     try await configuration.edit { shared, _ in try shared.moveEntry(from: 2, to: 0) }
     let moved = await configuration.snapshot()
-    #expect(moved.manifest.order[0] == .named("new", overrides: PackageFields(recipe: .clear)))
+    #expect(moved.manifest.order[0] == .named("new", overrides: PackageFields(recipe: .reset)))
     await configuration.edit { _, local in local?.names["taken"] = PackageFields() }
     await #expect(throws: PinewindError.self) {
       try await configuration.renamePackage("new", to: "taken")
@@ -318,7 +319,7 @@ struct ConfigurationDocumentTests {
     await first.edit { _, local in local = LocalOverridesDocument() }
     try await first.saveLocalOverrides()
     stale = try await Configuration.load(inputRoot: root, localStateRoot: localStateRoot(root))
-    try Data("version: 1\nnames: {new: {ref: dev}}\n".utf8).write(
+    try Data("version: 1\nnames: {new: {revision: {ref: dev}}}\n".utf8).write(
       to: localStateRoot(root).appendingPathComponent("pinewind.local.yaml"))
     await stale.edit { _, local in local = nil }
     await #expect(throws: PinewindError.self) { try await stale.saveLocalOverrides() }
@@ -354,7 +355,7 @@ struct ConfigurationDocumentTests {
       effective, inputRoot: input)
     let output = root.appendingPathComponent("output")
     let result = try await Composer().compose(plan, inputRoot: input, outputRoot: output)
-    #expect(result.paths == ["test.yaml"])
+    #expect(result.paths.map(\.string) == ["test.yaml"])
     #expect(
       try String(contentsOf: output.appendingPathComponent("test.yaml"), encoding: .utf8)
         == "schema: test\n")

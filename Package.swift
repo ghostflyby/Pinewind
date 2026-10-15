@@ -9,9 +9,10 @@ let package = Package(
     .iOS(.v16),
   ],
   products: [
-    .library(name: "PinewindCore", targets: ["PinewindCore"]),
+    .library(name: "PinewindCore", targets: ["PinewindCore"])
   ],
   dependencies: [
+    .package(url: "https://github.com/apple/swift-system", .upToNextMinor(from: "1.8.1")),
     .package(url: "https://github.com/apple/swift-crypto", from: "3.15.1"),
     .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     .package(
@@ -28,12 +29,16 @@ let package = Package(
       name: "PinewindCore",
       dependencies: [
         .target(name: "CPinewindPlatform", condition: .when(platforms: [.macOS, .iOS, .linux])),
+        .product(name: "SystemPackage", package: "swift-system"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "BashInterpreter", package: "SwiftBash"),
         .product(name: "Glob", package: "swift-glob"),
         .product(name: "CGitKit", package: "GitKit"),
       ]),
+    .testTarget(
+      name: "PinewindAPITests",
+      dependencies: ["PinewindCore", .product(name: "SystemPackage", package: "swift-system")]),
     .testTarget(
       name: "PinewindCoreTests",
       dependencies: ["PinewindCore", .product(name: "CGitKit", package: "GitKit")],

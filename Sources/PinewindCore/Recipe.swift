@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Yams
 
 struct Recipe {
@@ -21,7 +22,8 @@ struct Recipe {
   let patches: [Patch]
   let downloads: [Download]
 
-  static func load(request: PackageRequest, directory: URL, read: (URL) throws -> Data) throws
+  static func load(request: PackageRequest, directory: FilePath, read: (FilePath) throws -> Data)
+    throws
     -> Recipe?
   {
     let name = request.recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"

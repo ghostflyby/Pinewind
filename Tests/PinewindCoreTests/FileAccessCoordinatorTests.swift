@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -107,7 +108,7 @@ struct FileAccessCoordinatorTests {
       !FileManager.default.fileExists(
         atPath: actual.appendingPathComponent("pinewind.local.yaml").path))
     let intents = await coordinator.intents
-    #expect(intents == [.read, .read, .write, .write, .read, .read, .delete])
+    #expect(intents == [.read, .read, .read, .write, .write, .read, .read, .read, .delete])
   }
 
   @Test func saveWaitsSerializeIOButDoNotOverwriteNewEdits() async throws {
@@ -200,4 +201,23 @@ struct FileAccessCoordinatorTests {
         inputRoot: f.input, localStateRoot: f.input.appendingPathComponent("local"))
     }
   }
+  @Test func saveReceiptTracksOnlyTheCapturedDraftRevision() async throws {
+    let f = CoordinationFixture()
+    defer { f.remove() }
+    let coordinator = ControlledCoordinator(
+      base: FileAccessCoordinator.platform(localStateRoot: f.local))
+    let session = try await Configuration.load(
+      inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
+    let saving = Task { try await session.save(.shared) }
+    await coordinator.waitForWrite()
+    await session.edit { draft in draft.manifest.order = [] }
+    await coordinator.releaseWrite()
+    let receipt = try await saving.value
+    #expect(receipt.revision == 0)
+    #expect(await session.snapshot().sharedRevision == 1)
+    #expect(await session.snapshot().sharedIsDirty)
+    _ = try await session.save(.shared)
+    #expect(await session.snapshot().sharedIsDirty == false)
+  }
+
 }

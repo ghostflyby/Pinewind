@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-int pinewind_lock_file(const char *path, int *descriptor) {
+int pinewind_try_lock_file(const char *path, int *descriptor) {
   int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd == -1) return errno;
   struct stat info;
@@ -25,7 +25,7 @@ int pinewind_lock_file(const char *path, int *descriptor) {
     return EINVAL;
   }
   int result;
-  do { result = flock(fd, LOCK_EX); } while (result == -1 && errno == EINTR);
+  do { result = flock(fd, LOCK_EX | LOCK_NB); } while (result == -1 && errno == EINTR);
   if (result == -1) {
     int status = errno;
     close(fd);

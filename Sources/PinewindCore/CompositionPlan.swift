@@ -5,15 +5,15 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
-public struct PinnedResource: Hashable, Codable, Sendable {
+public struct PinnedResource: Hashable, Sendable {
   public let url: URL
-  public let path: String
+  public let path: RelativePath
   public let sha256: String
 
-  public init(url: URL, path: String, sha256: String) throws {
-    try SafePath.validate(path)
-    guard url.scheme == "https", sha256.count == 64,
+  public init(url: URL, path: RelativePath, sha256: String) throws {
+    guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false, sha256.count == 64,
       sha256.allSatisfy({ $0.isASCII && $0.isHexDigit })
     else {
       throw PinewindError("resource requires an HTTPS URL and a complete SHA-256 checksum")
@@ -26,19 +26,17 @@ public struct PinnedResource: Hashable, Codable, Sendable {
 
 /// Acquisition backends supply already prepared source views. No cache path is
 /// persisted into the portable lock; working trees remain live local inputs.
-public struct PreparedPackage: Sendable {
-  public let request: PackageRequest
-  public let directory: URL
-  public let commit: String?
-  public let resources: [PinnedResource]
+struct PreparedPackage: Sendable {
+  let request: PackageRequest
+  let directory: FilePath
+  let commit: String?
+  let resources: [PinnedResource]
 
-  public init(
-    request: PackageRequest, directory: URL, commit: String? = nil,
+  init(
+    request: PackageRequest, directory: FilePath, commit: String? = nil,
     resources: [PinnedResource] = []
   ) throws {
-    guard directory.isFileURL else {
-      throw PinewindError("prepared sources must be local directories")
-    }
+    try NativePath.requireAbsolute(directory)
     if !request.url.isFileURL {
       guard let commit else { throw PinewindError("remote prepared source requires a commit") }
       _ = try SourceIdentity(url: request.url, commit: commit)
@@ -53,44 +51,62 @@ public struct PreparedPackage: Sendable {
   }
 }
 
-public struct CompositionOperation: Equatable, Sendable {
-  public enum Action: Equatable, Sendable {
+struct CompositionOperation: Equatable, Sendable {
+  enum Action: Equatable, Sendable {
     /// A frozen file owned by the plan, valid for the lifetime of that plan.
-    case write(URL)
+    case write(FilePath)
     case patch(rx: String, body: String)
   }
+  let entryIndex: Int
+  let source: URL
+  let action: Action
+}
+
+public struct CompositionContribution: Equatable, Sendable {
+  public enum Kind: Sendable { case write, patch }
   public let entryIndex: Int
   public let source: URL
-  public let action: Action
+  public let kind: Kind
 }
 
 public struct CompositionPlan: Sendable {
-  public let files: [String: [CompositionOperation]]
-  public let sourceRoots: [URL]
-  public var paths: [String] { files.keys.sorted() }
+  let files: [String: [CompositionOperation]]
+  var sourceRoots: [FilePath]
   let snapshot: CompositionSnapshot
+  var binding: InputBinding? = nil
+  var origins: [Int: URL] = [:]
+  var stringPaths: [String] { files.keys.sorted() }
+  public var paths: [RelativePath] { stringPaths.map { try! RelativePath($0) } }
+  public func contributions(for path: RelativePath) -> [CompositionContribution] {
+    (files[path.string] ?? []).map { operation in
+      CompositionContribution(
+        entryIndex: operation.entryIndex, source: origins[operation.entryIndex] ?? operation.source,
+        kind: {
+          if case .write = operation.action { return .write }
+          return .patch
+        }())
+    }
+  }
 }
 
-public struct CompositionPlanner: Sendable {
-  public let snapshotRoot: URL
+struct CompositionPlanner: Sendable {
+  let snapshotRoot: FilePath
 
-  public init(snapshotRoot: URL = FileManager.default.temporaryDirectory) {
-    self.snapshotRoot = snapshotRoot
-  }
-
-  public func plan(
-    _ manifest: Manifest, inputRoot: URL,
-    packages: [PreparedPackage] = []
+  func plan(
+    _ manifest: Manifest, inputRoot: FilePath,
+    packages: [PreparedPackage] = [], excluding: [FilePath] = []
   ) throws -> CompositionPlan {
+    try Cancellation.check()
     var files: [String: [CompositionOperation]] = [:]
-    var roots: [URL] = [inputRoot]
+    var roots: [FilePath] = [inputRoot]
     let snapshot = try PlanningSnapshot(root: snapshotRoot)
     var available = packages
     for entry in manifest.entries {
       if case .package(let request) = entry, request.url.isFileURL,
         !available.contains(where: { $0.request == request })
       {
-        available.append(try PreparedPackage(request: request, directory: request.url))
+        available.append(
+          try PreparedPackage(request: request, directory: NativePath.from(request.url)))
       }
     }
     try SafePath.validateRoots(
@@ -101,19 +117,30 @@ public struct CompositionPlanner: Sendable {
       files[path, default: []].append(
         CompositionOperation(entryIndex: index, source: source, action: action))
     }
+    let excluded = try Set(excluding.map { try SafePath.canonical($0) })
     for (index, entry) in manifest.entries.enumerated() {
+      try Cancellation.check()
       switch entry {
       case .userFiles(let filter):
         for path in try snapshot.files(in: inputRoot) where !Self.isMetadata(path) {
           if try filter.accepts(path) {
             let file = try SafePath.file(path, in: inputRoot)
-            try add(path, source: file, index: index, action: .write(snapshot.capture(file)))
+            if try excluded.contains(SafePath.canonical(file)) { continue }
+            try add(
+              path, source: file.foundationURL, index: index, action: .write(snapshot.capture(file))
+            )
           }
         }
       case .importConf:
         throw PinewindError("expand conf imports before planning composition")
       case .package(let request):
-        guard let prepared = available.first(where: { $0.request == request }) else {
+        let matches = available.filter { $0.request == request }
+        guard Set(matches.map { $0.commit }).count <= 1,
+          Set(matches.map { $0.directory }).count <= 1
+        else {
+          throw PinewindError(.invalidConfiguration, "conflicting prepared package versions")
+        }
+        guard let prepared = matches.first else {
           throw PinewindError(
             "package has no prepared snapshot", source: request.url.absoluteString)
         }
@@ -125,7 +152,7 @@ public struct CompositionPlanner: Sendable {
         for download in recipe?.downloads ?? [] {
           guard
             let pinned = prepared.resources.first(where: {
-              $0.url == download.url && $0.path == download.path
+              $0.url == download.url && $0.path.string == download.path
             })
           else {
             throw PinewindError(
@@ -139,7 +166,7 @@ public struct CompositionPlanner: Sendable {
               "download resource checksum mismatch", source: download.url.absoluteString)
           }
         }
-        var selected: [(String, URL)] = []
+        var selected: [(String, FilePath)] = []
         if let patterns = recipe?.patterns {
           for pattern in patterns {
             if pattern.hasPrefix("../") {
@@ -188,7 +215,9 @@ public struct CompositionPlanner: Sendable {
         var installed = Set<String>()
         for (path, file) in selected where installed.insert(path).inserted {
           if try request.filter.accepts(path) {
-            try add(path, source: file, index: index, action: .write(snapshot.capture(file)))
+            try add(
+              path, source: file.foundationURL, index: index, action: .write(snapshot.capture(file))
+            )
           }
         }
         for patch in recipe?.patches ?? [] {
@@ -221,8 +250,7 @@ public struct CompositionPlanner: Sendable {
 
   static func isMetadata(_ path: String) -> Bool {
     let components = path.split(separator: "/").map(String.init)
-    return ["pinewind.yaml", "pinewind.local.yaml", "pinewind.lock"].contains(path)
-      || components.contains(".DS_Store") || components.contains { $0.contains(".local.") }
+    return components.contains(".DS_Store") || components.contains { $0.contains(".local.") }
   }
 
   static func isDefaultFile(_ path: String) -> Bool {
@@ -249,25 +277,25 @@ private struct SourceVersion: Hashable {
 /// the next plan; the current plan owns disk snapshots instead of retaining bytes.
 private final class PlanningSnapshot {
   let storage: CompositionSnapshot
-  private var directoryFiles: [URL: [String]] = [:]
-  private var captured: [URL: URL] = [:]
+  private var directoryFiles: [FilePath: [String]] = [:]
+  private var captured: [FilePath: FilePath] = [:]
 
-  init(root: URL) throws { storage = try CompositionSnapshot(root: root) }
+  init(root: FilePath) throws { storage = try CompositionSnapshot(root: root) }
 
-  func files(in root: URL) throws -> [String] {
-    let key = root.standardizedFileURL.resolvingSymlinksInPath()
+  func files(in root: FilePath) throws -> [String] {
+    let key = FilePath(try SafePath.canonical(root))
     if let cached = directoryFiles[key] { return cached }
     let files = try SafePath.files(in: root)
     directoryFiles[key] = files
     return files
   }
 
-  func read(_ file: URL) throws -> Data {
+  func read(_ file: FilePath) throws -> Data {
     try Data(contentsOf: capture(file))
   }
 
-  func capture(_ file: URL) throws -> URL {
-    let key = file.standardizedFileURL.resolvingSymlinksInPath()
+  func capture(_ file: FilePath) throws -> FilePath {
+    let key = FilePath(try SafePath.canonical(file))
     if let cached = captured[key] { return cached }
     let destination = storage.directory.appendingPathComponent(String(captured.count))
     try FileManager.default.copyItem(at: key, to: destination)

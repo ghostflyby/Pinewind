@@ -6,12 +6,14 @@
 
 import CGitKit
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
 
 #if canImport(FoundationNetworking)
-  import FoundationNetworking
+  import Foundation
+  import SystemPackageNetworking
 #endif
 
 @Suite("Pinewind GitKit acquisition")
@@ -37,7 +39,7 @@ struct GitKitFetcherTests {
     defer { f.remove() }
     let commit = try f.commit("first")
     let manifest = try Manifest.parse(
-      "version: 1\nnames: {package: {url: \(input), ref: main}}\norder: [package]")
+      "version: 1\nnames: {package: {url: \(input), revision: {ref: main}}}\norder: [package]")
     guard case .package(let request) = try #require(manifest.entries.first) else {
       Issue.record("expected a package declaration")
       return
@@ -58,7 +60,7 @@ struct GitKitFetcherTests {
     #expect(try await backend.resolveCommit(url: locked.request.url, ref: "main") == commit)
     let snapshot = try await backend.prepareSource(
       url: locked.request.url, commit: locked.commit, cacheRoot: f.cache)
-    #expect(snapshot.identity.url.absoluteString == identityURL)
+    #expect(try SourceIdentity.normalize(snapshot.identity.url).absoluteString == identityURL)
     #expect(
       snapshot.directory.deletingLastPathComponent().lastPathComponent
         == GitKitPackageFetcher.cacheKey(URL(string: identityURL)!))
@@ -107,7 +109,7 @@ struct GitKitFetcherTests {
     let second = try f.commit("second")
     #expect(try await backend.resolveCommit(url: f.url, ref: "main") == second)
     let new = try await backend.prepareSource(url: f.url, commit: second, cacheRoot: f.cache)
-    #expect(old.identity.commit == first && new.identity.commit == second)
+    #expect(old.identity.commit.string == first && new.identity.commit.string == second)
     #expect(old.directory != new.directory)
     #expect(
       try String(contentsOf: old.directory.appendingPathComponent("default.yaml"), encoding: .utf8)
@@ -306,14 +308,14 @@ private struct LocalGitTransport: GitTransport {
     try validate(url)
     return try client.advertise(url: origin)
   }
-  func containsCommit(_ commit: String, repository: URL) throws -> Bool {
+  func containsCommit(_ commit: String, repository: FilePath) throws -> Bool {
     try client.containsCommit(commit, repository: repository)
   }
-  func fetch(url: URL, repository: URL, commit: String) throws {
+  func fetch(url: URL, repository: FilePath, commit: String) throws {
     try validate(url)
     try client.fetch(url: origin, repository: repository, commit: commit)
   }
-  func export(commit: String, repository: URL, destination: URL) throws {
+  func export(commit: String, repository: FilePath, destination: FilePath) throws {
     try client.export(commit: commit, repository: repository, destination: destination)
   }
   private func validate(_ url: URL) throws {

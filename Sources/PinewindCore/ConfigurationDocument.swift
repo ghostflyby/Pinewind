@@ -8,31 +8,29 @@ import Foundation
 import Yams
 
 /// An authored field: omission inherits, null clears, and a value replaces the whole field.
-public enum Field<Value: Hashable & Sendable>: Hashable, Sendable {
+public enum FieldOverride<Value: Hashable & Sendable>: Hashable, Sendable {
   case inherit
-  case clear
+  case reset
   case value(Value)
 }
 
 /// Partial package declarations retain their layer, including explicit nulls.
 public struct PackageFields: Hashable, Sendable {
-  public var url: Field<URL>
-  public var ref: Field<String>
-  public var commit: Field<String>
-  public var recipe: Field<String>
-  public var options: Field<[String: String]>
-  public var include: Field<[String]>
-  public var exclude: Field<[String]>
+  public var url: FieldOverride<URL>
+  public var revision: FieldOverride<GitRevision>
+  public var recipe: FieldOverride<String>
+  public var options: FieldOverride<[String: String]>
+  public var include: FieldOverride<[String]>
+  public var exclude: FieldOverride<[String]>
 
   public init(
-    url: Field<URL> = .inherit, ref: Field<String> = .inherit,
-    commit: Field<String> = .inherit, recipe: Field<String> = .inherit,
-    options: Field<[String: String]> = .inherit,
-    include: Field<[String]> = .inherit, exclude: Field<[String]> = .inherit
+    url: FieldOverride<URL> = .inherit, revision: FieldOverride<GitRevision> = .inherit,
+    recipe: FieldOverride<String> = .inherit,
+    options: FieldOverride<[String: String]> = .inherit,
+    include: FieldOverride<[String]> = .inherit, exclude: FieldOverride<[String]> = .inherit
   ) {
     self.url = url
-    self.ref = ref
-    self.commit = commit
+    self.revision = revision
     self.recipe = recipe
     self.options = options
     self.include = include
@@ -74,11 +72,8 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   /// Diagnostics refer to the edited document, without line numbers from generated YAML.
-  public func evaluate(localOverrides: LocalOverridesDocument? = nil) throws -> Manifest {
-    try DocumentCodec.withoutSourceLines {
-      try ConfigurationParser.parse(
-        yaml(), overrides: localOverrides?.yaml(), source: "pinewind.yaml")
-    }
+  public func evaluate(localOverrides: LocalOverridesDocument? = nil) throws -> EvaluatedManifest {
+    try ConfigurationEvaluator.evaluate(self, local: localOverrides)
   }
 
   public mutating func renamePackage(_ old: String, to new: String) throws {
@@ -182,9 +177,9 @@ enum DocumentCodec {
 
   static func package(_ fields: [String: Node], reader: YAMLReader) throws -> PackageFields {
     try ConfigurationParser.validateFields(fields, reader: reader)
-    func field<T>(_ key: String, _ decode: (Node) throws -> T) throws -> Field<T> {
+    func field<T>(_ key: String, _ decode: (Node) throws -> T) throws -> FieldOverride<T> {
       guard let node = fields[key] else { return .inherit }
-      return node.tag == Tag(.null) ? .clear : .value(try decode(node))
+      return node.tag == Tag(.null) ? .reset : .value(try decode(node))
     }
     return try PackageFields(
       url: field("url") { node in
@@ -194,9 +189,36 @@ enum DocumentCodec {
         }
         return url
       },
-      ref: field("ref", reader.string), commit: field("commit", reader.string),
+      revision: field("revision") { try revision($0, reader: reader) },
       recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
       include: field("include", reader.strings), exclude: field("exclude", reader.strings))
+  }
+
+  static func revision(_ node: Node, reader: YAMLReader) throws -> GitRevision {
+    if node.tag == Tag(.str), try reader.string(node) == "default" { return .defaultBranch }
+    let fields = try reader.mapping(node, allowed: ["branch", "tag", "ref", "commit"])
+    guard fields.count == 1, let (key, value) = fields.first else {
+      throw reader.error("revision requires exactly one selector", at: node)
+    }
+    let text = try reader.string(value)
+    let result: GitRevision
+    switch key {
+    case "branch": result = .branch(text)
+    case "tag": result = .tag(text)
+    case "ref": result = .reference(text)
+    default: result = .commit(try CommitID(text))
+    }
+    try result.validate()
+    return result
+  }
+  static func revisionNode(_ value: GitRevision) -> Node {
+    switch value {
+    case .defaultBranch: return string("default")
+    case .branch(let text): return mapping([("branch", string(text))])
+    case .tag(let text): return mapping([("tag", string(text))])
+    case .reference(let text): return mapping([("ref", string(text))])
+    case .commit(let id): return mapping([("commit", string(id.string))])
+    }
   }
 
   static func string(_ value: String) -> Node { Node(value, Tag(.str), .doubleQuoted) }
@@ -210,16 +232,15 @@ enum DocumentCodec {
 
   static func packageNode(_ fields: PackageFields) -> [(String, Node)] {
     var pairs: [(String, Node)] = []
-    func append<T>(_ key: String, _ field: Field<T>, _ encode: (T) -> Node) {
+    func append<T>(_ key: String, _ field: FieldOverride<T>, _ encode: (T) -> Node) {
       switch field {
       case .inherit: break
-      case .clear: pairs.append((key, Node("null", Tag(.null))))
+      case .reset: pairs.append((key, Node("null", Tag(.null))))
       case .value(let value): pairs.append((key, encode(value)))
       }
     }
     append("url", fields.url) { string($0.absoluteString) }
-    append("ref", fields.ref, string)
-    append("commit", fields.commit, string)
+    append("revision", fields.revision, revisionNode)
     append("recipe", fields.recipe, string)
     append("options", fields.options, stringMap)
     append("include", fields.include, strings)

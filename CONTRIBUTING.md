@@ -7,8 +7,11 @@
 ```sh
 xcrun swift-format lint --strict --recursive Sources Tests
 swift test --no-parallel
+python3 Scripts/check-api-boundaries.py
 git diff --check
 ```
+
+公开 API 消费测试位于 PinewindAPITests,不使用 @testable;核心组合回归通过测试夹具适配器保留 URL 资源夹具。编译契约脚本需要先构建,验证受管 FilePath 边界及不可任意构造/解码的阶段类型。
 
 默认测试不联网。需要验证真实 GitHub HTTPS 取包时,显式启用联网用例:
 
