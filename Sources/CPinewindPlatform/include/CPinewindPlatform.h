@@ -7,6 +7,7 @@
 #ifndef CPINEWIND_PLATFORM_H
 #define CPINEWIND_PLATFORM_H
 
+// Exposes strerror to Swift for native errno diagnostics in Composer.
 #include <string.h>
 
 // Returns zero on success or the native errno on failure.
