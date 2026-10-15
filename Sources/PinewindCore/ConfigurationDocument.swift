@@ -66,14 +66,19 @@ public struct ManifestDocument: Hashable, Sendable {
 
   /// Emits version 1. Invalid field combinations are diagnosed rather than discarded.
   public func yaml() throws -> String {
-    let text = try DocumentCodec.emit(self)
-    _ = try Self.parse(text)
-    return text
+    try DocumentCodec.withoutSourceLines {
+      let text = try DocumentCodec.emit(self)
+      _ = try Self.parse(text)
+      return text
+    }
   }
 
+  /// Diagnostics refer to the edited document, without line numbers from generated YAML.
   public func evaluate(localOverrides: LocalOverridesDocument? = nil) throws -> Manifest {
-    try ConfigurationParser.parse(
-      yaml(), overrides: localOverrides?.yaml(), source: "pinewind.yaml")
+    try DocumentCodec.withoutSourceLines {
+      try ConfigurationParser.parse(
+        yaml(), overrides: localOverrides?.yaml(), source: "pinewind.yaml")
+    }
   }
 
   public mutating func renamePackage(_ old: String, to new: String) throws {
@@ -126,13 +131,23 @@ public struct LocalOverridesDocument: Hashable, Sendable {
   }
 
   public func yaml() throws -> String {
-    let text = try serialize(node: DocumentCodec.root(names: names), allowUnicode: true)
-    _ = try Self.parse(text)
-    return text
+    try DocumentCodec.withoutSourceLines {
+      let text = try serialize(node: DocumentCodec.root(names: names), allowUnicode: true)
+      _ = try Self.parse(text)
+      return text
+    }
   }
 }
 
 enum DocumentCodec {
+  // Nodes emitted from an edited value have no correspondence to the original file's lines.
+  // Parsing original input still retains its source marks through YAMLReader.
+  static func withoutSourceLines<T>(_ body: () throws -> T) throws -> T {
+    do { return try body() } catch let error as PinewindError {
+      throw PinewindError(error.message, source: error.source)
+    }
+  }
+
   static func manifest(_ yaml: String, source: String) throws -> ManifestDocument {
     let reader = YAMLReader(source: source)
     let fields = try reader.mapping(reader.document(yaml), allowed: ["version", "names", "order"])
@@ -142,40 +157,13 @@ enum DocumentCodec {
       throw reader.error("order must be a sequence", at: fields["order"])
     }
     let order = try sequence.map { node -> OrderEntry in
-      if node.tag == Tag(.str) {
-        let name = try reader.string(node)
-        return name == "self" ? .userFiles(FileFilter()) : .named(name)
-      }
-      let fields = try reader.mapping(
-        node,
-        allowed: ConfigurationParser.packageKeys.union(["self", "name", "import", "variables"]))
-      let selectors = ["self", "name", "url", "import"].filter { fields[$0] != nil }
-      guard selectors.count == 1, let selector = selectors.first, let value = fields[selector]
-      else {
-        throw reader.error("each entry requires exactly one of self, name, url, import", at: node)
-      }
-      switch selector {
-      case "self":
-        guard fields.count == 1 else {
-          throw reader.error("self filters belong inside self", at: node)
-        }
-        return .userFiles(
-          try reader.filter(reader.mapping(value, allowed: ["include", "exclude"])))
-      case "import":
-        guard Set(fields.keys).isSubset(of: ["import", "variables"]) else {
-          throw reader.error("conf imports only accept import and variables", at: node)
-        }
-        return .importConf(
-          try ConfImport(
-            source: reader.string(value),
-            variables: fields["variables"].map(reader.stringMap) ?? [:]))
-      default:
-        guard fields["variables"] == nil else {
-          throw reader.error("variables is only valid on imports", at: node)
-        }
-        let package = try package(fields.filter { $0.key != "name" }, reader: reader)
-        if selector == "name" { return .named(try reader.string(value), overrides: package) }
-        return .package(package)
+      switch try ConfigurationParser.decodeOrderEntry(node, reader: reader) {
+      case .userFiles(let filter): return .userFiles(filter)
+      case .importConf(let conf): return .importConf(conf)
+      case .package(let name, let fields):
+        let declaration = try package(fields, reader: reader)
+        if let name { return .named(name, overrides: declaration) }
+        return .package(declaration)
       }
     }
     return ManifestDocument(names: definitions, order: order)

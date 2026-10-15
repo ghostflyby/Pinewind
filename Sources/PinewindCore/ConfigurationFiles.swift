@@ -88,8 +88,9 @@ public struct Configuration: Sendable {
   }
 
   /// Saves only pinewind.local.yaml. Setting localOverrides to nil explicitly removes that file.
+  /// Removal is a recovery action and does not require a valid deployment configuration.
   public mutating func saveLocalOverrides() throws {
-    _ = try evaluateEffective()
+    if localOverrides != nil { _ = try evaluateEffective() }
     let bytes = try localOverrides.map { Data(try $0.yaml().utf8) }
     try save(bytes, name: "pinewind.local.yaml", expected: localBytes)
     localBytes = bytes

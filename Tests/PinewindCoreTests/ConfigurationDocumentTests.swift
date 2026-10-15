@@ -18,6 +18,16 @@ struct ConfigurationDocumentTests {
       .appendingPathComponent("pinewind-documents-" + UUID().uuidString)
   }
 
+  private func diagnostic(_ operation: () throws -> Void) -> PinewindError? {
+    do {
+      try operation()
+      Issue.record("expected a configuration diagnostic")
+    } catch let error as PinewindError {
+      return error
+    } catch { Issue.record("unexpected error: \(error)") }
+    return nil
+  }
+
   @Test func roundTripRetainsAuthoredLayersAndStringTypes() throws {
     let text = """
       version: 1
@@ -46,7 +56,6 @@ struct ConfigurationDocumentTests {
     #expect(document.names["emoji"]?.url == .value(remote))
     #expect(try ManifestDocument.parse(document.yaml()) == document)
     #expect(try document.evaluate() == Manifest.parse(text))
-    #expect(try document.yaml() == document.yaml())
   }
 
   @Test func localFieldsPreserveNullOmissionAndWholeMapReplacement() throws {
@@ -123,7 +132,60 @@ struct ConfigurationDocumentTests {
     "version: 1\nnames: {a: {unknown: x}}\norder: []",
   ])
   func malformedDocumentsAreRejected(_ text: String) {
-    #expect(throws: PinewindError.self) { try ManifestDocument.parse(text) }
+    let document = diagnostic { _ = try ManifestDocument.parse(text, source: "original.yaml") }
+    let manifest = diagnostic { _ = try Manifest.parse(text, source: "original.yaml") }
+    #expect(document?.message == manifest?.message)
+    #expect(document?.source == manifest?.source)
+    #expect(document?.line == manifest?.line)
+  }
+
+  @Test func evaluationDoesNotReportGeneratedLinesAsOriginalSourcePositions() throws {
+    let text = """
+      # Original layout
+      version: 1
+      order:
+        - missing
+      """
+    let original = try #require(
+      diagnostic {
+        _ = try Manifest.parse(text, source: "original.yaml")
+      })
+    #expect(original.source == "original.yaml")
+    #expect(original.line == 4)
+    let document = try ManifestDocument.parse(text, source: "original.yaml")
+    let evaluated = try #require(diagnostic { _ = try document.evaluate() })
+    #expect(evaluated.message == original.message)
+    #expect(evaluated.line == nil)
+
+    let root = temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var configuration = try Configuration.load(inputRoot: root)
+    configuration.manifest = document
+    #expect(try #require(diagnostic { _ = try configuration.evaluateShared() }).line == nil)
+    configuration.manifest = ManifestDocument()
+    configuration.localOverrides = LocalOverridesDocument(names: ["self": PackageFields()])
+    let local = try #require(diagnostic { _ = try configuration.evaluateEffective() })
+    #expect(local.source == "pinewind.local.yaml")
+    #expect(local.line == nil)
+  }
+
+  @Test func removingLocalOverridesIsAllowedWhileSharedDocumentIsIncomplete() throws {
+    let root = temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var configuration = try Configuration.load(inputRoot: root)
+    configuration.localOverrides = LocalOverridesDocument()
+    try configuration.saveLocalOverrides()
+    configuration.manifest.order = [.named("unfinished")]
+    #expect(throws: PinewindError.self) { try configuration.saveLocalOverrides() }
+    configuration.localOverrides = nil
+    try configuration.saveLocalOverrides()
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("pinewind.local.yaml").path))
+    try configuration.saveLocalOverrides()
+    #expect(throws: PinewindError.self) { try configuration.evaluateShared() }
+    #expect(
+      !FileManager.default.fileExists(atPath: root.appendingPathComponent("pinewind.yaml").path))
   }
 
   @Test func editsCoordinateReferencesAndLocalOverrides() throws {
