@@ -23,7 +23,7 @@ extension FileDescriptor {
       // replaced while any contender holds a descriptor, including while waiting.
       let handle = path.withPlatformString {
         CreateFileW(
-          $0, DWORD(GENERIC_READ | GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
+          $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
           nil, DWORD(OPEN_ALWAYS), DWORD(FILE_FLAG_OPEN_REPARSE_POINT), nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
