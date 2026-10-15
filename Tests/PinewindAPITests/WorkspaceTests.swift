@@ -125,6 +125,40 @@ private struct Fixture {
 
 @Suite("Public Workspace API")
 struct WorkspaceTests {
+  #if !os(Windows)
+    @Test func publicationThroughDirectoryAliasKeepsTheAliasAndUpdatesItsTarget() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("schema.yaml"), "value: first\n")
+      let workspace = try await f.workspace()
+      _ = try await workspace.compose(to: f.output)
+      let alias = f.root.appending("output alias")
+      try FileManager.default.createSymbolicLink(at: url(alias), withDestinationURL: url(f.output))
+      try write(f.input.appending("schema.yaml"), "value: next\n")
+      _ = try await workspace.compose(to: alias)
+      #expect(try read(f.output.appending("schema.yaml")) == "value: next\n")
+      #expect(try url(alias).resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+    }
+  #endif
+  @Test func publicationCannotReplaceManagedStorageOrItsChildren() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("schema.yaml"), "value: local\n")
+    try write(f.locations.stateRoot.appending("keep"), "state")
+    try write(f.locations.cacheRoot.appending("keep"), "cache")
+    let workspace = try await f.workspace()
+    let plan = try await workspace.plan(workspace.cachedInputs())
+    for root in [f.locations.stateRoot, f.locations.cacheRoot] {
+      for output in [root, root.appending("child")] {
+        do {
+          _ = try await workspace.compose(plan, to: output)
+          Issue.record("managed storage was accepted as a publication target")
+        } catch let error as PinewindError { #expect(error.code == .invalidPath) }
+      }
+    }
+    #expect(try read(f.locations.stateRoot.appending("keep")) == "state")
+    #expect(try read(f.locations.cacheRoot.appending("keep")) == "cache")
+  }
   @Test func independentLocationsAndPureLocalComposition() async throws {
     let f = try Fixture()
     defer { f.remove() }

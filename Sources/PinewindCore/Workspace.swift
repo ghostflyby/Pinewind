@@ -410,10 +410,13 @@ public actor Workspace {
   ) async throws -> CompositionResult {
     if let binding = plan.binding { try check(binding.snapshot) }
     let output = try NativePath.absolute(output, relativeTo: locations.relativeTo)
-    let protected = try store.documentLocations.map { try $0.filePath }
+    let protected =
+      try store.documentLocations.map { try $0.filePath } + [
+        locations.stateRoot, locations.cacheRoot,
+      ]
     for path in protected {
       if try SafePath.overlaps(output, path) {
-        throw PinewindError(.invalidPath, "output overlaps a configuration document")
+        throw PinewindError(.invalidPath, "output overlaps configuration or managed storage")
       }
     }
     progress?(.started(.composing))

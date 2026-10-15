@@ -19,4 +19,6 @@ git diff --check
 PINEWIND_NETWORK_TESTS=1 swift test --filter GitKitFetcherTests
 ```
 
+Corelibs Foundation 不支持为自定义 URLProtocol 创建下载文件,因此成功下载与 HTTP 状态的模拟测试仅在 Apple Foundation 上运行;传输错误、取消和注入下载后端的资源测试在各平台运行。
+
 纯文档修改检查内容、链接和差异;修改示例时核对其可用性。行为变更运行相关测试,必要时补充回归用例。修改配置或组合语义前,核对 [设计契约](Docs/Package-Management-Design.md)。

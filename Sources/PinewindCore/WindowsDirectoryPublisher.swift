@@ -12,6 +12,22 @@
   /// A stable junction points to a complete private generation. Updating its
   /// reparse data switches targets without renaming or removing the active root.
   enum WindowsDirectoryPublisher {
+    /// Resolve parent aliases and expand the entry's short name without following
+    /// the final managed junction into its replaceable generation.
+    static func publicationPath(_ output: FilePath) throws -> FilePath {
+      let parent = try resolvedURL(output.removingLastComponent())
+      let entry = parent.appending(output.lastPathComponent)
+      guard FileManager.default.fileExists(atPath: entry.string) else { return entry }
+      var buffer = [WCHAR](repeating: 0, count: 32_768)
+      let count = entry.withPlatformString {
+        GetLongPathNameW($0, &buffer, DWORD(buffer.count))
+      }
+      guard count > 0, Int(count) < buffer.count else {
+        throw PinewindError(.invalidPath, "cannot resolve publication entry", source: entry.string)
+      }
+      return FilePath(String(decoding: buffer.prefix(Int(count)), as: UTF16.self))
+    }
+
     static func storage(for output: FilePath) -> FilePath {
       output.deletingLastPathComponent().appendingPathComponent(
         "." + output.lastPathComponent + ".pinewind-generations", isDirectory: true)

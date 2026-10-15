@@ -35,7 +35,8 @@ public struct CompositionResult: Sendable {
 /// candidate, so deletions, local edits and lost change notifications stay correct.
 struct Composer {
   /// On Windows, outputRoot must be absent, empty, or a junction managed by Pinewind.
-  func compose(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath) throws
+  func compose(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot requestedOutput: FilePath)
+    throws
     -> CompositionResult
   {
     // Captured paths do not retain their owner. Keep it alive through all reads,
@@ -43,7 +44,12 @@ struct Composer {
     defer { withExtendedLifetime(plan.snapshot) {} }
     try Cancellation.check()
     try NativePath.requireAbsolute(inputRoot)
-    try NativePath.requireAbsolute(outputRoot)
+    try NativePath.requireAbsolute(requestedOutput)
+    #if os(Windows)
+      let outputRoot = try WindowsDirectoryPublisher.publicationPath(requestedOutput)
+    #else
+      let outputRoot = FilePath(try SafePath.canonical(requestedOutput))
+    #endif
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
     #if os(Windows)
