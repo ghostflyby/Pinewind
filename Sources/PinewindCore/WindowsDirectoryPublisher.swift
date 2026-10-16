@@ -45,9 +45,8 @@
             == canonicalPath(storage(for: output)),
           isGeneration(target.lastComponent?.string ?? "")
         else {
-          throw FileSystemFailure(
-            .publicationFailed(
-              detail: "composition output is not a Pinewind generation junction"))
+          throw FileSystemFailure.publicationFailed(
+            detail: "composition output is not a Pinewind generation junction")
         }
       } else if FileManager.default.fileExists(atPath: output.string, isDirectory: &isDirectory) {
         guard isDirectory.boolValue else {
@@ -55,9 +54,8 @@
             detail: "Windows composition output must be a directory")
         }
         guard try FileManager.default.contentsOfDirectory(atPath: output.string).isEmpty else {
-          throw FileSystemFailure(
-            .publicationFailed(
-              detail: "Windows composition output must be empty or managed by Pinewind"))
+          throw FileSystemFailure.publicationFailed(
+            detail: "Windows composition output must be empty or managed by Pinewind")
         }
       }
     }
@@ -110,9 +108,8 @@
           nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw FileSystemFailure(
-          .publicationFailed(
-            detail: "cannot open composition junction (Windows error \(GetLastError()))"))
+        throw FileSystemFailure.publicationFailed(
+          detail: "cannot open composition junction (Windows error \(GetLastError()))")
       }
       defer { _ = CloseHandle(handle) }
       return try body(handle)
@@ -139,9 +136,8 @@
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
-          throw FileSystemFailure(
-            .publicationFailed(
-              detail: "cannot resolve composition path (Windows error \(GetLastError()))"))
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot resolve composition path (Windows error \(GetLastError()))")
         }
         let path = FilePath(platformString: buffer)
         return try windowsNativePath(path)
@@ -161,9 +157,8 @@
         if error == DWORD(ERROR_FILE_NOT_FOUND) || error == DWORD(ERROR_PATH_NOT_FOUND) {
           return nil
         }
-        throw FileSystemFailure(
-          .publicationFailed(detail: "cannot inspect composition output (Windows error \(error))")
-        )
+        throw FileSystemFailure.publicationFailed(
+          detail: "cannot inspect composition output (Windows error \(error))")
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
       return try withHandle(output, access: 0) { handle in
@@ -175,9 +170,8 @@
             DWORD($0.count), &count, nil)
         }
         guard ok else {
-          throw FileSystemFailure(
-            .publicationFailed(
-              detail: "cannot read composition junction (Windows error \(GetLastError()))"))
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot read composition junction (Windows error \(GetLastError()))")
         }
         guard count >= 16,
           buffer.integer(at: 0, as: UInt32.self) == UInt32(IO_REPARSE_TAG_MOUNT_POINT)
@@ -228,9 +222,8 @@
             nil)
         }
         guard ok else {
-          throw FileSystemFailure(
-            .publicationFailed(
-              detail: "cannot publish composition junction (Windows error \(GetLastError()))"))
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot publish composition junction (Windows error \(GetLastError()))")
         }
       }
     }
