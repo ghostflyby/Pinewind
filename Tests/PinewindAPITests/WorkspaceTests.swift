@@ -209,6 +209,10 @@ struct WorkspaceTests {
         == captured.appending("source"))
     let local = try PackageRequest(source: .directory(.path("package")))
     #expect(local.source == .directory(.path(captured.appending("package"))))
+    let incompleteURL = try #require(URL(string: "file:relative"))
+    #expect(throws: PinewindError.self) {
+      _ = try PackageRequest(source: .directory(.fileURL(incompleteURL)))
+    }
     let locations = try WorkspaceLocations(
       userFilesRoot: .path("input"),
       configuration: ConfigurationFiles(

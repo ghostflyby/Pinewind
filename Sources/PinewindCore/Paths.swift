@@ -50,7 +50,10 @@ public enum FileLocation: Hashable, Sendable {
     switch self {
     case .path(let path): return .path(try NativePath.absolute(path, relativeTo: base))
     case .fileURL(let url):
-      _ = try NativePath.from(url)
+      guard try NativePath.from(url).isAbsolute else {
+        throw PinewindError(
+          .invalidPath, "external document URLs must identify an absolute location")
+      }
       return self
     }
   }

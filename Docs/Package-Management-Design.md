@@ -28,7 +28,7 @@
 
 以下位置在公开和内部执行边界均为 FilePath:Git 裸仓库和导出目录、整个缓存、状态和互斥锁、快照和捕获文件、下载目标、组合候选和输出、原子替换与目录交换。`SourceSnapshot.directory` 与 `CompositionResult.directory` 也为 FilePath,不提供 URL 重载。
 
-远程 Git 仓库地址和 HTTPS 资源保持 URL。`FileLocation.path(FilePath)` / `.fileURL(URL)` 仅表达外部文档、用户树或只读本地包。原始 file URL 为文件协调保留;协调访问范围内将实际 URL 转成 FilePath 后执行内部 I/O。桥接必须可验证,不通过有损字符串重建。
+远程 Git 仓库地址和 HTTPS 资源保持 URL。`FileLocation.path(FilePath)` / `.fileURL(URL)` 仅表达外部文档、用户树或只读本地包。原始 file URL 为文件协调保留,须指向绝对位置;`file:relative` 这类不完整 URL 在公开入口拒绝。协调访问范围内将实际 URL 转成 FilePath 后执行内部 I/O。桥接必须可验证,不通过有损字符串重建。
 
 绝对路径转换只发生在公开执行入口及公开请求/阶段值的初始化入口。工作区通过 `relativeTo` 指定基准;省略时在初始化入口捕获当前工作目录。基准自身也可相对当前目录解析。工作区建立后保存固定的绝对基准和位置,后续执行不读取当前目录。独立取包、下载、SourceSnapshot 和本地 PackageRequest 同样在进入异步工作前或初始化时完成相对位置转换;后两者可显式指定基准。内部函数使用这些结果,不再重复检查绝对性。Windows 的盘符相对和当前盘根相对形式拒绝。`~` 和环境变量不作 shell 展开。
 
