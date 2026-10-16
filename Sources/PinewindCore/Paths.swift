@@ -15,13 +15,12 @@ public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConverti
     guard path.root == nil,
       path.components.allSatisfy({ !$0.string.contains(":") && !$0.string.contains("\\") })
     else {
-      throw PinewindError(
-        .invalidPath, "resource paths require portable relative components", source: path.string)
+      throw PinewindError.runtime(.file(.notPortable(path)))
     }
     let normalized = path.lexicallyNormalized()
     guard !normalized.isEmpty, String(validating: normalized) != nil,
       normalized.components.allSatisfy({ $0.kind == .regular })
-    else { throw PinewindError(.invalidPath, "unsafe relative path", source: path.string) }
+    else { throw PinewindError.runtime(.file(.unsafeRelative(path))) }
     filePath = normalized
   }
 
@@ -43,8 +42,7 @@ public enum FileLocation: Hashable, Sendable {
     case .path(let path): return .path(try NativePath.absolute(path, relativeTo: base))
     case .fileURL(let url):
       guard try NativePath.from(url).isAbsolute else {
-        throw PinewindError(
-          .invalidPath, "external document URLs must identify an absolute location")
+        throw PinewindError.runtime(.file(.notAbsoluteFileURL(url)))
       }
       return self
     }
@@ -102,25 +100,29 @@ public struct WorkspaceLocations: Hashable, Sendable {
     let input = try self.userFilesRoot.filePath
     for managed in [self.stateRoot, self.cacheRoot] {
       guard try !SafePath.overlaps(input, managed) else {
-        throw PinewindError(.invalidPath, "managed storage must not overlap user files")
+        throw PinewindError.runtime(.file(.overlappingPaths(input, managed)))
       }
       for file in [
         self.configuration.manifest, self.configuration.lock, self.configuration.localOverrides,
       ].compactMap({ $0 }) {
         guard try !SafePath.overlaps(managed, file.filePath) else {
-          throw PinewindError(
-            .invalidPath, "managed storage must not contain configuration documents")
+          throw PinewindError.runtime(
+            .file(.overlappingPaths(managed, try file.filePath)))
         }
       }
     }
     guard try !SafePath.overlaps(self.stateRoot, self.cacheRoot) else {
-      throw PinewindError(.invalidPath, "persistent state and disposable cache must not overlap")
+      throw PinewindError.runtime(
+        .file(.overlappingPaths(self.stateRoot, self.cacheRoot)))
     }
     let documents = try [
       self.configuration.manifest, self.configuration.lock, self.configuration.localOverrides,
     ].compactMap({ $0 }).map { try SafePath.canonical($0.filePath) }
-    guard Set(documents).count == documents.count else {
-      throw PinewindError(.invalidPath, "configuration documents must have distinct locations")
+    var seen: Set<FilePath> = []
+    for document in documents {
+      guard seen.insert(document).inserted else {
+        throw PinewindError.runtime(.file(.duplicatePath(document)))
+      }
     }
   }
 }
@@ -130,9 +132,7 @@ enum NativePath {
   static func absolute(_ path: FilePath, relativeTo base: FilePath? = nil) throws -> FilePath {
     if path.isAbsolute { return path }
     guard path.root == nil else {
-      throw PinewindError(
-        .invalidPath, "drive-relative and root-relative paths require a fully qualified location",
-        source: path.string)
+      throw PinewindError.runtime(.file(.ambiguousForm(path)))
     }
     let base =
       try base.map { try absolute($0) }
@@ -144,7 +144,7 @@ enum NativePath {
       let representation = url.withUnsafeFileSystemRepresentation({ pointer in
         pointer.flatMap { String(validatingCString: $0) }
       })
-    else { throw PinewindError(.invalidPath, "expected a representable file URL") }
+    else { throw PinewindError.runtime(.file(.unrepresentableFileURL(url))) }
     #if os(Windows)
       var value = representation.replacingOccurrences(of: "/", with: "\\")
       if value.hasPrefix("\\"), value.dropFirst(2).hasPrefix(":") { value.removeFirst() }
@@ -158,7 +158,7 @@ enum NativePath {
       let path = FilePath(value)
     #else
       guard url.host == nil || url.host == "" || url.host == "localhost" else {
-        throw PinewindError(.invalidPath, "file URL must address the local filesystem")
+        throw PinewindError.runtime(.file(.nonLocalFileURL(url)))
       }
       let path = FilePath(representation)
     #endif
@@ -171,7 +171,7 @@ extension FilePath {
   var foundationURL: URL {
     get throws {
       guard let value = String(validating: self) else {
-        throw PinewindError(.invalidPath, "unrepresentable path")
+        throw PinewindError.runtime(.file(.unresolvable(self)))
       }
       return URL(filePath: value, directoryHint: .notDirectory)
     }

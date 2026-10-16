@@ -122,10 +122,7 @@ struct Composer {
           }
         }
         guard status == 0 else {
-          throw PinewindError(
-            .unsupportedFilesystem,
-            "cannot atomically exchange composition directories: \(String(cString: strerror(status))) (errno \(status))"
-          )
+          throw PinewindError.runtime(.file(.exchangeFailed(errno: status)))
         }
       } else {
         try fm.moveItem(at: candidate, to: outputRoot)

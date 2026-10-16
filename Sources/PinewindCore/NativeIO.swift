@@ -58,7 +58,7 @@ enum NativeLock {
       at: file.removingLastComponent(), withIntermediateDirectories: true)
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.openLockFile(file) } catch {
-      throw PinewindError.wrap(error, source: file.string)
+      throw PinewindError.wrap(error)
     }
     // A close error must not turn a completed publication into a reported failure.
     defer { try? descriptor.close() }
@@ -71,7 +71,7 @@ enum NativeLock {
         Thread.sleep(forTimeInterval: 0.02)
       }
     } catch {
-      throw PinewindError.wrap(error, source: file.string)
+      throw PinewindError.wrap(error)
     }
     try Cancellation.check()
     return try body()

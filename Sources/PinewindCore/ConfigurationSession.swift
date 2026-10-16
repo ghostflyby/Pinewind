@@ -23,8 +23,9 @@ public struct ConfigurationDraft: Hashable, Sendable {
     self.localOverrides = localOverrides
   }
   public mutating func addPackage(_ name: String, request: PackageRequest) throws {
-    guard name != "self", manifest.names[name] == nil else {
-      throw PinewindError("package name is reserved or already defined")
+    guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
+    guard manifest.names[name] == nil else {
+      throw PinewindError.runtime(.declaration(.duplicateName(name)))
     }
     var fields = PackageFields(
       url: .value(request.url), recipe: request.recipe.map { .value($0) } ?? .reset,
@@ -37,7 +38,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
   }
   public mutating func renamePackage(_ old: String, to new: String) throws {
     guard old == new || localOverrides?.names[new] == nil else {
-      throw PinewindError("local package name already exists")
+      throw PinewindError.runtime(.declaration(.duplicateName(new)))
     }
     try manifest.renamePackage(old, to: new)
     if old != new, let fields = localOverrides?.names.removeValue(forKey: old) {
@@ -49,7 +50,9 @@ public struct ConfigurationDraft: Hashable, Sendable {
     localOverrides?.names.removeValue(forKey: name)
   }
   public mutating func redirectPackage(_ name: String, to location: FileLocation) throws {
-    guard manifest.names[name] != nil else { throw PinewindError("unknown package name '\(name)'") }
+    guard manifest.names[name] != nil else {
+      throw PinewindError.runtime(.declaration(.unknownName(name)))
+    }
     if localOverrides == nil { localOverrides = LocalOverridesDocument() }
     var fields = localOverrides?.names[name] ?? PackageFields()
     fields.url = .value(try location.url)
@@ -72,8 +75,15 @@ public struct ConfigurationSnapshot: Sendable {
   public func evaluate(_ scope: ConfigurationScope = .effective) throws -> EvaluatedManifest {
     try manifest.evaluate(localOverrides: scope == .shared ? nil : localOverrides)
   }
-  public func validate(scope: ConfigurationScope = .effective) -> [Diagnostic] {
-    ConfigurationEvaluator.diagnostics(manifest, local: scope == .shared ? nil : localOverrides)
+  public func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {
+    func context(_ location: FileLocation?) -> DocumentContext? {
+      guard let location, let path = try? location.filePath else { return nil }
+      return try? DocumentContext(path: path)
+    }
+    return ConfigurationEvaluator.diagnostics(
+      manifest, local: scope == .shared ? nil : localOverrides,
+      sharedContext: context(locations.configuration.manifest),
+      localContext: context(locations.configuration.localOverrides))
   }
 }
 
@@ -100,8 +110,7 @@ struct ConfigurationStore: Sendable {
     }
     func text(_ bytes: Data, location: FileLocation) throws -> String {
       guard let value = String(data: bytes, encoding: .utf8) else {
-        throw PinewindError(
-          .invalidConfiguration, "configuration must be UTF-8 YAML", source: try location.url.path)
+        throw PinewindError.runtime(.file(.undecodableText(try location.filePath)))
       }
       return value
     }
@@ -109,11 +118,12 @@ struct ConfigurationStore: Sendable {
       try values[0].map {
         try ManifestDocument.parse(
           text($0, location: locations.configuration.manifest),
-          source: locations.configuration.manifest.url.path)
+          source: (try locations.configuration.manifest.filePath).string)
       } ?? ManifestDocument()
     let local = try locations.configuration.localOverrides.flatMap { location in
       try values[2].map {
-        try LocalOverridesDocument.parse(text($0, location: location), source: location.url.path)
+        try LocalOverridesDocument.parse(
+          text($0, location: location), source: (try location.filePath).string)
       }
     }
     return ConfigurationSnapshot(
@@ -130,8 +140,7 @@ struct ConfigurationStore: Sendable {
         values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus != .current,
         values.ubiquitousItemDownloadingStatus != .downloaded
       {
-        throw PinewindError(
-          .contentMissing, "cloud document must be downloaded before access", source: url.path)
+        throw PinewindError.runtime(.cache(.contentMissing(url)))
       }
     #endif
     do { return try Data(contentsOf: NativePath.from(url)) } catch CocoaError.fileReadNoSuchFile {
@@ -140,9 +149,7 @@ struct ConfigurationStore: Sendable {
   }
   static func replace(_ bytes: Data?, at url: URL, expected: Data?) throws {
     guard try read(url) == expected else {
-      throw PinewindError(
-        .configurationConflict, "configuration changed on disk; reload before saving",
-        source: url.path)
+      throw PinewindError.runtime(.state(.externallyModified))
     }
     if bytes == expected { return }
     let path = try NativePath.from(url)
@@ -163,7 +170,7 @@ struct ConfigurationStore: Sendable {
       guard try Self.read(urls[0]) == expected.shared,
         try urls.count < 3 || Self.read(urls[2]) == expected.local
       else {
-        throw PinewindError(.staleInput, "configuration changed during resolution")
+        throw PinewindError.runtime(.state(.staleInputs))
       }
       try Self.replace(bytes, at: urls[1], expected: expected.lock)
     }
@@ -200,7 +207,7 @@ public actor ConfigurationSession {
     if next.localOverrides != draft.localOverrides { localRevision += 1 }
     draft = next
   }
-  public func validate(scope: ConfigurationScope = .effective) -> [Diagnostic] {
+  public func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {
     snapshot().validate(scope: scope)
   }
   public func save(_ layer: ConfigurationLayer) async throws -> SaveReceipt {
@@ -221,7 +228,7 @@ public actor ConfigurationSession {
       revision = sharedRevision
     case .local:
       guard let configured = store.locations.configuration.localOverrides else {
-        throw PinewindError(.unsupportedOperation, "local overrides are disabled")
+        throw PinewindError.runtime(.state(.overridesDisabled))
       }
       if captured.localOverrides != nil {
         _ = try captured.manifest.evaluate(localOverrides: captured.localOverrides)
@@ -250,13 +257,13 @@ public actor ConfigurationSession {
     await acquire()
     defer { release() }
     guard draft == saved else {
-      throw PinewindError(.configurationConflict, "reload would discard unsaved changes")
+      throw PinewindError.runtime(.state(.staleSnapshot))
     }
     let capturedShared = sharedRevision
     let capturedLocal = localRevision
     let loaded = try await store.load()
     guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-      throw PinewindError(.configurationConflict, "configuration edited while reloading")
+      throw PinewindError.runtime(.state(.staleSnapshot))
     }
     apply(loaded)
   }
@@ -267,7 +274,7 @@ public actor ConfigurationSession {
     let capturedLocal = localRevision
     let loaded = try await store.load()
     guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-      throw PinewindError(.configurationConflict, "configuration edited while reloading")
+      throw PinewindError.runtime(.state(.staleSnapshot))
     }
     apply(loaded)
   }

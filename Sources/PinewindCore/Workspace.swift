@@ -39,7 +39,7 @@ struct InputBinding: Sendable {
       try ConfigurationStore.read(urls[1]) == lockBytes,
       try urls.count < 3 || ConfigurationStore.read(urls[2]) == snapshot.baseline.local
     else {
-      throw PinewindError(.staleInput, "configuration or lock changed before publication")
+      throw PinewindError.runtime(.state(.staleInputs))
     }
   }
 }
@@ -68,7 +68,7 @@ public actor Workspace {
     guard options.imports.maximumSources > 0, options.imports.maximumFileBytes > 0,
       options.imports.maximumTotalBytes > 0, options.imports.timeout > .zero
     else {
-      throw PinewindError(.invalidConfiguration, "import limits must be positive")
+      throw PinewindError.runtime(.state(.invalidOptions))
     }
     return Workspace(locations: locations, services: services, options: options)
   }
@@ -98,7 +98,7 @@ public actor Workspace {
   }
   private func check(_ snapshot: ConfigurationSnapshot) throws {
     guard snapshot.locations == locations else {
-      throw PinewindError(.invalidConfiguration, "phase result belongs to another workspace")
+      throw PinewindError.runtime(.state(.foreignSnapshot))
     }
   }
 
@@ -233,7 +233,7 @@ public actor Workspace {
         return false
       })
     else {
-      throw PinewindError(.needsResolution, "resolve shared declarations before preparing packages")
+      throw PinewindError.runtime(.lock(.resolveRequired))
     }
     return try Resolution(
       declarations: manifest, expanded: manifest, packages: [], snapshot: snapshot, preview: false)
@@ -261,7 +261,7 @@ public actor Workspace {
           let imported = resolution.imports.first(where: {
             $0.id.index == index && $0.id.request == request
           })
-        else { throw PinewindError(.needsResolution, "import has no locked expansion") }
+        else { throw PinewindError.runtime(.lock(.importUnresolved)) }
         expanded = imported.packages.map(ManifestEntry.package)
       } else {
         expanded = [entry]
@@ -295,8 +295,7 @@ public actor Workspace {
             identity = try SourceIdentity(url: repository.url, commit: locked.commit)
           } else {
             guard mode == .development, network else {
-              throw PinewindError(
-                .developmentRequired, "remote overrides require explicit development preparation")
+              throw PinewindError.runtime(.declaration(.developmentRequired))
             }
             if let cached = identities[repository.key] {
               identity = cached
@@ -326,9 +325,7 @@ public actor Workspace {
             pins.append(old)
           } else {
             guard network, mode == .development else {
-              throw PinewindError(
-                .developmentRequired, "resource declaration requires development preparation",
-                source: download.url.absoluteString)
+              throw PinewindError.runtime(.declaration(.developmentRequired))
             }
             pins.append(try await resources.pin(download.url, target: path))
           }
@@ -378,7 +375,7 @@ public actor Workspace {
         for pin in package.resources {
           let resource = cache.appending("resources/" + pin.sha256)
           guard try SnapshotFiles.sha256(resource) == pin.sha256 else {
-            throw PinewindError(.checksumMismatch, "cached resource checksum mismatch")
+            throw PinewindError.runtime(.cache(.checksumMismatch(pin.url)))
           }
           let file = try SafePath.file(pin.path, in: destination)
           try FileManager.default.createDirectory(
@@ -416,7 +413,7 @@ public actor Workspace {
       ]
     for path in protected {
       if try SafePath.overlaps(output, path) {
-        throw PinewindError(.invalidPath, "output overlaps configuration or managed storage")
+        throw PinewindError.runtime(.file(.overlappingPaths(output, path)))
       }
     }
     progress?(.started(.composing))
@@ -459,8 +456,10 @@ public actor Workspace {
         return true
       }()
     else {
-      throw PinewindError(
-        .invalidConfiguration, "repository provider returned an unrelated source identity")
+      throw PinewindError.runtime(
+        .defect(
+          .invariant(
+            detail: "repository provider returned an unrelated source identity", origin: Origin())))
     }
   }
   private func source(_ identity: SourceIdentity, network: Bool) async throws -> SourceSnapshot {
@@ -477,13 +476,15 @@ public actor Workspace {
       return try SourceSnapshot(identity: identity, directory: target)
     }
     guard network else {
-      throw PinewindError(
-        .contentMissing, "locked source is absent from cache", source: identity.url.absoluteString)
+      throw PinewindError.runtime(.cache(.contentMissing(identity.url)))
     }
     let supplied = try await services.repositories.prepareSource(identity, cacheRoot: cache)
     guard supplied.identity.commit == identity.commit,
       try SourceIdentity.normalize(supplied.identity.url) == SourceIdentity.normalize(identity.url)
-    else { throw PinewindError(.invalidConfiguration, "provider snapshot identity mismatch") }
+    else {
+      throw PinewindError.runtime(
+        .defect(.invariant(detail: "provider snapshot identity mismatch", origin: Origin())))
+    }
     try await BlockingIO.run {
       try NativeLock.withLock(cache.appending("locks/source-" + key + ".lock")) {
         if FileManager.default.fileExists(atPath: target.string),
@@ -492,7 +493,7 @@ public actor Workspace {
           return
         }
         guard try !SafePath.overlaps(supplied.directory, target) else {
-          throw PinewindError(.invalidPath, "provider source overlaps the managed source cache")
+          throw PinewindError.runtime(.file(.overlappingPaths(supplied.directory, target)))
         }
         _ = try SafePath.files(in: supplied.directory)
         let candidate = target.removingLastComponent().appending(".candidate-" + UUID().uuidString)
@@ -533,7 +534,7 @@ public actor Workspace {
         pins = []
       } else if let url = URL(string: request.source), url.scheme?.lowercased() == "https" {
         guard !url.lastPathComponent.isEmpty else {
-          throw PinewindError(.invalidConfiguration, "remote conf URL requires a filename")
+          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
         }
         let view = try await BlockingIO.run {
           try CompositionSnapshot(root: self.locations.cacheRoot.appending("imports"))
@@ -548,12 +549,11 @@ public actor Workspace {
         pins = await capture.resources()
       } else {
         guard !request.source.contains("://") else {
-          throw PinewindError(
-            .invalidConfiguration, "conf sources require HTTPS or a relative local path")
+          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
         }
         let manifest = try snapshot.locations.configuration.manifest.url
         guard let path = request.localPath else {
-          throw PinewindError(.invalidPath, "local conf source requires a relative path")
+          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
         }
         let source = try SafePath.file(
           path, in: NativePath.from(manifest.deletingLastPathComponent()))
@@ -583,7 +583,7 @@ public actor Workspace {
         packages: descriptors.map(PlumImporter.package),
         resources: pins)
     } catch {
-      throw PinewindError.wrap(error, source: request.source)
+      throw PinewindError.wrap(error)
     }
   }
   private func selected(_ id: PackageID, in selection: UpdateSelection?) -> Bool {
@@ -620,7 +620,7 @@ public actor Workspace {
     default: valid = true
     }
     guard valid else {
-      throw PinewindError(.staleInput, "update selection does not belong to the current resolution")
+      throw PinewindError.runtime(.state(.unknownSelection))
     }
   }
 }

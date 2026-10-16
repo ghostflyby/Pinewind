@@ -25,11 +25,12 @@ struct GitKitTransport: GitTransport {
     let remote = try makeRemote(url: url)
     defer { git_remote_free(remote) }
     return try withCallbacks(url: url) { callbacks in
-      try check(git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nil, nil))
+      try check(
+        git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nil, nil), repository: url)
       defer { git_remote_disconnect(remote) }
       var heads: UnsafeMutablePointer<UnsafePointer<git_remote_head>?>?
       var count = 0
-      try check(git_remote_ls(&heads, &count, remote))
+      try check(git_remote_ls(&heads, &count, remote), repository: url)
       return (0..<count).compactMap { index in
         guard let head = heads?[index]?.pointee, let name = head.name else { return nil }
         var oid = head.oid
@@ -42,13 +43,14 @@ struct GitKitTransport: GitTransport {
 
   func containsCommit(_ commit: String, repository: FilePath) throws -> Bool {
     guard FileManager.default.fileExists(atPath: repository.string) else { return false }
+    let url = URL(fileURLWithPath: repository.string)
     return try withRepository(repository) { repo in
-      var oid = try parse(commit)
+      var oid = try parse(commit, repository: url)
       var object: OpaquePointer?
       let status = git_commit_lookup(&object, repo, &oid)
       defer { git_commit_free(object) }
       if status == GIT_ENOTFOUND.rawValue { return false }
-      try check(status)
+      try check(status, repository: url)
       return true
     }
   }
@@ -57,7 +59,7 @@ struct GitKitTransport: GitTransport {
     if !FileManager.default.fileExists(atPath: repository.string) {
       GitLibrary.ensureInitialized()
       var repo: OpaquePointer?
-      try check(git_repository_init(&repo, repository.string, 1))
+      try check(git_repository_init(&repo, repository.string, 1), repository: url)
       git_repository_free(repo)
     }
     try withRepository(repository) { repo in
@@ -68,7 +70,7 @@ struct GitKitTransport: GitTransport {
         refspecs: [
           "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*",
         ])
-      var oid = try parse(commit)
+      var oid = try parse(commit, repository: url)
       var object: OpaquePointer?
       let status = git_commit_lookup(&object, repo, &oid)
       defer { git_commit_free(object) }
@@ -77,26 +79,28 @@ struct GitKitTransport: GitTransport {
         // Do not substitute a moving branch tip when the locked ID is unavailable.
         try fetch(remote, url: url, refspecs: ["+\(commit):refs/pinewind/commits/\(commit)"])
         var fetched: OpaquePointer?
-        try check(git_commit_lookup(&fetched, repo, &oid))
+        try check(git_commit_lookup(&fetched, repo, &oid), repository: url)
         git_commit_free(fetched)
       } else {
-        try check(status)
+        try check(status, repository: url)
       }
     }
   }
 
   func export(commit: String, repository: FilePath, destination: FilePath) throws {
+    let url = URL(fileURLWithPath: repository.string)
     try withRepository(repository) { repo in
-      var oid = try parse(commit)
+      var oid = try parse(commit, repository: url)
       var object: OpaquePointer?
-      try check(git_commit_lookup(&object, repo, &oid))
+      try check(git_commit_lookup(&object, repo, &oid), repository: url)
       defer { git_commit_free(object) }
       var tree: OpaquePointer?
-      try check(git_commit_tree(&tree, object))
+      try check(git_commit_tree(&tree, object), repository: url)
       defer { git_tree_free(tree) }
-      try validate(tree: tree, repository: repo, prefix: "")
+      try validate(tree: tree, repository: repo, prefix: "", url: url)
       var options = git_checkout_options()
-      try check(git_checkout_options_init(&options, UInt32(GIT_CHECKOUT_OPTIONS_VERSION)))
+      try check(
+        git_checkout_options_init(&options, UInt32(GIT_CHECKOUT_OPTIONS_VERSION)), repository: url)
       options.checkout_strategy =
         UInt32(GIT_CHECKOUT_FORCE.rawValue)
         | UInt32(GIT_CHECKOUT_DONT_UPDATE_INDEX.rawValue)
@@ -107,14 +111,15 @@ struct GitKitTransport: GitTransport {
       options.notify_cb = { _, _, _, _, _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
       try destination.string.withCString { path in
         options.target_directory = path
-        try check(git_checkout_tree(repo, tree, &options))
+        try check(git_checkout_tree(repo, tree, &options), repository: url)
       }
       // Pin successful views even when the selected commit was already cached
       // as an ancestor of a different, previously fetched version.
       var pin: OpaquePointer?
       try check(
-        git_reference_create(&pin, repo, "refs/pinewind/commits/" + commit, &oid, 1, "Pinewind pin")
-      )
+        git_reference_create(
+          &pin, repo, "refs/pinewind/commits/" + commit, &oid, 1, "Pinewind pin"),
+        repository: url)
       git_reference_free(pin)
     }
   }
@@ -125,41 +130,50 @@ struct GitKitTransport: GitTransport {
     try strings.withUnsafeMutableBufferPointer { buffer in
       var array = git_strarray(strings: buffer.baseAddress, count: buffer.count)
       var options = git_fetch_options()
-      try check(git_fetch_options_init(&options, UInt32(GIT_FETCH_OPTIONS_VERSION)))
+      try check(
+        git_fetch_options_init(&options, UInt32(GIT_FETCH_OPTIONS_VERSION)), repository: url)
       options.download_tags = GIT_REMOTE_DOWNLOAD_TAGS_NONE
       try withCallbacks(url: url) { callbacks in
         options.callbacks = callbacks
         defer { git_remote_disconnect(remote) }
-        try check(git_remote_fetch(remote, &array, &options, nil))
+        try check(git_remote_fetch(remote, &array, &options, nil), repository: url)
       }
     }
   }
 
   private func makeRemote(url: URL, repository: OpaquePointer? = nil) throws -> OpaquePointer {
     guard url.scheme?.lowercased() == "https" || url.isFileURL else {
-      throw PinewindError("unsupported Git transport")
+      throw PinewindError.runtime(.git(.unsupportedSourceURL(url)))
     }
     var options = git_remote_create_options()
-    try check(git_remote_create_options_init(&options, UInt32(GIT_REMOTE_CREATE_OPTIONS_VERSION)))
+    try check(
+      git_remote_create_options_init(&options, UInt32(GIT_REMOTE_CREATE_OPTIONS_VERSION)),
+      repository: url)
     options.repository = repository
     options.flags =
       UInt32(GIT_REMOTE_CREATE_SKIP_INSTEADOF.rawValue)
       | UInt32(GIT_REMOTE_CREATE_SKIP_DEFAULT_FETCHSPEC.rawValue)
     var remote: OpaquePointer?
-    try check(git_remote_create_with_opts(&remote, url.absoluteString, &options))
-    guard let remote else { throw PinewindError("Git remote could not be created") }
+    try check(git_remote_create_with_opts(&remote, url.absoluteString, &options), repository: url)
+    guard let remote else {
+      throw PinewindError.runtime(
+        .defect(.invariant(detail: "Git remote could not be created", origin: Origin())))
+    }
     return remote
   }
 
-  private func validate(tree: OpaquePointer?, repository: OpaquePointer?, prefix: String) throws {
+  private func validate(
+    tree: OpaquePointer?, repository: OpaquePointer?, prefix: String, url: URL
+  ) throws {
     for index in 0..<git_tree_entrycount(tree) {
       try Cancellation.check()
       guard let entry = git_tree_entry_byindex(tree, index), let name = git_tree_entry_name(entry)
       else {
-        throw PinewindError("Git tree contains an invalid entry")
+        throw PinewindError.runtime(
+          .defect(.invariant(detail: "Git tree contains an invalid entry", origin: Origin())))
       }
       guard let component = String(validatingCString: name) else {
-        throw PinewindError(.invalidPath, "Git tree entry name must be UTF-8")
+        throw PinewindError.runtime(.git(.treeEntryInvalid(.undecodableName)))
       }
       let path = prefix + component
       // Tree entries are individual names, not expressions to normalize before checkout.
@@ -167,19 +181,19 @@ struct GitKitTransport: GitTransport {
       guard relative.filePath.components.count == 1,
         relative.string.utf8.elementsEqual(component.utf8)
       else {
-        throw PinewindError(.invalidPath, "Git tree entry must be a single filename", source: path)
+        throw PinewindError.runtime(.git(.treeEntryInvalid(.notASingleComponent(path))))
       }
       guard component != ".git" else {
-        throw PinewindError("Git tree contains reserved metadata", source: path)
+        throw PinewindError.runtime(.git(.treeEntryInvalid(.reservedMetadata(path))))
       }
       guard git_tree_entry_filemode(entry) != GIT_FILEMODE_LINK else {
-        throw PinewindError("symbolic links are not supported in package sources", source: path)
+        throw PinewindError.runtime(.git(.treeEntryInvalid(.symbolicLink(path))))
       }
       if git_tree_entry_type(entry) == GIT_OBJECT_TREE {
         var subtree: OpaquePointer?
-        try check(git_tree_lookup(&subtree, repository, git_tree_entry_id(entry)))
+        try check(git_tree_lookup(&subtree, repository, git_tree_entry_id(entry)), repository: url)
         defer { git_tree_free(subtree) }
-        try validate(tree: subtree, repository: repository, prefix: path + "/")
+        try validate(tree: subtree, repository: repository, prefix: path + "/", url: url)
       }
       // Gitlinks are not recursively fetched; checkout creates at most empty directories.
     }
@@ -191,9 +205,13 @@ struct GitKitTransport: GitTransport {
     GitLibrary.ensureInitialized()
     try Cancellation.check()
     var repository: OpaquePointer?
-    try check(git_repository_open(&repository, directory.string))
+    let url = URL(fileURLWithPath: directory.string)
+    try check(git_repository_open(&repository, directory.string), repository: url)
     guard let repository else {
-      throw PinewindError("Git repository could not be opened", source: directory.string)
+      throw PinewindError.runtime(
+        .defect(
+          .invariant(
+            detail: "Git repository could not be opened: \(directory.string)", origin: Origin())))
     }
     defer { git_repository_free(repository) }
     return try body(repository)
@@ -206,7 +224,9 @@ struct GitKitTransport: GitTransport {
     // libgit2 callbacks are synchronous; the context lives through body and its disconnect.
     return try withExtendedLifetime(context) {
       var callbacks = git_remote_callbacks()
-      try check(git_remote_init_callbacks(&callbacks, UInt32(GIT_REMOTE_CALLBACKS_VERSION)))
+      try check(
+        git_remote_init_callbacks(&callbacks, UInt32(GIT_REMOTE_CALLBACKS_VERSION)), repository: url
+      )
       callbacks.payload = Unmanaged.passUnretained(context).toOpaque()
       callbacks.transfer_progress = { _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
       callbacks.sideband_progress = { _, _, _ in Cancellation.isCancelled ? GIT_EUSER.rawValue : 0 }
@@ -240,9 +260,9 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  private func parse(_ commit: String) throws -> git_oid {
+  private func parse(_ commit: String, repository: URL) throws -> git_oid {
     var oid = git_oid()
-    try check(git_oid_fromstr(&oid, commit))
+    try check(git_oid_fromstr(&oid, commit), repository: repository)
     return oid
   }
 
@@ -254,15 +274,17 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  private func check(_ status: Int32) throws {
+  private func check(_ status: Int32, repository: URL) throws {
     try Cancellation.check()
     guard status >= 0 else {
       let message =
         git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
         ?? "unknown error"
-      throw PinewindError(
-        status == GIT_EAUTH.rawValue ? .authenticationFailed : .io,
-        "Git operation failed (\(status)): \(message)")
+      if status == GIT_EAUTH.rawValue {
+        throw PinewindError.runtime(.git(.authenticationRequired(repository)))
+      }
+      throw PinewindError.runtime(
+        .git(.operationFailed(repository: repository, status: status, detail: message)))
     }
   }
 }

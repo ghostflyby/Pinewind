@@ -27,8 +27,7 @@ public struct CommitID: Hashable, Sendable, CustomStringConvertible {
   public let string: String
   public init(_ string: String) throws {
     guard string.count == 40, string.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
-      throw PinewindError(
-        .invalidConfiguration, "commit must be a complete 40-character hexadecimal commit ID")
+      throw PinewindError.runtime(.declaration(.invalidCommitID(string)))
     }
     self.string = string.lowercased()
   }
@@ -51,7 +50,7 @@ public enum GitRevision: Hashable, Sendable {
   }
   func validate() throws {
     if let value = reference, value.isEmpty || value.contains("\0") || value.hasSuffix("/") {
-      throw PinewindError(.invalidConfiguration, "invalid Git revision", field: "revision")
+      throw PinewindError.runtime(.declaration(.invalidRevision))
     }
   }
 }
@@ -69,7 +68,7 @@ public struct RepositoryRequest: Hashable, Sendable {
   public init(url: URL, revision: GitRevision = .defaultBranch) throws {
     let normalized = try SourceIdentity.normalize(url, preservingGitSuffix: true)
     guard !normalized.isFileURL else {
-      throw PinewindError(.invalidConfiguration, "repositories require HTTPS URLs")
+      throw PinewindError.runtime(.git(.unsupportedSourceURL(normalized)))
     }
     try revision.validate()
     self.url = normalized
@@ -105,7 +104,7 @@ public struct PackageRequest: Hashable, Sendable {
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
   ) throws {
     if let recipe, recipe.contains("\0") || recipe.contains("\\") {
-      throw PinewindError(.invalidPath, "recipe names must use portable path syntax")
+      throw PinewindError.runtime(.file(.notPortable(FilePath(recipe))))
     }
     let recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
     try filter.validate()
@@ -128,7 +127,9 @@ public struct PackageRequest: Hashable, Sendable {
     filter: FileFilter = FileFilter()
   ) throws {
     if url.isFileURL {
-      guard revision == nil else { throw PinewindError("file sources cannot specify revision") }
+      guard revision == nil else {
+        throw PinewindError.runtime(.declaration(.revisionWithFileSource))
+      }
       try self.init(
         source: .directory(.fileURL(url)), recipe: recipe, options: options, filter: filter)
     } else {
@@ -144,17 +145,20 @@ public struct ConfImport: Hashable, Sendable {
   public let variables: [String: String]
   let localPath: RelativePath?
   public init(source: String, variables: [String: String] = [:]) throws {
-    guard !source.isEmpty, variables["root_dir"] == nil else {
-      throw PinewindError("root_dir is reserved and an import source is required")
+    guard variables["root_dir"] == nil else {
+      throw PinewindError.runtime(.declaration(.reservedVariable("root_dir")))
+    }
+    guard !source.isEmpty else {
+      throw PinewindError.runtime(.declaration(.importSourceRequired))
     }
     guard !source.contains("\0") else {
-      throw PinewindError(.invalidPath, "conf sources must not contain NUL")
+      throw PinewindError.runtime(.file(.notPortable(FilePath(source))))
     }
     if source.hasPrefix(":") || source.contains("://") {
       localPath = nil
     } else {
       guard !source.contains("\\") else {
-        throw PinewindError(.invalidPath, "local conf sources must use portable path syntax")
+        throw PinewindError.runtime(.file(.notPortable(FilePath(source))))
       }
       localPath = try RelativePath(FilePath(source))
     }
@@ -178,7 +182,7 @@ public struct SourceIdentity: Hashable, Sendable {
   public init(url: URL, commit: CommitID) throws {
     self.url = try Self.normalize(url, preservingGitSuffix: true)
     guard !url.isFileURL else {
-      throw PinewindError("a remote snapshot requires an HTTPS repository")
+      throw PinewindError.runtime(.git(.unsupportedSourceURL(url)))
     }
     self.commit = commit
   }
@@ -193,7 +197,7 @@ public struct SourceIdentity: Hashable, Sendable {
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
       parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
       parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil
-    else { throw PinewindError("package sources must be local file URLs or HTTPS repository URLs") }
+    else { throw PinewindError.runtime(.declaration(.unsupportedSourceURL(url))) }
     parts.scheme = "https"
     parts.host = host.lowercased()
     if parts.port == 443 { parts.port = nil }
@@ -202,7 +206,9 @@ public struct SourceIdentity: Hashable, Sendable {
       parts.path.removeLast(4)
     }
     if host.lowercased() == "github.com" { parts.path = parts.path.lowercased() }
-    guard let normalized = parts.url else { throw PinewindError("invalid package URL") }
+    guard let normalized = parts.url else {
+      throw PinewindError.runtime(.git(.malformedRepositoryURL(url)))
+    }
     return normalized
   }
 }

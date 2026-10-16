@@ -26,27 +26,31 @@ extension FileDescriptor {
           nil, DWORD(OPEN_ALWAYS), DWORD(FILE_FLAG_OPEN_REPARSE_POINT), nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError(
-          .io, "cannot open operation lock (Windows error \(GetLastError()))", source: path.string)
+        throw PinewindError.runtime(
+          .file(
+            .unreadable(
+              path: path, detail: "cannot open operation lock (Windows error \(GetLastError()))")))
       }
       var adopted = false
       defer { if !adopted { _ = CloseHandle(handle) } }
       var info = BY_HANDLE_FILE_INFORMATION()
       guard GetFileInformationByHandle(handle, &info) else {
-        throw PinewindError(
-          .io, "cannot inspect operation lock (Windows error \(GetLastError()))",
-          source: path.string)
+        throw PinewindError.runtime(
+          .file(
+            .unreadable(
+              path: path, detail: "cannot inspect operation lock (Windows error \(GetLastError()))")
+          ))
       }
       guard
         info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) == 0
       else {
-        throw PinewindError(
-          .invalidPath, "operation lock must be a regular file", source: path.string)
+        throw PinewindError.runtime(.file(.notRegularFile(path)))
       }
       let descriptor = ucrt._open_osfhandle(
         Int(bitPattern: handle), _O_RDWR | _O_NOINHERIT)
       guard descriptor != -1 else {
-        throw PinewindError(.io, "cannot adopt operation lock handle", source: path.string)
+        throw PinewindError.runtime(
+          .file(.unreadable(path: path, detail: "cannot adopt operation lock handle")))
       }
       adopted = true
       return Self(rawValue: descriptor)
@@ -56,8 +60,7 @@ extension FileDescriptor {
         permissions: .ownerReadWrite)
       do {
         guard try descriptor.stat().type == .regular else {
-          throw PinewindError(
-            .invalidPath, "operation lock must be a regular file", source: path.string)
+          throw PinewindError.runtime(.file(.notRegularFile(path)))
         }
         return descriptor
       } catch {
@@ -86,7 +89,8 @@ extension FileDescriptor {
       }
       let error = GetLastError()
       if error == DWORD(ERROR_LOCK_VIOLATION) { return false }
-      throw PinewindError(.io, "cannot acquire operation lock (Windows error \(error))")
+      throw PinewindError.runtime(
+        .file(.lockFailed(detail: "cannot acquire operation lock (Windows error \(error))")))
     #else
       // System's sharedLock/exclusiveLock options apply only during open(), and
       // are unavailable on Linux. This fills the existing-descriptor operation.
@@ -94,7 +98,7 @@ extension FileDescriptor {
       if status == 0 { return true }
       let error = Errno(rawValue: status)
       if error == .wouldBlock || error == .resourceTemporarilyUnavailable { return false }
-      throw error
+      throw PinewindError.runtime(.file(.lockFailed(detail: String(describing: error))))
     #endif
   }
 }

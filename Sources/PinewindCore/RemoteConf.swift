@@ -45,10 +45,10 @@ actor RemoteConfCapture: ConfResourceCapture {
     try Task.checkCancellation()
     if pins[relative] != nil { return }
     guard pins.count < limits.maximumSources else {
-      throw PinewindError(.resourceLimit, "conf resource count exceeded")
+      throw PinewindError.runtime(.interpreter(.budgetExceeded(.sources)))
     }
     guard totalBytes < limits.maximumTotalBytes else {
-      throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
+      throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
     }
     let endpoint =
       relative.string == url.lastPathComponent
@@ -57,7 +57,7 @@ actor RemoteConfCapture: ConfResourceCapture {
     let dataPath = store.path(pin)
     let size = try SnapshotFiles.byteCount(dataPath)
     guard totalBytes + size <= limits.maximumTotalBytes else {
-      throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
+      throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
     }
     let destination = try SafePath.file(relative, in: directory)
     try FileManager.default.createDirectory(
@@ -89,13 +89,15 @@ struct RemoteConfFileSystem: FileSystem {
     do {
       try await capture.ensure(resourcePath(path))
       return try await mounted.metadata(path)
-    } catch let error as PinewindError where error.code == .contentMissing { return nil }
+    } catch let error as PinewindError {
+      if case .runtime(.cache(.contentMissing)) = error { return nil }
+      throw error
+    }
   }
 
   func list(_ path: String) async throws -> [FileEntry] {
     if let original { return try await original.list(path) }
-    throw PinewindError(
-      .unsupportedOperation, "remote conf directory enumeration is unsupported", source: path)
+    throw PinewindError.runtime(.interpreter(.enumerationUnsupported))
   }
   func canonicalize(_ path: String, allowMissing: Bool) async throws -> String {
     // SourceCommand ultimately reads through readData; do not interpret metadata as a remote listing.
@@ -186,8 +188,11 @@ actor LocalConfCapture: ConfResourceCapture {
       urls in
       let source = try NativePath.from(urls[0])
       let size = try SnapshotFiles.byteCount(source)
-      guard size <= maximum, size <= remaining else {
-        throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
+      guard size <= maximum else {
+        throw PinewindError.runtime(.interpreter(.budgetExceeded(.fileBytes)))
+      }
+      guard size <= remaining else {
+        throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
       }
       try FileManager.default.createDirectory(
         at: destination.removingLastComponent(), withIntermediateDirectories: true)

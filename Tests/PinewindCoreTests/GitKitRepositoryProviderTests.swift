@@ -317,8 +317,10 @@ struct GitKitRepositoryProviderTests {
       try await downloader.download(
         URL(string: "https://resource.test/ok")!, to: file, maximumBytes: 2)
     } throws: { error in
-      guard let error = error as? PinewindError else { return false }
-      return error.code == .resourceLimit && error.source == "https://resource.test/ok"
+      guard case .runtime(.network(.sizeLimitExceeded(let url, _))) = error as? PinewindError else {
+        return false
+      }
+      return url.absoluteString == "https://resource.test/ok"
     }
     #expect(!FileManager.default.fileExists(atPath: file.string))
     try await downloader.download(
@@ -337,8 +339,12 @@ struct GitKitRepositoryProviderTests {
         using: downloader, from: URL(string: "https://resource.test/offline")!)
       Issue.record("expected a transport failure")
     } catch let error as PinewindError {
-      #expect(error.code == .io)
-      #expect(error.source == "https://resource.test/offline")
+      guard case .runtime(.network(.transportFailed(let url, _))) = error,
+        url == URL(string: "https://resource.test/offline")
+      else {
+        Issue.record("\(error)")
+        return
+      }
     }
     await #expect(throws: CancellationError.self) {
       try await downloadedData(
@@ -417,7 +423,11 @@ private struct LocalGitTransport: GitTransport {
   }
   private func validate(_ url: URL) throws {
     if let expectedURL, url != expectedURL {
-      throw PinewindError("unexpected Git transport URL: \(url); expected \(expectedURL)")
+      throw PinewindError.runtime(
+        .git(
+          .operationFailed(
+            repository: url, status: -1,
+            detail: "unexpected Git transport URL; expected \(expectedURL)")))
     }
   }
 }
@@ -530,9 +540,11 @@ private struct GitFixture {
   private static let initialized = git_libgit2_init()
   private static func check(_ status: Int32) throws {
     guard status >= 0 else {
-      throw PinewindError(
-        git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
-          ?? "fixture Git operation failed")
+      throw PinewindError.runtime(
+        .defect(
+          .wrapped(
+            detail: git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
+              ?? "fixture Git operation failed", origin: Origin())))
     }
   }
 }

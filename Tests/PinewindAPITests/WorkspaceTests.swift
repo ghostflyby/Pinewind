@@ -76,7 +76,7 @@ private actor Downloads: ResourceDownloader {
   func download(_ endpoint: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     calls += 1
     guard let bytes = files[endpoint] else {
-      throw PinewindError(.contentMissing, "fixture HTTP 404", source: endpoint.absoluteString)
+      throw PinewindError.runtime(.network(.rejected(status: 404, url: endpoint)))
     }
     try FileManager.default.createDirectory(
       at: url(destination.removingLastComponent()), withIntermediateDirectories: true)
@@ -157,7 +157,14 @@ struct WorkspaceTests {
         do {
           _ = try await workspace.compose(plan, to: output)
           Issue.record("managed storage was accepted as a publication target")
-        } catch let error as PinewindError { #expect(error.code == .invalidPath) }
+        } catch {
+          guard let error = error as? PinewindError,
+            case .runtime(.file(.overlappingPaths)) = error
+          else {
+            Issue.record("unexpected error: \(error)")
+            continue
+          }
+        }
       }
     }
     #expect(try read(f.locations.stateRoot.appending("keep")) == "state")
@@ -590,9 +597,10 @@ struct WorkspaceTests {
     await #expect {
       _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
     } throws: { error in
-      guard let error = error as? PinewindError else { return false }
-      return error.code == .io && error.source == remote.absoluteString
-        && error.message.contains("permission denied: /outside.conf")
+      guard case .runtime(.defect(.wrapped(let detail, _))) = error as? PinewindError else {
+        return false
+      }
+      return detail.contains("permission denied: /outside.conf")
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
     await f.downloads.set(remote, String(repeating: "#padding\n", count: 40))
@@ -602,7 +610,13 @@ struct WorkspaceTests {
       options: WorkspaceOptions(imports: ImportLimits(maximumFileBytes: 64)))
     await #expect {
       _ = try await bounded.update()
-    } throws: { ($0 as? PinewindError)?.code == .resourceLimit }
+    } throws: {
+      if case .runtime(.network(.sizeLimitExceeded)) = $0 as? PinewindError {
+        return true
+      } else {
+        return false
+      }
+    }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
   }
   @Test func validationReportsIndependentEntryErrors() async throws {
@@ -613,7 +627,15 @@ struct WorkspaceTests {
     await session.edit { $0.manifest.order = [.named("missing-a"), .named("missing-b")] }
     let diagnostics = await session.validate()
     #expect(diagnostics.count == 2)
-    #expect(diagnostics.compactMap(\.entry) == [0, 1])
+    #expect(
+      diagnostics.allSatisfy { diagnostic in
+        if case .configuration(let document) = diagnostic,
+          case .declaration(.unknownName) = document.failure
+        {
+          return true
+        }
+        return false
+      })
   }
 
   @Test func concurrentPublishersProduceOneCompleteGeneration() async throws {

@@ -10,7 +10,7 @@ import SystemPackage
 #if os(Windows)
   func windowsNativePath(_ url: FilePath) throws -> FilePath {
     guard var path = String(validating: url) else {
-      throw PinewindError(.invalidPath, "unrepresentable Windows path")
+      throw PinewindError.runtime(.file(.unresolvable(url)))
     }
     if path.hasPrefix("\\\\?\\UNC\\") {
       path = "\\\\" + path.dropFirst(8)

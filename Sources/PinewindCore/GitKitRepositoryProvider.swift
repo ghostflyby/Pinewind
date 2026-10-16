@@ -44,7 +44,7 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
       if case .commit(let commit) = request.revision {
         return try SourceIdentity(url: url, commit: commit)
       }
-      let refs = RemoteReferences(try transport.advertise(url: Self.remoteURL(url)))
+      let refs = RemoteReferences(try transport.advertise(url: Self.remoteURL(url)), url: url)
       let reference = try request.revision.reference ?? refs.defaultBranch()
       return try SourceIdentity(url: url, commit: refs.commit(for: reference))
     }
@@ -72,8 +72,8 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
             url: Self.remoteURL(url), repository: repository, commit: identity.commit.string)
         }
         guard try transport.containsCommit(identity.commit.string, repository: repository) else {
-          throw PinewindError(
-            .contentMissing, "locked commit is unavailable", source: identity.url.absoluteString)
+          throw PinewindError.runtime(
+            .git(.commitUnavailable(commit: identity.commit.string, repository: identity.url)))
         }
         try fm.createDirectory(
           at: directory.removingLastComponent(), withIntermediateDirectories: true)
@@ -127,12 +127,12 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
     guard !source.isFileURL, !source.path.isEmpty, !source.path.contains("\0"),
       !source.path.split(separator: "/").contains("..")
     else {
-      throw PinewindError("Git sources require an HTTPS repository URL")
+      throw PinewindError.runtime(.git(.unsupportedSourceURL(source)))
     }
     if source.host == "github.com" {
       let parts = source.path.split(separator: "/", omittingEmptySubsequences: false)
       guard parts.count == 3, parts[0].isEmpty, !parts[1].isEmpty, !parts[2].isEmpty else {
-        throw PinewindError("GitHub repository URL requires an owner and repository")
+        throw PinewindError.runtime(.git(.malformedRepositoryURL(source)))
       }
     }
     return source
@@ -149,7 +149,7 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
   public init(session: URLSession = .shared) { self.session = session }
   public func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     guard url.scheme?.lowercased() == "https", url.host != nil else {
-      throw PinewindError(.invalidConfiguration, "download resources require HTTPS")
+      throw PinewindError.runtime(.network(.insecureScheme(url)))
     }
     let destination = try NativePath.absolute(destination)
     try Task.checkCancellation()
@@ -218,8 +218,8 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
         try Task.checkCancellation()
         received += 1
         if received > maximumBytes {
-          throw PinewindError(
-            .resourceLimit, "download exceeds the resource size limit", source: url.absoluteString)
+          throw PinewindError.runtime(
+            .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
         }
         pending.append(byte)
         if pending.count == 65536 { try flush() }
@@ -238,20 +238,19 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     guard let response = response as? HTTPURLResponse,
       response.url?.scheme?.lowercased() == "https"
     else {
-      throw PinewindError(.io, "download did not return HTTPS", source: url.absoluteString)
+      throw PinewindError.runtime(.network(.insecureScheme(url)))
     }
     guard (200..<300).contains(response.statusCode) else {
-      throw PinewindError(
-        response.statusCode == 401 || response.statusCode == 403
-          ? .authenticationFailed : (response.statusCode == 404 ? .contentMissing : .io),
-        "download returned HTTP \(response.statusCode)", source: url.absoluteString)
+      throw PinewindError.runtime(
+        .network(.rejected(status: response.statusCode, url: url)))
     }
     return response
   }
 
   private func transportFailure(_ error: any Error, url: URL) -> any Error {
     if Task.isCancelled || (error as? URLError)?.code == .cancelled { return CancellationError() }
-    return PinewindError.wrap(error, source: url.absoluteString)
+    return PinewindError.runtime(
+      .network(.transportFailed(url: url, detail: String(describing: error))))
   }
 }
 private final class HTTPSRedirectGuard: NSObject, URLSessionTaskDelegate {
@@ -272,7 +271,11 @@ struct GitReference: Sendable {
 
 struct RemoteReferences {
   let values: [GitReference]
-  init(_ values: [GitReference]) { self.values = values }
+  let url: URL
+  init(_ values: [GitReference], url: URL) {
+    self.values = values
+    self.url = url
+  }
 
   func defaultBranch() throws -> String {
     if let target = values.first(where: { $0.name == "HEAD" })?.symbolicTarget,
@@ -283,7 +286,7 @@ struct RemoteReferences {
     let head = values.first { $0.name == "HEAD" }
     let candidates = values.filter { $0.name.hasPrefix("refs/heads/") && $0.commit == head?.commit }
     guard candidates.count == 1, let branch = candidates.first else {
-      throw PinewindError("Git remote does not advertise an unambiguous default branch")
+      throw PinewindError.runtime(.git(.defaultBranchIndeterminate(url)))
     }
     return String(branch.name.dropFirst("refs/heads/".count))
   }
@@ -293,10 +296,9 @@ struct RemoteReferences {
       ref == "HEAD" || ref.hasPrefix("refs/") ? [ref] : ["refs/heads/" + ref, "refs/tags/" + ref]
     let matches = names.compactMap { name in values.first { $0.name == name } }
     guard matches.count == 1, let found = matches.first else {
-      throw PinewindError(
-        matches.isEmpty
-          ? "Git reference not found: \(ref)"
-          : "ambiguous Git reference '\(ref)'; use refs/heads/ or refs/tags/")
+      throw matches.isEmpty
+        ? PinewindError.runtime(.git(.referenceNotFound(ref)))
+        : PinewindError.runtime(.git(.ambiguousReference(ref)))
     }
     let peeled = values.first { $0.name == found.name + "^{}" }
     let commit = (peeled ?? found).commit

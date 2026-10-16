@@ -62,7 +62,7 @@ private actor ControlledCoordinator: FileAccessCoordinating {
     }
     if writing && failNext {
       failNext = false
-      throw PinewindError("test coordination failure")
+      throw PinewindError.runtime(.file(.lockFailed(detail: "test coordination failure")))
     }
     return try await base.coordinate(requests, accessor: accessor)
   }
@@ -172,8 +172,11 @@ struct FileAccessCoordinatorTests {
           do {
             _ = try await configuration.save(.shared)
             return true
-          } catch let error as PinewindError {
-            #expect(error.code == .configurationConflict)
+          } catch {
+            guard case .runtime(.state(.externallyModified)) = error as? PinewindError else {
+              Issue.record("unexpected error: \(error)")
+              return false
+            }
             return false
           }
         }

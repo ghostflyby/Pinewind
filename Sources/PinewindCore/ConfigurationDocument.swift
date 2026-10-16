@@ -44,14 +44,12 @@ public struct PackageFields: Hashable, Sendable {
 
   func validate() throws {
     if let url = url.value, url.scheme == nil {
-      throw PinewindError(
-        .invalidConfiguration, "package requires an absolute source URL", field: "url")
+      throw PinewindError.runtime(.declaration(.relativeSourceURL(url)))
     }
     try FileFilter(include: include.value, exclude: exclude.value ?? []).validate()
     try revision.value?.validate()
     if url.value?.isFileURL == true, revision.value != nil {
-      throw PinewindError(
-        .invalidConfiguration, "file sources cannot specify revision", field: "revision")
+      throw PinewindError.runtime(.declaration(.revisionWithFileSource))
     }
   }
 }
@@ -91,11 +89,12 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   public mutating func renamePackage(_ old: String, to new: String) throws {
-    guard let fields = names[old] else { throw PinewindError("unknown package name '\(old)'") }
-    if old == new { return }
-    guard new != "self", names[new] == nil else {
-      throw PinewindError("package name '\(new)' is reserved or already defined")
+    guard let fields = names[old] else {
+      throw PinewindError.runtime(.declaration(.unknownName(old)))
     }
+    if old == new { return }
+    guard new != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
+    guard names[new] == nil else { throw PinewindError.runtime(.declaration(.duplicateName(new))) }
     names.removeValue(forKey: old)
     names[new] = fields
     order = order.map {
@@ -107,20 +106,20 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   public mutating func removePackage(_ name: String) throws {
-    guard names[name] != nil else { throw PinewindError("unknown package name '\(name)'") }
+    guard names[name] != nil else { throw PinewindError.runtime(.declaration(.unknownName(name))) }
     guard
       !order.contains(where: {
         if case .named(let reference, _) = $0 { return reference == name }
         return false
       })
-    else { throw PinewindError("package name '\(name)' is still referenced") }
+    else { throw PinewindError.runtime(.declaration(.nameStillReferenced(name))) }
     names.removeValue(forKey: name)
   }
 
   /// Destination is the final index after moving; duplicate entries remain distinct positions.
   public mutating func moveEntry(from: Int, to: Int) throws {
     guard order.indices.contains(from), order.indices.contains(to) else {
-      throw PinewindError("order entry index is out of bounds")
+      throw PinewindError.runtime(.declaration(.orderIndexOutOfBounds))
     }
     order.insert(order.remove(at: from), at: to)
   }
@@ -158,7 +157,7 @@ enum DocumentCodec {
       case .userFiles(let filter): return .userFiles(filter)
       case .importConf(let conf): return .importConf(conf)
       case .package(let name, let fields):
-        let declaration = try package(fields, reader: reader)
+        let declaration = try package(fields, reader: reader, anchor: node)
         if let name { return .named(name, overrides: declaration) }
         return .package(declaration)
       }
@@ -170,33 +169,40 @@ enum DocumentCodec {
     guard let node else { return [:] }
     var result: [String: PackageFields] = [:]
     for (name, value) in try reader.mapping(node) {
-      guard name != "self" else { throw reader.error("self is a reserved name", at: value) }
+      guard name != "self" else {
+        throw reader.fail(.declaration(.reservedName("self")), at: value)
+      }
       result[name] = try package(
-        reader.mapping(value, allowed: ConfigurationParser.packageKeys), reader: reader)
+        reader.mapping(value, allowed: ConfigurationParser.packageKeys), reader: reader,
+        anchor: value)
     }
     return result
   }
 
-  static func package(_ fields: [String: Node], reader: YAMLReader) throws -> PackageFields {
+  static func package(
+    _ fields: [String: Node], reader: YAMLReader, anchor: Node? = nil
+  ) throws -> PackageFields {
     func field<T>(_ key: String, _ decode: (Node) throws -> T) throws -> FieldOverride<T> {
       guard let node = fields[key] else { return .inherit }
       return node.tag == Tag(.null) ? .reset : .value(try decode(node))
     }
-    let result = try PackageFields(
-      url: field("url") { node in
-        let text = try reader.string(node)
-        guard let url = URL(string: text) else {
-          throw reader.error("package requires an absolute source URL", at: node)
-        }
-        return url
-      },
-      revision: field("revision") { try revision($0, reader: reader) },
-      recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
-      include: field("include", reader.strings), exclude: field("exclude", reader.strings))
-    do { try result.validate() } catch let error as PinewindError {
-      throw reader.error(error.message, at: error.field.flatMap { fields[$0] }, field: error.field)
+    do {
+      let result = try PackageFields(
+        url: field("url") { node in
+          let text = try reader.string(node)
+          guard let url = URL(string: text) else {
+            throw reader.error("invalid URL '\(text)'", at: node)
+          }
+          return url
+        },
+        revision: field("revision") { try revision($0, reader: reader) },
+        recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
+        include: field("include", reader.strings), exclude: field("exclude", reader.strings))
+      try result.validate()
+      return result
+    } catch let error as PinewindError {
+      throw error.promoted(reader.context(at: anchor))
     }
-    return result
   }
 
   static func revision(_ node: Node, reader: YAMLReader) throws -> GitRevision {
@@ -269,7 +275,9 @@ enum DocumentCodec {
           "names",
           mapping(
             try names.sorted { $0.key < $1.key }.map { name, fields in
-              guard name != "self" else { throw PinewindError("self is a reserved name") }
+              guard name != "self" else {
+                throw PinewindError.runtime(.declaration(.reservedName("self")))
+              }
               return (name, mapping(try packageNode(fields)))
             })
         ))
@@ -280,13 +288,12 @@ enum DocumentCodec {
         case .userFiles(let filter): return mapping([("self", try filterNode(filter))])
         case .named(let name, let overrides):
           guard case .inherit = overrides.url else {
-            throw PinewindError(
-              "named entries require a single name selector; override URLs in names")
+            throw PinewindError.runtime(.declaration(.namedURLForbidden))
           }
           return mapping([("name", string(name))] + (try packageNode(overrides)))
         case .package(let package):
           if case .inherit = package.url {
-            throw PinewindError("inline package entries require a URL selector")
+            throw PinewindError.runtime(.declaration(.inlineURLRequired))
           }
           return mapping(try packageNode(package))
         case .importConf(let conf):

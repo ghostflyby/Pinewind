@@ -16,7 +16,7 @@
     /// the final managed junction into its replaceable generation.
     static func publicationPath(_ output: FilePath) throws -> FilePath {
       guard let component = output.lastComponent else {
-        throw PinewindError(.invalidPath, "composition output must not be a filesystem root")
+        throw PinewindError.runtime(.file(.isFilesystemRoot(output)))
       }
       let parent = try resolvedPath(output.removingLastComponent())
       let entry = parent.appending(component)
@@ -26,7 +26,7 @@
         GetLongPathNameW($0, &buffer, DWORD(buffer.count))
       }
       guard count > 0, Int(count) < buffer.count else {
-        throw PinewindError(.invalidPath, "cannot resolve publication entry", source: entry.string)
+        throw PinewindError.runtime(.file(.unresolvable(entry)))
       }
       return FilePath(platformString: buffer)
     }
@@ -44,13 +44,22 @@
           try canonicalPath(target.removingLastComponent())
             == canonicalPath(storage(for: output)),
           isGeneration(target.lastComponent?.string ?? "")
-        else { throw PinewindError("composition output is not a Pinewind generation junction") }
+        else {
+          throw PinewindError.runtime(
+            .file(
+              .publicationFailed(
+                detail: "composition output is not a Pinewind generation junction")))
+        }
       } else if FileManager.default.fileExists(atPath: output.string, isDirectory: &isDirectory) {
         guard isDirectory.boolValue else {
-          throw PinewindError("Windows composition output must be a directory")
+          throw PinewindError.runtime(
+            .file(.publicationFailed(detail: "Windows composition output must be a directory")))
         }
         guard try FileManager.default.contentsOfDirectory(atPath: output.string).isEmpty else {
-          throw PinewindError("Windows composition output must be empty or managed by Pinewind")
+          throw PinewindError.runtime(
+            .file(
+              .publicationFailed(
+                detail: "Windows composition output must be empty or managed by Pinewind")))
         }
       }
     }
@@ -103,7 +112,10 @@
           nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError("cannot open composition junction (Windows error \(GetLastError()))")
+        throw PinewindError.runtime(
+          .file(
+            .publicationFailed(
+              detail: "cannot open composition junction (Windows error \(GetLastError()))")))
       }
       defer { _ = CloseHandle(handle) }
       return try body(handle)
@@ -121,7 +133,8 @@
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
         guard parent != ancestor, let component = ancestor.lastComponent else {
-          throw PinewindError("cannot resolve composition path")
+          throw PinewindError.runtime(
+            .file(.publicationFailed(detail: "cannot resolve composition path")))
         }
         missing.append(component)
         ancestor = parent
@@ -130,7 +143,10 @@
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
-          throw PinewindError("cannot resolve composition path (Windows error \(GetLastError()))")
+          throw PinewindError.runtime(
+            .file(
+              .publicationFailed(
+                detail: "cannot resolve composition path (Windows error \(GetLastError()))")))
         }
         let path = FilePath(platformString: buffer)
         return try windowsNativePath(path)
@@ -150,7 +166,10 @@
         if error == DWORD(ERROR_FILE_NOT_FOUND) || error == DWORD(ERROR_PATH_NOT_FOUND) {
           return nil
         }
-        throw PinewindError("cannot inspect composition output (Windows error \(error))")
+        throw PinewindError.runtime(
+          .file(
+            .publicationFailed(detail: "cannot inspect composition output (Windows error \(error))")
+          ))
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
       return try withHandle(output, access: 0) { handle in
@@ -162,18 +181,27 @@
             DWORD($0.count), &count, nil)
         }
         guard ok else {
-          throw PinewindError("cannot read composition junction (Windows error \(GetLastError()))")
+          throw PinewindError.runtime(
+            .file(
+              .publicationFailed(
+                detail: "cannot read composition junction (Windows error \(GetLastError()))")))
         }
         guard count >= 16,
           buffer.integer(at: 0, as: UInt32.self) == UInt32(IO_REPARSE_TAG_MOUNT_POINT)
-        else { throw PinewindError("composition output is not a directory junction") }
+        else {
+          throw PinewindError.runtime(
+            .file(.publicationFailed(detail: "composition output is not a directory junction")))
+        }
         let offset = 16 + Int(buffer.integer(at: 8, as: UInt16.self))
         let length = Int(buffer.integer(at: 10, as: UInt16.self))
         guard offset + length <= Int(count), length.isMultiple(of: 2),
           var path = String(
             data: buffer.subdata(in: offset..<(offset + length)), encoding: .utf16LittleEndian),
           path.hasPrefix("\\??\\")
-        else { throw PinewindError("invalid composition junction target") }
+        else {
+          throw PinewindError.runtime(
+            .file(.publicationFailed(detail: "invalid composition junction target")))
+        }
         path.removeFirst(4)
         if path.hasPrefix("UNC\\") { path = "\\\\" + path.dropFirst(4) }
         return FilePath(path)
@@ -189,7 +217,8 @@
       let printable = Array(printName.utf16)
       let dataLength = 8 + (substitute.count + printable.count + 2) * 2
       guard dataLength + 8 <= 16_384 else {
-        throw PinewindError("composition junction path is too long")
+        throw PinewindError.runtime(
+          .file(.publicationFailed(detail: "composition junction path is too long")))
       }
       var data = Data()
       data.appendInteger(UInt32(IO_REPARSE_TAG_MOUNT_POINT))
@@ -208,8 +237,10 @@
             nil)
         }
         guard ok else {
-          throw PinewindError(
-            "cannot publish composition junction (Windows error \(GetLastError()))")
+          throw PinewindError.runtime(
+            .file(
+              .publicationFailed(
+                detail: "cannot publish composition junction (Windows error \(GetLastError()))")))
         }
       }
     }

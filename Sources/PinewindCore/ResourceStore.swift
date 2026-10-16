@@ -26,8 +26,8 @@ struct ResourceStore: Sendable {
       // before the bytes enter the content-addressed cache.
       let size = try await BlockingIO.run { try SnapshotFiles.byteCount(candidate) }
       guard size <= maximumBytes else {
-        throw PinewindError(
-          .resourceLimit, "downloaded resource exceeds the size limit", source: url.absoluteString)
+        throw PinewindError.runtime(
+          .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
       }
     }
     let hash = try await BlockingIO.run { try SnapshotFiles.sha256(candidate) }
@@ -60,13 +60,11 @@ struct ResourceStore: Sendable {
       return
     }
     guard network else {
-      throw PinewindError(
-        .contentMissing, "locked resource is absent from cache", source: pin.url.absoluteString)
+      throw PinewindError.runtime(.cache(.contentMissing(pin.url)))
     }
     let actual = try await self.pin(pin.url, target: pin.path)
     guard actual.sha256 == pin.sha256 else {
-      throw PinewindError(
-        .checksumMismatch, "locked resource checksum mismatch", source: pin.url.absoluteString)
+      throw PinewindError.runtime(.cache(.checksumMismatch(pin.url)))
     }
   }
 }

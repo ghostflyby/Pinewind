@@ -159,9 +159,10 @@ struct ConfigurationDocumentTests {
       """
     let document = try ManifestDocument.parse(text, source: "original.yaml")
     let evaluated = try #require(diagnostic { _ = try document.evaluate() })
-    #expect(evaluated.code == .invalidConfiguration)
-    #expect(evaluated.source == nil)
-    #expect(evaluated.line == nil)
+    guard case .runtime(.declaration(.unknownName)) = evaluated else {
+      Issue.record("\(evaluated)")
+      return
+    }
 
     let root = temporaryRoot()
     defer { remove(root) }
@@ -171,7 +172,12 @@ struct ConfigurationDocumentTests {
     do {
       _ = try await configuration.snapshot().evaluate(.shared)
       Issue.record("expected evaluation error")
-    } catch let error as PinewindError { #expect(error.line == nil) }
+    } catch let error as PinewindError {
+      guard case .runtime(.declaration(.unknownName)) = error else {
+        Issue.record("\(error)")
+        return
+      }
+    }
     await configuration.edit { draft in
       draft.manifest = ManifestDocument()
       draft.localOverrides = LocalOverridesDocument(names: ["self": PackageFields()])
@@ -180,8 +186,10 @@ struct ConfigurationDocumentTests {
       _ = try await configuration.snapshot().evaluate(.effective)
       Issue.record("expected local evaluation error")
     } catch let error as PinewindError {
-      #expect(error.source == "pinewind.local.yaml")
-      #expect(error.line == nil)
+      guard case .runtime(.declaration(.reservedName)) = error else {
+        Issue.record("\(error)")
+        return
+      }
     }
   }
 
@@ -379,7 +387,8 @@ struct ConfigurationDocumentTests {
       try await configuration.edit { draft in
         draft.manifest.order = []
         draft.localOverrides = LocalOverridesDocument()
-        throw PinewindError("abort edit")
+        throw PinewindError.runtime(
+          .defect(.wrapped(detail: "abort edit", origin: Origin())))
       }
     }
     let after = await configuration.snapshot()

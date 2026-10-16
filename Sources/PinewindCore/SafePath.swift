@@ -17,14 +17,14 @@ enum SafePath {
     #endif
     let candidate = canonicalRoot.appending(path.filePath.components)
     guard try canonical(candidate).starts(with: rootIdentity) else {
-      throw PinewindError("path escapes its source root: \(path)")
+      throw PinewindError.runtime(.file(.escapesRoot(path: candidate, root: rootIdentity)))
     }
     return candidate
   }
 
   static func validateOutputRoot(_ output: FilePath) throws {
     guard output.lastComponent != nil else {
-      throw PinewindError("composition output must not be a filesystem root")
+      throw PinewindError.runtime(.file(.isFilesystemRoot(output)))
     }
   }
 
@@ -35,7 +35,7 @@ enum SafePath {
     for root in roots {
       let path = try canonical(root)
       guard !out.starts(with: path), !path.starts(with: out) else {
-        throw PinewindError("composition root must not overlap any input source")
+        throw PinewindError.runtime(.file(.overlappingPaths(out, path)))
       }
     }
   }
@@ -55,7 +55,7 @@ enum SafePath {
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
         guard parent != ancestor, let component = ancestor.lastComponent else {
-          throw PinewindError(.invalidPath, "cannot resolve filesystem path", source: url.string)
+          throw PinewindError.runtime(.file(.unresolvable(url)))
         }
         missing.append(component)
         ancestor = parent
@@ -77,7 +77,7 @@ enum SafePath {
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
     let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true else {
-      throw PinewindError("source must be a directory", source: root.string)
+      throw PinewindError.runtime(.file(.notADirectory(root)))
     }
     var enumerationError: (any Error)?
     guard
@@ -89,7 +89,7 @@ enum SafePath {
           return false
         })
     else {
-      throw PinewindError("cannot enumerate source", source: root.string)
+      throw PinewindError.runtime(.file(.enumerationFailed(root)))
     }
     var result: [RelativePath] = []
     let base = try NativePath.from(root.foundationURL.standardizedFileURL)
@@ -97,8 +97,7 @@ enum SafePath {
       try Cancellation.check()
       let values = try file.resourceValues(forKeys: Set(keys))
       if values.isSymbolicLink == true {
-        throw PinewindError(
-          "symbolic links are not supported in package sources", source: file.path)
+        throw PinewindError.runtime(.file(.symbolicLinkNotAllowed(FilePath(file.path))))
       }
       if values.isDirectory == true && file.lastPathComponent == ".git" {
         iterator.skipDescendants()

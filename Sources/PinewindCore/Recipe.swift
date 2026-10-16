@@ -29,13 +29,16 @@ struct Recipe {
     let file = try SafePath.file(request.recipePath, in: directory)
     guard FileManager.default.fileExists(atPath: file.string) else {
       if request.recipe != nil {
-        throw PinewindError("explicit recipe not found", source: file.string)
+        throw PinewindError.configuration(
+          DocumentError(
+            context: DocumentContext(path: file, url: request.url),
+            failure: .file(.notFound(file))))
       }
       return nil
     }
     let reader = YAMLReader(source: file.string)
     guard let text = String(data: try read(file), encoding: .utf8) else {
-      throw reader.error("recipe must be UTF-8")
+      throw reader.fail(.file(.undecodableText(file)))
     }
     let root = try reader.mapping(
       reader.document(text),
@@ -95,10 +98,15 @@ struct Recipe {
     let patches: [Patch] =
       try root["patch_files"].map { node in
         try reader.mapping(node).sorted { $0.key < $1.key }.map { target, body in
-          let expanded = try Template.expand(target, options: request.options, declared: declared)
+          let expanded: String
+          do {
+            expanded = try Template.expand(target, options: request.options, declared: declared)
+          } catch let error as PinewindError {
+            throw error.promoted(reader.context(at: body))
+          }
           let target = try reader.relativePath(expanded)
           guard patchTargets.insert(target).inserted else {
-            throw reader.error("patch_files targets must be unique after normalization")
+            throw reader.fail(.declaration(.duplicateTarget(target.string)), at: body)
           }
           guard body.sequence != nil else {
             throw reader.error("patch body must be a YAML sequence", at: body)
@@ -106,9 +114,14 @@ struct Recipe {
           let text = try serialize(node: body)
             .replacingOccurrences(of: "---\n", with: "")
             .trimmingCharacters(in: .newlines)
-          let substituted = try Template.expand(text, options: request.options, declared: declared)
+          let substituted: String
+          do {
+            substituted = try Template.expand(text, options: request.options, declared: declared)
+          } catch let error as PinewindError {
+            throw error.promoted(reader.context(at: body))
+          }
           guard let parsed = try compose(yaml: substituted), parsed.sequence != nil else {
-            throw reader.error("expanded patch body must be a YAML sequence")
+            throw reader.error("expanded patch body must be a YAML sequence", at: body)
           }
           return Patch(target: target, rx: rx, body: substituted)
         }
@@ -131,7 +144,9 @@ enum Template {
         Range(match.range(at: index), in: text).map { String(text[$0]) }
       }
       let key = capture(1) ?? capture(3) ?? ""
-      guard declared.contains(key) else { throw PinewindError("undeclared recipe option '\(key)'") }
+      guard declared.contains(key) else {
+        throw PinewindError.runtime(.declaration(.undeclaredOption(key)))
+      }
       let fallback = capture(2)
       let value: String
       if let supplied = options[key], fallback == nil || !supplied.isEmpty {
@@ -139,10 +154,10 @@ enum Template {
       } else if let fallback {
         value = fallback
       } else {
-        throw PinewindError("recipe option '\(key)' has no value")
+        throw PinewindError.runtime(.declaration(.optionValueMissing(key)))
       }
       guard let range = Range(match.range, in: result) else {
-        throw PinewindError("invalid template range")
+        throw PinewindError.runtime(.declaration(.invalidTemplateRange))
       }
       // Literal replacement: substituted values are never reparsed as shell code.
       result.replaceSubrange(range, with: value)

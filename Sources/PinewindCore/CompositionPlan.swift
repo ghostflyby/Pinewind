@@ -13,10 +13,11 @@ public struct PinnedResource: Hashable, Sendable {
   public let sha256: String
 
   public init(url: URL, path: RelativePath, sha256: String) throws {
-    guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false, sha256.count == 64,
-      sha256.allSatisfy({ $0.isASCII && $0.isHexDigit })
-    else {
-      throw PinewindError("resource requires an HTTPS URL and a complete SHA-256 checksum")
+    guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
+      throw PinewindError.runtime(.declaration(.unsupportedSourceURL(url)))
+    }
+    guard sha256.count == 64, sha256.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+      throw PinewindError.runtime(.declaration(.invalidChecksum(sha256)))
     }
     self.url = url
     self.path = path
@@ -37,9 +38,11 @@ struct PreparedPackage: Sendable {
     resources: [PinnedResource] = []
   ) throws {
     if case .git(let repository) = request.source {
-      guard let commit else { throw PinewindError("remote prepared source requires a commit") }
+      guard let commit else { throw PinewindError.runtime(.declaration(.preparedCommitMissing)) }
       if case .commit(let requested) = repository.revision, requested != commit {
-        throw PinewindError("prepared commit does not match the requested commit")
+        throw PinewindError.runtime(
+          .declaration(
+            .preparedCommitMismatch(requested: requested.string, prepared: commit.string)))
       }
     }
     self.request = request
@@ -129,17 +132,16 @@ struct CompositionPlanner: Sendable {
           }
         }
       case .importConf:
-        throw PinewindError("expand conf imports before planning composition")
+        throw PinewindError.runtime(.declaration(.importNotExpanded))
       case .package(let request):
         let matches = available.filter { $0.request == request }
         guard Set(matches.map { $0.commit }).count <= 1,
           Set(matches.map { $0.directory }).count <= 1
         else {
-          throw PinewindError(.invalidConfiguration, "conflicting prepared package versions")
+          throw PinewindError.runtime(.declaration(.versionConflict))
         }
         guard let prepared = matches.first else {
-          throw PinewindError(
-            "package has no prepared snapshot", source: request.url.absoluteString)
+          throw PinewindError.runtime(.declaration(.missingPreparedSnapshot))
         }
         roots.append(prepared.directory)
         let source = try SourceIdentity.normalize(request.url)
@@ -152,15 +154,12 @@ struct CompositionPlanner: Sendable {
               $0.url == download.url && $0.path == download.path
             })
           else {
-            throw PinewindError(
-              "download resource has not been pinned and prepared",
-              source: download.url.absoluteString)
+            throw PinewindError.runtime(.declaration(.unpreparedResource))
           }
           let file = try snapshot.capture(SafePath.file(download.path, in: prepared.directory))
           let hash = try SnapshotFiles.sha256(file)
           guard hash == pinned.sha256 else {
-            throw PinewindError(
-              "download resource checksum mismatch", source: download.url.absoluteString)
+            throw PinewindError.runtime(.cache(.checksumMismatch(download.url)))
           }
         }
         var selected: [(RelativePath, FilePath)] = []
@@ -169,7 +168,11 @@ struct CompositionPlanner: Sendable {
             if pattern.hasPrefix("../") {
               let segments = pattern.split(separator: "/", maxSplits: 2).map(String.init)
               guard segments.count == 3, segments[0] == ".." else {
-                throw PinewindError("cross-package pattern must be ../<package>/<pattern>")
+                throw PinewindError.runtime(
+                  .declaration(
+                    .invalidPattern(
+                      pattern: pattern,
+                      detail: "cross-package pattern must be ../<package>/<pattern>")))
               }
               let candidates = try available.filter {
                 let sibling = try SourceIdentity.normalize($0.request.url)
@@ -182,7 +185,8 @@ struct CompositionPlanner: Sendable {
                 SourceVersion(url: try SourceIdentity.normalize($0.request.url), commit: $0.commit)
               }
               guard versions.count == 1, let sibling = versions.values.first?.first else {
-                throw PinewindError("cross-package source is missing or ambiguous: \(segments[1])")
+                throw PinewindError.runtime(
+                  .declaration(.crossPackageSourceUnresolved(String(segments[1]))))
               }
               roots.append(sibling.directory)
               let glob = try Glob.compile(segments[2])
@@ -190,7 +194,7 @@ struct CompositionPlanner: Sendable {
                 glob.match($0.string)
               }
               guard !matched.isEmpty else {
-                throw PinewindError("install_files pattern matched no files: \(pattern)")
+                throw PinewindError.runtime(.declaration(.unmatchedPattern(pattern)))
               }
               for path in matched {
                 selected.append((path, try SafePath.file(path, in: sibling.directory)))
@@ -199,7 +203,7 @@ struct CompositionPlanner: Sendable {
               let glob = try Glob.compile(pattern)
               let matched = candidates.filter { glob.match($0.string) }
               guard !matched.isEmpty else {
-                throw PinewindError("install_files pattern matched no files: \(pattern)")
+                throw PinewindError.runtime(.declaration(.unmatchedPattern(pattern)))
               }
               for path in matched {
                 selected.append((path, try SafePath.file(path, in: prepared.directory)))
@@ -235,7 +239,7 @@ struct CompositionPlanner: Sendable {
       var parent = path.removingLastComponent()
       while !parent.isEmpty {
         guard !paths.contains(parent) else {
-          throw PinewindError("file/directory output conflict at \(parent)")
+          throw PinewindError.runtime(.declaration(.outputConflict))
         }
         parent.removeLastComponent()
       }

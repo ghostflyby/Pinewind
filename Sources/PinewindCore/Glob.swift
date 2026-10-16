@@ -12,12 +12,17 @@ public enum Glob {
     guard !pattern.isEmpty, !pattern.hasPrefix("/"), !pattern.contains("\\"),
       !pattern.contains("\0"), !pattern.split(separator: "/").contains("..")
     else {
-      throw PinewindError("unsafe glob '\(pattern)'")
+      throw PinewindError.runtime(
+        .declaration(
+          .invalidPattern(
+            pattern: pattern, detail: "pattern must be a portable relative path")))
     }
     do {
       return try Pattern(pattern, options: options)
     } catch {
-      throw PinewindError("invalid glob '\(pattern)': \(error.underlyingError)")
+      throw PinewindError.runtime(
+        .declaration(
+          .invalidPattern(pattern: pattern, detail: String(describing: error.underlyingError))))
     }
   }
 

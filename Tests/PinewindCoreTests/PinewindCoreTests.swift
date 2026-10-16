@@ -27,7 +27,7 @@ private struct Fixture {
     do {
       if let name {
         guard let fixtures = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
-          throw PinewindError("test fixture bundle is missing")
+          throw PinewindError.runtime(.file(.notFound(FilePath("Fixtures"))))
         }
         let source = fixtures.appendingPathComponent(name)
         for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
@@ -195,8 +195,12 @@ struct ConfigurationTests {
         .evaluate()
       Issue.record("expected diagnostic")
     } catch let error as PinewindError {
-      #expect(error.source == "fixture.yaml")
-      #expect(error.line == 3)
+      guard case .configuration(let document) = error else {
+        Issue.record("expected a document verdict: \(error)")
+        return
+      }
+      #expect(document.context.path == FilePath("fixture.yaml"))
+      #expect(document.context.placement?.line == 3)
     } catch { Issue.record("unexpected error: \(error)") }
   }
 }
@@ -718,7 +722,15 @@ struct CompositionTests {
     let request = try PackageRequest(url: f.a, recipe: "customize", options: ["schema": target])
     #expect {
       _ = try f.plan([.package(request)])
-    } throws: { ($0 as? PinewindError)?.code == .invalidPath }
+    } throws: { error in
+      switch error as? PinewindError {
+      case .runtime(.file): return true
+      case .configuration(let document):
+        if case .file = document.failure { return true }
+        return false
+      default: return false
+      }
+    }
   }
 
   @Test(arguments: [
@@ -732,9 +744,13 @@ struct CompositionTests {
     #expect {
       _ = try Recipe.load(
         request: f.request(f.a), directory: native(f.a), read: { try Data(contentsOf: $0) })
-    } throws: {
-      guard let error = $0 as? PinewindError else { return false }
-      return error.code == .invalidConfiguration && error.message.contains("targets must be unique")
+    } throws: { error in
+      guard case .configuration(let document) = error as? PinewindError else { return false }
+      switch document.failure {
+      case .declaration(.duplicateTarget): return true
+      case .declaration(.syntaxError(let detail)): return detail.contains("targets must be unique")
+      default: return false
+      }
     }
   }
 
@@ -783,7 +799,14 @@ struct ConfTests {
         ConfImport(source: "loop.conf"), inputRoot: f.input)
       Issue.record("expected timeout")
     } catch let error as PinewindError {
-      #expect(error.message == "conf evaluation timed out")
+      guard case .incident(let document) = error else {
+        Issue.record("\(error)")
+        return
+      }
+      guard case .interpreter(.timedOut) = document.failure else {
+        Issue.record("\(error)")
+        return
+      }
     }
   }
 
@@ -853,9 +876,11 @@ struct ConfTests {
     await #expect {
       try await PlumImporter().evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
     } throws: { error in
-      guard let error = error as? PinewindError else { return false }
-      return error.code == .invalidConfiguration
-        && error.message.contains("/conf/stolen: Permission denied")
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .interpreter(.evaluationFailed(let detail)) = document.failure else {
+        return false
+      }
+      return detail.contains("/conf/stolen: Permission denied")
     }
     #expect(!FileManager.default.fileExists(atPath: f.input.appendingPathComponent("stolen").path))
     try f.write("escape.conf", "source /etc/passwd", in: f.input)
@@ -870,7 +895,13 @@ struct ConfTests {
     try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
     await #expect {
       try await PlumImporter().evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
-    } throws: { ($0 as? PinewindError)?.code == .resourceLimit }
+    } throws: {
+      if case .runtime(.interpreter(.budgetExceeded)) = $0 as? PinewindError {
+        return true
+      } else {
+        return false
+      }
+    }
   }
 }
 
@@ -907,7 +938,11 @@ struct LockTests {
     let changedSnapshot = try configurationSnapshot(changed)
     #expect {
       try ResolutionCodec.decode(bytes, snapshot: changedSnapshot)
-    } throws: { ($0 as? PinewindError)?.code == .needsResolution }
+    } throws: {
+      guard case .configuration(let document) = $0 as? PinewindError else { return false }
+      if case .lock(.declarationChanged) = document.failure { return true }
+      return false
+    }
   }
 
   @Test func workingTreesAndCorruptLocksFail() throws {
@@ -920,6 +955,10 @@ struct LockTests {
     let snapshot = try configurationSnapshot(ManifestDocument())
     #expect {
       try ResolutionCodec.decode(Data("not a lock".utf8), snapshot: snapshot)
-    } throws: { ($0 as? PinewindError)?.code == .incompatibleFormat }
+    } throws: { error in
+      guard case .configuration(let document) = error as? PinewindError else { return false }
+      if case .lock(.incompatible) = document.failure { return true }
+      return false
+    }
   }
 }
