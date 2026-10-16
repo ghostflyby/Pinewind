@@ -404,7 +404,7 @@ struct CompositionTests {
     #if os(Windows)
       try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
       try f.write("keep.txt", "keep", in: f.output)
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.validate(f.output) }
       #expect(try f.read("keep.txt") == "keep")
     #endif
   }
@@ -475,7 +475,7 @@ struct CompositionTests {
     @Test(arguments: ["https://example.com/output", "file:///C:/bad%00path"])
     func malformedJunctionPathsThrowTypedErrors(_ text: String) throws {
       let url = try #require(URL(string: text))
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.currentTarget(url) }
       let literal = FileManager.default.temporaryDirectory.appendingPathComponent(
         "pinewind-percent%00-" + UUID().uuidString)
       #expect(try WindowsDirectoryPublisher.currentTarget(literal) == nil)

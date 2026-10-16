@@ -508,7 +508,7 @@ struct WorkspaceTests {
       for path in [
         FilePath("C:relative"), FilePath("\\relative"), FilePath("\\\\server\\share\\file"),
       ] {
-        #expect(throws: PinewindError.self) { _ = try RelativePath(path) }
+        #expect(throws: FileSystemFailure.self) { _ = try RelativePath(path) }
       }
     #endif
   }
