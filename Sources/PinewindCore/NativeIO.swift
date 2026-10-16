@@ -59,6 +59,8 @@ enum NativeLock {
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.openLockFile(file) } catch let error as Errno {
       throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+    } catch let failure as FileSystemFailure {
+      throw failure
     } catch {
       throw PinewindError.wrap(error)
     }

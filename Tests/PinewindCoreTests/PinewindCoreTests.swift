@@ -486,7 +486,7 @@ struct CompositionTests {
       defer { f.remove() }
       let bytes = Data("keep".utf8)
       try bytes.write(to: f.output)
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.validate(f.output) }
       #expect(try Data(contentsOf: f.output) == bytes)
     }
 
