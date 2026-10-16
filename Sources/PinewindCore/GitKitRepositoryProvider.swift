@@ -61,7 +61,8 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
         if let cached = try Self.cached(identity, cacheRoot: cacheRoot) { return cached }
         let repository = cacheRoot.appending("repositories/" + key + ".git")
         let directory = Self.directory(identity, cacheRoot: cacheRoot)
-        let marker = FilePath(directory.string + ".complete")
+        let marker = directory.removingLastComponent().appending(
+          identity.commit.string + ".complete")
         let fm = FileManager.default
         try fm.createDirectory(
           at: repository.removingLastComponent(), withIntermediateDirectories: true)
@@ -101,7 +102,7 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
   }
   static func cached(_ identity: SourceIdentity, cacheRoot: FilePath) throws -> SourceSnapshot? {
     let directory = directory(identity, cacheRoot: cacheRoot)
-    let marker = FilePath(directory.string + ".complete")
+    let marker = directory.removingLastComponent().appending(identity.commit.string + ".complete")
     guard FileManager.default.fileExists(atPath: directory.string),
       let bytes = try? Data(contentsOf: marker),
       let record = try? PropertyListDecoder().decode(Completion.self, from: bytes),

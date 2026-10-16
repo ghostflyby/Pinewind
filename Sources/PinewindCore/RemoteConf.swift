@@ -25,7 +25,7 @@ public struct ImportLimits: Sendable {
 }
 
 protocol ConfResourceCapture: Sendable {
-  func ensure(_ virtualPath: String) async throws
+  func ensure(_ path: RelativePath) async throws
 }
 
 actor RemoteConfCapture: ConfResourceCapture {
@@ -41,13 +41,8 @@ actor RemoteConfCapture: ConfResourceCapture {
     self.store = store
     self.limits = limits
   }
-  func ensure(_ virtualPath: String) async throws {
+  func ensure(_ relative: RelativePath) async throws {
     try Task.checkCancellation()
-    let normalized = (virtualPath as NSString).standardizingPath
-    guard normalized.hasPrefix("/conf/") else {
-      throw FileSystemError.permissionDenied(virtualPath)
-    }
-    let relative = try RelativePath(String(normalized.dropFirst(6)))
     if pins[relative] != nil { return }
     let endpoint =
       relative.string == url.lastPathComponent
@@ -89,7 +84,7 @@ struct RemoteConfFileSystem: FileSystem {
       .notFound
     {}
     do {
-      try await capture.ensure(path)
+      try await capture.ensure(resourcePath(path))
       return try await mounted.metadata(path)
     } catch let error as PinewindError where error.code == .contentMissing { return nil }
   }
@@ -104,8 +99,19 @@ struct RemoteConfFileSystem: FileSystem {
     try await mounted.canonicalize(path, allowMissing: true)
   }
   func readData(_ path: String) async throws -> Data {
-    try await capture.ensure(path)
+    try await capture.ensure(resourcePath(path))
     return try await mounted.readData(path)
+  }
+  // SwiftBash exposes POSIX virtual paths as text even when the host is Windows.
+  private func resourcePath(_ text: String) throws -> RelativePath {
+    guard text.hasPrefix("/"), !text.contains("\0"), !text.contains("\\") else {
+      throw FileSystemError.permissionDenied(text)
+    }
+    let path = FilePath(text).lexicallyNormalized()
+    guard path.root == FilePath("/").root, path.components.first?.string == "conf" else {
+      throw FileSystemError.permissionDenied(text)
+    }
+    return try RelativePath(FilePath(root: nil, path.components.dropFirst()))
   }
   func openRead(_ path: String) async throws -> InputSource { .data(try await readData(path)) }
   func writeData(_ data: Data, to path: String, append: Bool) async throws {
@@ -166,12 +172,7 @@ actor LocalConfCapture: ConfResourceCapture {
     self.coordinator = coordinator
     self.limits = limits
   }
-  func ensure(_ virtualPath: String) async throws {
-    let normalized = (virtualPath as NSString).standardizingPath
-    guard normalized.hasPrefix("/conf/") else {
-      throw FileSystemError.permissionDenied(virtualPath)
-    }
-    let relative = try RelativePath(String(normalized.dropFirst(6)))
+  func ensure(_ relative: RelativePath) async throws {
     if captured.contains(relative) { return }
     let source = root.appendingPathComponent(relative.string)
     let destination = try SafePath.file(relative, in: directory)

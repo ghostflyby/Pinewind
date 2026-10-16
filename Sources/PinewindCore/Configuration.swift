@@ -14,7 +14,7 @@ public struct FileFilter: Hashable, Sendable {
     self.include = include
     self.exclude = exclude
   }
-  public func accepts(_ path: String) throws -> Bool {
+  public func accepts(_ path: RelativePath) throws -> Bool {
     let included = try include.map { try $0.contains { try Glob.matches($0, path: path) } } ?? true
     return try included && !(exclude.contains { try Glob.matches($0, path: path) })
   }
@@ -104,7 +104,10 @@ public struct PackageRequest: Hashable, Sendable {
     source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
   ) throws {
-    let recipePath = try RelativePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml")
+    if let recipe, recipe.contains("\0") || recipe.contains("\\") {
+      throw PinewindError(.invalidPath, "recipe names must use portable path syntax")
+    }
+    let recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
     try filter.validate()
     switch source {
     case .git(let repository):
@@ -139,11 +142,23 @@ public struct PackageRequest: Hashable, Sendable {
 public struct ConfImport: Hashable, Sendable {
   public let source: String
   public let variables: [String: String]
+  let localPath: RelativePath?
   public init(source: String, variables: [String: String] = [:]) throws {
     guard !source.isEmpty, variables["root_dir"] == nil else {
       throw PinewindError("root_dir is reserved and an import source is required")
     }
-    self.source = source
+    guard !source.contains("\0") else {
+      throw PinewindError(.invalidPath, "conf sources must not contain NUL")
+    }
+    if source.hasPrefix(":") || source.contains("://") {
+      localPath = nil
+    } else {
+      guard !source.contains("\\") else {
+        throw PinewindError(.invalidPath, "local conf sources must use portable path syntax")
+      }
+      localPath = try RelativePath(FilePath(source))
+    }
+    self.source = localPath?.string ?? source
     self.variables = variables
   }
 }

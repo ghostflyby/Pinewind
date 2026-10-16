@@ -481,10 +481,10 @@ struct WorkspaceTests {
       }
     }
     for path in [
-      "", "/root", "../outside", "a/../../outside", ".", "a/..", "a\\b", "C:relative",
-      "C:/../outside", "a\0b",
+      "", "/root", "../outside", "a/../../outside", ".", "a/..", "C:relative",
+      "C:/../outside",
     ] {
-      #expect(throws: PinewindError.self) { _ = try RelativePath(path) }
+      #expect(throws: PinewindError.self) { _ = try RelativePath(FilePath(path)) }
     }
     #expect(try RelativePath("词典/emoji 😀.txt").string == "词典/emoji 😀.txt")
     let normalized = try RelativePath(FilePath("a//./nested/../emoji.txt/"))

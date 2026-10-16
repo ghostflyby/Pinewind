@@ -78,7 +78,7 @@ struct Recipe {
         throw reader.error("download_files requires HTTPS resources")
       }
       let path = parts.count == 2 ? parts[0] : url.lastPathComponent
-      return try Download(url: url, path: RelativePath(path))
+      return try Download(url: url, path: reader.relativePath(path))
     }
     guard Set(resources.map(\.path)).count == resources.count else {
       throw reader.error("download_files targets must be unique")
@@ -96,7 +96,7 @@ struct Recipe {
       try root["patch_files"].map { node in
         try reader.mapping(node).sorted { $0.key < $1.key }.map { target, body in
           let expanded = try Template.expand(target, options: request.options, declared: declared)
-          let target = try RelativePath(expanded)
+          let target = try reader.relativePath(expanded)
           guard patchTargets.insert(target).inserted else {
             throw reader.error("patch_files targets must be unique after normalization")
           }

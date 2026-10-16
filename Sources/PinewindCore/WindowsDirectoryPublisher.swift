@@ -15,8 +15,11 @@
     /// Resolve parent aliases and expand the entry's short name without following
     /// the final managed junction into its replaceable generation.
     static func publicationPath(_ output: FilePath) throws -> FilePath {
-      let parent = try resolvedURL(output.removingLastComponent())
-      let entry = parent.appending(output.lastComponent?.string ?? "")
+      guard let component = output.lastComponent else {
+        throw PinewindError(.invalidPath, "composition output must not be a filesystem root")
+      }
+      let parent = try resolvedPath(output.removingLastComponent())
+      let entry = parent.appending(component)
       guard FileManager.default.fileExists(atPath: entry.string) else { return entry }
       var buffer = [WCHAR](repeating: 0, count: 32_768)
       let count = entry.withPlatformString {
@@ -25,7 +28,7 @@
       guard count > 0, Int(count) < buffer.count else {
         throw PinewindError(.invalidPath, "cannot resolve publication entry", source: entry.string)
       }
-      return FilePath(String(decoding: buffer.prefix(Int(count)), as: UTF16.self))
+      return FilePath(platformString: buffer)
     }
 
     static func storage(for output: FilePath) -> FilePath {
@@ -36,7 +39,7 @@
     static func validate(_ output: FilePath) throws {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
-        let target = try resolvedURL(target)
+        let target = try resolvedPath(target)
         guard
           try canonicalPath(target.removingLastComponent())
             == canonicalPath(storage(for: output)),
@@ -62,7 +65,7 @@
         try fm.createDirectory(at: link, withIntermediateDirectories: false)
         defer {
           if let path = try? windowsNativePath(link) {
-            _ = path.withCString(encodedAs: UTF16.self) { RemoveDirectoryW($0) }
+            _ = path.withPlatformString { RemoveDirectoryW($0) }
           }
         }
         try redirect(link, to: candidate)
@@ -92,7 +95,7 @@
     private static func withHandle<T>(
       _ url: FilePath, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
     ) throws -> T {
-      let handle = try windowsNativePath(url).withCString(encodedAs: UTF16.self) {
+      let handle = try windowsNativePath(url).withPlatformString {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
           DWORD(OPEN_EXISTING),
@@ -108,19 +111,19 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: FilePath) throws -> String {
-      try resolvedURL(url).string.replacingOccurrences(of: "\\", with: "/").lowercased()
+    static func canonicalPath(_ url: FilePath) throws -> FilePath {
+      FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedURL(_ url: FilePath) throws -> FilePath {
+    static func resolvedPath(_ url: FilePath) throws -> FilePath {
       var ancestor = url
-      var missing: [String] = []
+      var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
-        guard parent.string != ancestor.string else {
+        guard parent != ancestor, let component = ancestor.lastComponent else {
           throw PinewindError("cannot resolve composition path")
         }
-        missing.append(ancestor.lastComponent?.string ?? "")
+        missing.append(component)
         ancestor = parent
       }
       var resolved = try withHandle(ancestor, access: 0, following: true) { handle in
@@ -129,17 +132,17 @@
         guard count > 0, Int(count) < buffer.count else {
           throw PinewindError("cannot resolve composition path (Windows error \(GetLastError()))")
         }
-        let path = FilePath(String(decoding: buffer.prefix(Int(count)), as: UTF16.self))
-        return FilePath(try windowsNativePath(path))
+        let path = FilePath(platformString: buffer)
+        return try windowsNativePath(path)
       }
       for component in missing.reversed() { resolved.append(component) }
       let normalized = resolved.lexicallyNormalized()
-      if normalized != resolved { return try resolvedURL(normalized) }
+      if normalized != resolved { return try resolvedPath(normalized) }
       return resolved
     }
 
     static func currentTarget(_ output: FilePath) throws -> FilePath? {
-      let attributes = try windowsNativePath(output).withCString(encodedAs: UTF16.self) {
+      let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }
       if attributes == DWORD(INVALID_FILE_ATTRIBUTES) {
@@ -178,7 +181,7 @@
     }
 
     static func redirect(_ output: FilePath, to candidate: FilePath) throws {
-      let printName = try windowsNativePath(candidate)
+      let printName = try windowsNativePath(candidate).string
       let substituteName =
         printName.hasPrefix("\\\\")
         ? "\\??\\UNC\\" + printName.dropFirst(2) : "\\??\\" + printName

@@ -8,7 +8,7 @@ import Foundation
 import SystemPackage
 
 #if os(Windows)
-  func windowsNativePath(_ url: FilePath) throws -> String {
+  func windowsNativePath(_ url: FilePath) throws -> FilePath {
     guard var path = String(validating: url) else {
       throw PinewindError(.invalidPath, "unrepresentable Windows path")
     }
@@ -17,7 +17,7 @@ import SystemPackage
     } else if path.hasPrefix("\\\\?\\") {
       path.removeFirst(4)
     }
-    return path
+    return FilePath(path)
   }
 
 #endif

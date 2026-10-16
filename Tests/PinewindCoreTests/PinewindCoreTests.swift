@@ -697,7 +697,7 @@ struct CompositionTests {
     let plan = try f.plan(entries)
     #expect(plan.paths.count == 2)
     for (index, name) in names.enumerated() {
-      let path = try RelativePath(name + ".custom.yaml")
+      let path = try RelativePath(FilePath(name + ".custom.yaml"))
       #expect(plan.contributions(for: path).map(\.entryIndex) == [index])
     }
   }
@@ -709,6 +709,16 @@ struct CompositionTests {
     #expect(plan.paths.map(\.string) == ["target.custom.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("target.custom.yaml").contains("schema: normalized"))
+  }
+
+  @Test(arguments: ["../escape", "/absolute", "bad\\name", "bad\0name"])
+  func recipeTargetTextCannotLoseOrReinterpretInvalidCharacters(_ target: String) throws {
+    let f = try Fixture("LiteralOptions")
+    defer { f.remove() }
+    let request = try PackageRequest(url: f.a, recipe: "customize", options: ["schema": target])
+    #expect {
+      _ = try f.plan([.package(request)])
+    } throws: { ($0 as? PinewindError)?.code == .invalidPath }
   }
 
   @Test(arguments: [
@@ -743,7 +753,7 @@ struct CompositionTests {
       in: f.a)
     try f.write(path, "abc", in: f.a)
     let resource = try PinnedResource(
-      url: url, path: path,
+      url: url, path: RelativePath(FilePath(path)),
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     let prepared = try PreparedPackage(
       request: request, directory: f.a, commit: CommitID(String(repeating: "a", count: 40)),

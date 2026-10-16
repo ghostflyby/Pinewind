@@ -11,12 +11,12 @@ enum SafePath {
   static func file(_ path: RelativePath, in root: FilePath) throws -> FilePath {
     let rootIdentity = try canonical(root)
     #if os(Windows)
-      let canonicalRoot = try WindowsDirectoryPublisher.resolvedURL(root)
+      let canonicalRoot = try WindowsDirectoryPublisher.resolvedPath(root)
     #else
-      let canonicalRoot = FilePath(rootIdentity)
+      let canonicalRoot = rootIdentity
     #endif
     let candidate = canonicalRoot.appending(path.filePath.components)
-    guard try canonical(candidate).hasPrefix(prefix(rootIdentity)) else {
+    guard try canonical(candidate).starts(with: rootIdentity) else {
       throw PinewindError("path escapes its source root: \(path)")
     }
     return candidate
@@ -34,7 +34,7 @@ enum SafePath {
     let out = try canonical(output)
     for root in roots {
       let path = try canonical(root)
-      guard path != out, !out.hasPrefix(prefix(path)), !path.hasPrefix(prefix(out)) else {
+      guard !out.starts(with: path), !path.starts(with: out) else {
         throw PinewindError("composition root must not overlap any input source")
       }
     }
@@ -43,25 +43,21 @@ enum SafePath {
   static func overlaps(_ first: FilePath, _ second: FilePath) throws -> Bool {
     let a = try canonical(first)
     let b = try canonical(second)
-    return a == b || a.hasPrefix(prefix(b)) || b.hasPrefix(prefix(a))
+    return a.starts(with: b) || b.starts(with: a)
   }
 
-  private static func prefix(_ path: String) -> String {
-    path.hasSuffix("/") ? path : path + "/"
-  }
-
-  static func canonical(_ url: FilePath) throws -> String {
+  static func canonical(_ url: FilePath) throws -> FilePath {
     #if os(Windows)
       return try WindowsDirectoryPublisher.canonicalPath(url)
     #else
       var ancestor = url
-      var missing: [String] = []
+      var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
         guard parent != ancestor, let component = ancestor.lastComponent else {
           throw PinewindError(.invalidPath, "cannot resolve filesystem path", source: url.string)
         }
-        missing.append(component.string)
+        missing.append(component)
         ancestor = parent
       }
       var resolved = try NativePath.from(
@@ -69,13 +65,13 @@ enum SafePath {
       for component in missing.reversed() { resolved.append(component) }
       let normalized = resolved.lexicallyNormalized()
       if normalized != resolved { return try canonical(normalized) }
-      return resolved.string
+      return resolved
     #endif
   }
 
   static func files(in root: FilePath) throws -> [RelativePath] {
     #if os(Windows)
-      let root = try WindowsDirectoryPublisher.resolvedURL(root)
+      let root = try WindowsDirectoryPublisher.resolvedPath(root)
     #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]

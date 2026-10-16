@@ -21,8 +21,8 @@ public enum Glob {
     }
   }
 
-  public static func matches(_ pattern: String, path: String) throws -> Bool {
-    try compile(pattern).match(path)
+  public static func matches(_ pattern: String, path: RelativePath) throws -> Bool {
+    try compile(pattern).match(path.string)
   }
 
   // Keep Pinewind's path contract explicit rather than adopting library defaults

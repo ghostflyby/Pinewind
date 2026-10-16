@@ -35,7 +35,7 @@ struct Composer {
     #if os(Windows)
       let outputRoot = try WindowsDirectoryPublisher.publicationPath(requestedOutput)
     #else
-      let outputRoot = FilePath(try SafePath.canonical(requestedOutput))
+      let outputRoot = try SafePath.canonical(requestedOutput)
     #endif
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])

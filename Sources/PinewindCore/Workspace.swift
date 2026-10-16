@@ -467,7 +467,7 @@ public actor Workspace {
     let cache = locations.cacheRoot
     let key = GitKitRepositoryProvider.cacheKey(try SourceIdentity.normalize(identity.url))
     let target = cache.appending("sources/" + key + "/" + identity.commit.string)
-    let marker = FilePath(target.string + ".complete")
+    let marker = target.removingLastComponent().appending(identity.commit.string + ".complete")
     let expected = Data(
       (try SourceIdentity.normalize(identity.url).absoluteString + "\n" + identity.commit.string)
         .utf8)
@@ -552,7 +552,9 @@ public actor Workspace {
             .invalidConfiguration, "conf sources require HTTPS or a relative local path")
         }
         let manifest = try snapshot.locations.configuration.manifest.url
-        let path = try RelativePath(request.source)
+        guard let path = request.localPath else {
+          throw PinewindError(.invalidPath, "local conf source requires a relative path")
+        }
         let source = try SafePath.file(
           path, in: NativePath.from(manifest.deletingLastPathComponent()))
         let view = try await BlockingIO.run {
@@ -569,7 +571,7 @@ public actor Workspace {
             .init(virtual: "/conf", host: source.removingLastComponent().string, readOnly: true)
           ], backing: RealFileSystem())
         descriptors = try await importer.evaluate(
-          file: view.directory.appending(source.lastComponent!.string),
+          file: view.directory.appending(source.lastComponent!),
           resourceRoot: view.directory,
           variables: request.variables,
           fileSystem: RemoteConfFileSystem(

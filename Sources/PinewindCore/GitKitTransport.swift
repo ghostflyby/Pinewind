@@ -163,7 +163,7 @@ struct GitKitTransport: GitTransport {
       }
       let path = prefix + component
       // Tree entries are individual names, not expressions to normalize before checkout.
-      let relative = try RelativePath(component)
+      let relative = try RelativePath(FilePath(component))
       guard relative.filePath.components.count == 1,
         relative.string.utf8.elementsEqual(component.utf8)
       else {

@@ -25,14 +25,6 @@ public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConverti
     filePath = normalized
   }
 
-  public init(_ string: String) throws {
-    guard !string.contains("\0"), !string.contains("\\") else {
-      throw PinewindError(
-        .invalidPath, "portable resource paths must not contain NUL or backslashes")
-    }
-    try self.init(FilePath(string))
-  }
-
   /// Platform-independent spelling used in documents and inspection results.
   public var string: String { filePath.components.map(\.string).joined(separator: "/") }
   public var description: String { string }

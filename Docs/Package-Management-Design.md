@@ -32,7 +32,9 @@
 
 绝对路径转换只发生在公开执行入口及公开请求/阶段值的初始化入口。工作区通过 `relativeTo` 指定基准;省略时在初始化入口捕获当前工作目录。基准自身也可相对当前目录解析。工作区建立后保存固定的绝对基准和位置,后续执行不读取当前目录。独立取包、下载、SourceSnapshot 和本地 PackageRequest 同样在进入异步工作前或初始化时完成相对位置转换;后两者可显式指定基准。内部函数使用这些结果,不再重复检查绝对性。Windows 的盘符相对和当前盘根相对形式拒绝。`~` 和环境变量不作 shell 展开。
 
-`RelativePath` 是 `FilePath` 的只读轻量包装。初始化委托 FilePath 归一化分隔符并消解 `.`、可消解的 `..`;拒绝根路径、空结果、剩余的父目录组件以及无法便携编码的组件。`filePath` 暴露原生路径;`string` 从组件生成统一 `/` 表示,用于锁和检查结果。String 初始化入口接收便携文档表示,拒绝 NUL 和反斜杠;FilePath 初始化入口按宿主语法解析原生分隔符。冒号和组件内的反斜杠仍被拒绝,避免跨平台解释歧义。recipe 下载和补丁目标在求值后转换一次,后续阶段直接使用包装值,并按规范化身份检查重复目标。文件枚举直接从原生组件构造 RelativePath,规划、发布和变更列表持续保留该类型,不在中间阶段退回字符串再校验。Git 后端额外校验原始树条目是未经改写的单个 UTF-8 文件名。显式 recipe 名称及其文件路径在 PackageRequest 构造时一起归一化,后续加载和 Rx 比较使用同一结果。glob 与 recipe 原始表达式继续是 String。词法归一化不替代符号链接、junction 和目录重叠检查。
+`RelativePath` 是 `FilePath` 的只读轻量包装。初始化委托 FilePath 归一化分隔符并消解 `.`、可消解的 `..`;拒绝根路径、空结果、剩余的父目录组件以及无法便携编码的组件。`filePath` 暴露原生路径;`string` 从组件生成统一 `/` 表示,用于锁和检查结果。唯一初始化入口接收 FilePath,按宿主语法解析原生分隔符;不提供 String 重载。YAML、锁及 conf 选择器在各自的文本边界先拒绝 NUL 和反斜杠,再构造原生路径,防止 FilePath 的字符串构造提前丢弃或改写无效输入。冒号和组件内的反斜杠仍被拒绝,避免跨平台解释歧义。recipe 下载和补丁目标在求值后转换一次,后续阶段直接使用包装值,并按规范化身份检查重复目标。文件枚举直接从原生组件构造 RelativePath,规划、发布和变更列表持续保留该类型,不在中间阶段退回字符串再校验。Git 后端额外校验原始树条目是未经改写的单个 UTF-8 文件名。显式 recipe 名称及其文件路径在 PackageRequest 构造时一起归一化,后续加载和 Rx 比较使用同一结果。glob 与 recipe 原始表达式继续是 String。词法归一化不替代符号链接、junction 和目录重叠检查。
+
+FileFilter.accepts 和 Glob.matches 的候选路径只接收 RelativePath,glob 表达式仍为 String。conf 捕获接口同样接收 RelativePath,SwiftBash 的 POSIX 文本路径只在其 FileSystem 适配器中转换。canonical/overlap 检查以文件系统解析后的 FilePath 及组件前缀工作,不在内部传递路径字符串。Windows 原生路径也直接通过 withPlatformString 交给 WinSDK,只有 junction 编码及大小写折叠保留必要的文本转换。
 
 词法归一化不是符号链接解析。普通来源文件树不接受符号链接,安全路径检查防止越出来源根。Windows 使用实际目录句柄解析 junction/短名/大小写别名,输出受管 junction 按发布规则单独处理。
 

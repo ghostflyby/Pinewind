@@ -46,11 +46,6 @@ func fixtureURL(_ path: String) throws -> URL {
 func fixtureText(_ path: String) throws -> String {
   try String(contentsOf: fixtureURL(path), encoding: .utf8)
 }
-extension PinnedResource {
-  init(url: URL, path: String, sha256: String) throws {
-    try self.init(url: url, path: RelativePath(path), sha256: sha256)
-  }
-}
 extension PreparedPackage {
   init(
     request: PackageRequest, directory: URL, commit: CommitID? = nil,

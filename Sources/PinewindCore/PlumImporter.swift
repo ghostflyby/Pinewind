@@ -35,10 +35,10 @@ struct PlumImporter: Sendable {
     if request.source.hasPrefix(":") {
       return try BuiltinPackageLists.descriptors(for: request.source)
     }
-    guard !request.source.contains("://") else {
+    guard let path = request.localPath else {
       throw PinewindError("remote conf requires the HTTP resource preparation layer")
     }
-    let file = try SafePath.file(RelativePath(request.source), in: inputRoot)
+    let file = try SafePath.file(path, in: inputRoot)
     return try await evaluate(
       file: file, resourceRoot: file.removingLastComponent(), variables: request.variables)
   }

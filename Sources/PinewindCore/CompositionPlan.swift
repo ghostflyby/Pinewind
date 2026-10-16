@@ -119,7 +119,7 @@ struct CompositionPlanner: Sendable {
       switch entry {
       case .userFiles(let filter):
         for path in try snapshot.files(in: inputRoot) where !Self.isMetadata(path) {
-          if try filter.accepts(path.string) {
+          if try filter.accepts(path) {
             let file = try SafePath.file(path, in: inputRoot)
             if try excluded.contains(SafePath.canonical(file)) { continue }
             try add(
@@ -213,7 +213,7 @@ struct CompositionPlanner: Sendable {
         }
         var installed = Set<RelativePath>()
         for (path, file) in selected where installed.insert(path).inserted {
-          if try request.filter.accepts(path.string) {
+          if try request.filter.accepts(path) {
             try add(
               path, source: file.foundationURL, index: index,
               action: .write(snapshot.capture(file))
@@ -221,7 +221,7 @@ struct CompositionPlanner: Sendable {
           }
         }
         for patch in recipe?.patches ?? [] {
-          if try request.filter.accepts(patch.target.string) {
+          if try request.filter.accepts(patch.target) {
             add(
               patch.target, source: request.url, index: index,
               action: .patch(rx: patch.rx, body: patch.body))
@@ -284,7 +284,7 @@ private final class PlanningSnapshot {
   init(root: FilePath) throws { storage = try CompositionSnapshot(root: root) }
 
   func files(in root: FilePath) throws -> [RelativePath] {
-    let key = FilePath(try SafePath.canonical(root))
+    let key = try SafePath.canonical(root)
     if let cached = directoryFiles[key] { return cached }
     let files = try SafePath.files(in: root)
     directoryFiles[key] = files
@@ -296,7 +296,7 @@ private final class PlanningSnapshot {
   }
 
   func capture(_ file: FilePath) throws -> FilePath {
-    let key = FilePath(try SafePath.canonical(file))
+    let key = try SafePath.canonical(file)
     if let cached = captured[key] { return cached }
     let destination = storage.directory.appending(String(captured.count))
     try FileManager.default.copyItem(at: key, to: destination)

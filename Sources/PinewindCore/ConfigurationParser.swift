@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Yams
 
 /// Decode the node graph instead of Any/Codable coercions: quoted string options,
@@ -54,6 +55,14 @@ struct YAMLReader {
 
   func stringMap(_ node: Node) throws -> [String: String] {
     try mapping(node).mapValues(string)
+  }
+
+  func relativePath(_ text: String) throws -> RelativePath {
+    guard !text.contains("\0"), !text.contains("\\") else {
+      throw PinewindError(
+        .invalidPath, "document paths must use portable path syntax", source: source)
+    }
+    return try RelativePath(FilePath(text))
   }
 
   func version(_ fields: [String: Node]) throws {

@@ -269,7 +269,10 @@ enum ResolutionCodec {
       guard let url = URL(string: url) else {
         throw PinewindError(.incompatibleFormat, "invalid resource URL")
       }
-      return try PinnedResource(url: url, path: RelativePath(path), sha256: sha256)
+      guard !path.contains("\0"), !path.contains("\\") else {
+        throw PinewindError(.incompatibleFormat, "invalid portable resource path")
+      }
+      return try PinnedResource(url: url, path: RelativePath(FilePath(path)), sha256: sha256)
     }
   }
   struct Package: Codable {
