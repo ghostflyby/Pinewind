@@ -682,13 +682,42 @@ struct CompositionTests {
     #expect(try f.plan([.package(filtered)]).paths.isEmpty)
   }
 
-  @Test(arguments: ["https://example.org/extra.txt", "renamed.txt::https://example.org/extra.txt"])
-  func validatesPinnedResourceBytes(_ descriptor: String) async throws {
+  @Test func normalizedPatchTargetsAppearOnceInThePlanAndOutput() async throws {
+    let f = try Fixture("NormalizedPaths")
+    defer { f.remove() }
+    let plan = try f.plan([.package(f.request(f.a))])
+    #expect(plan.paths.map(\.string) == ["target.custom.yaml"])
+    _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+    #expect(try f.read("target.custom.yaml").contains("schema: normalized"))
+  }
+
+  @Test(arguments: [
+    "download_files: [nested/../same.txt::https://example.org/first, same.txt::https://example.org/second]",
+    "patch_files: {nested/../same.yaml: [{value: first}], same.yaml: [{value: second}]}",
+  ])
+  func normalizedRecipeAliasesCannotDeclareTheSameTargetTwice(_ recipe: String) throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try f.write("recipe.yaml", recipe, in: f.a)
+    #expect {
+      _ = try Recipe.load(
+        request: f.request(f.a), directory: native(f.a), read: { try Data(contentsOf: $0) })
+    } throws: {
+      guard let error = $0 as? PinewindError else { return false }
+      return error.code == .invalidConfiguration && error.message.contains("targets must be unique")
+    }
+  }
+
+  @Test(arguments: [
+    ("https://example.org/extra.txt", "extra.txt"),
+    ("renamed.txt::https://example.org/extra.txt", "renamed.txt"),
+    ("nested/../extra.txt::https://example.org/extra.txt", "extra.txt"),
+  ])
+  func validatesPinnedResourceBytes(_ descriptor: String, _ path: String) async throws {
     let f = try Fixture()
     defer { f.remove() }
     let request = try PackageRequest(url: #require(URL(string: "https://github.com/rime/resource")))
     let url = try #require(URL(string: "https://example.org/extra.txt"))
-    let path = descriptor.contains("::") ? "renamed.txt" : "extra.txt"
     try f.write(
       "recipe.yaml", "download_files: [\"\(descriptor)\"]\ninstall_files: [\(path)]",
       in: f.a)

@@ -1,0 +1,4 @@
+install_files: []
+patch_files:
+  scratch/../target.custom.yaml:
+    - schema: normalized

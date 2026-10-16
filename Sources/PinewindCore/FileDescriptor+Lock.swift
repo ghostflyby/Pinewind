@@ -17,7 +17,6 @@ extension FileDescriptor {
   /// Opens a stable, regular lock file. Closing the descriptor releases its lock;
   /// the file itself is retained so every contender locks the same file identity.
   static func openLockFile(_ path: FilePath) throws -> Self {
-    try NativePath.requireAbsolute(path)
     #if os(Windows)
       // System's open() always enables FILE_SHARE_DELETE. Lock files must not be
       // replaced while any contender holds a descriptor, including while waiting.

@@ -9,7 +9,6 @@ import SystemPackage
 
 #if os(Windows)
   func windowsNativePath(_ url: FilePath) throws -> String {
-    try NativePath.requireAbsolute(url)
     guard var path = String(validating: url) else {
       throw PinewindError(.invalidPath, "unrepresentable Windows path")
     }

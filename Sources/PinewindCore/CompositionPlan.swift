@@ -36,7 +36,6 @@ struct PreparedPackage: Sendable {
     request: PackageRequest, directory: FilePath, commit: String? = nil,
     resources: [PinnedResource] = []
   ) throws {
-    try NativePath.requireAbsolute(directory)
     if !request.url.isFileURL {
       guard let commit else { throw PinewindError("remote prepared source requires a commit") }
       _ = try SourceIdentity(url: request.url, commit: commit)
@@ -111,10 +110,9 @@ struct CompositionPlanner: Sendable {
     }
     try SafePath.validateRoots(
       input: inputRoot, output: snapshot.storage.directory, sources: available.map(\.directory))
-    func add(_ path: String, source: URL, index: Int, action: CompositionOperation.Action) throws {
-      try SafePath.validate(path)
+    func add(_ path: RelativePath, source: URL, index: Int, action: CompositionOperation.Action) {
       // Preserve all contributions, including overwritten files, for uninstall/reorder.
-      files[path, default: []].append(
+      files[path.string, default: []].append(
         CompositionOperation(entryIndex: index, source: source, action: action))
     }
     let excluded = try Set(excluding.map { try SafePath.canonical($0) })
@@ -127,7 +125,8 @@ struct CompositionPlanner: Sendable {
             let file = try SafePath.file(path, in: inputRoot)
             if try excluded.contains(SafePath.canonical(file)) { continue }
             try add(
-              path, source: file.foundationURL, index: index, action: .write(snapshot.capture(file))
+              RelativePath(path), source: file.foundationURL, index: index,
+              action: .write(snapshot.capture(file))
             )
           }
         }
@@ -152,7 +151,7 @@ struct CompositionPlanner: Sendable {
         for download in recipe?.downloads ?? [] {
           guard
             let pinned = prepared.resources.first(where: {
-              $0.url == download.url && $0.path.string == download.path
+              $0.url == download.url && $0.path == download.path
             })
           else {
             throw PinewindError(
@@ -216,13 +215,14 @@ struct CompositionPlanner: Sendable {
         for (path, file) in selected where installed.insert(path).inserted {
           if try request.filter.accepts(path) {
             try add(
-              path, source: file.foundationURL, index: index, action: .write(snapshot.capture(file))
+              RelativePath(path), source: file.foundationURL, index: index,
+              action: .write(snapshot.capture(file))
             )
           }
         }
         for patch in recipe?.patches ?? [] {
-          if try request.filter.accepts(patch.target) {
-            try add(
+          if try request.filter.accepts(patch.target.string) {
+            add(
               patch.target, source: request.url, index: index,
               action: .patch(rx: patch.rx, body: patch.body))
           }

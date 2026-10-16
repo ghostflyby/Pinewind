@@ -17,10 +17,9 @@ public protocol ResourceDownloader: Sendable {
 public struct SourceSnapshot: Sendable {
   public let identity: SourceIdentity
   public let directory: FilePath
-  public init(identity: SourceIdentity, directory: FilePath) throws {
-    try NativePath.requireAbsolute(directory)
+  public init(identity: SourceIdentity, directory: FilePath, relativeTo: FilePath? = nil) throws {
     self.identity = identity
-    self.directory = directory
+    self.directory = try NativePath.absolute(directory, relativeTo: relativeTo)
   }
 }
 public struct WorkspaceServices: Sendable {

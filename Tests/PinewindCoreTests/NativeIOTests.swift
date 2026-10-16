@@ -20,7 +20,7 @@ struct NativeIOTests {
       }
       let endpoint = URL(string: "file://server/share/package")!
       let path = try NativePath.from(endpoint)
-      try NativePath.requireAbsolute(path)
+      #expect(path.isAbsolute)
       #expect(try SourceIdentity.normalize(endpoint).host == "server")
       #expect(try NativePath.from(path.foundationURL) == path)
     }
@@ -108,11 +108,6 @@ struct NativeIOTests {
   }
 
   @Test func chunkedFileChecksPreserveBinaryBytesAndDetectTailChanges() throws {
-    #expect {
-      _ = try SnapshotFiles.sha256("relative-file")
-    } throws: {
-      ($0 as? PinewindError)?.code == .invalidPath
-    }
     let root = native(
       FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
     defer { try? FileManager.default.removeItem(at: root) }

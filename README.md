@@ -37,7 +37,7 @@ let workspace = try await Workspace.open(locations: locations)
 
 `manifest`、`localOverrides`、`lock` 和用户文件树可以位于不同目录或卷,文件名也由调用方决定。`localOverrides: nil` 禁用本地覆写。用户文件树不得与状态或缓存重叠,状态与缓存也不得互相包含。配置文件不得放入受管状态或缓存。
 
-`stateRoot`、`cacheRoot`、Git 本地仓库、源码快照和组合目标必须是 `SystemPackage.FilePath`,不接受 `URL`。相对位置需要显式 `relativeTo: FilePath`,工作区固定该基准,不读取进程当前目录。路径不展开 `~` 或环境变量。
+`stateRoot`、`cacheRoot`、Git 本地仓库、源码快照和组合目标必须是 `SystemPackage.FilePath`,不接受 `URL`。公开入口将相对位置转换为绝对路径。工作区可指定 `relativeTo: FilePath`;省略时在初始化入口捕获当前工作目录并固定该基准,后续执行不再读取当前目录。独立调用取包、下载、`SourceSnapshot` 或本地 `PackageRequest` 时,相对位置同样在公开入口转换。路径不展开 `~` 或环境变量。
 
 首次使用远程条目或共享声明改变后,显式解析:
 
@@ -58,7 +58,7 @@ let result = try await workspace.compose(to: outputPath)
 
 需要补齐缓存时使用 `fetchAndCompose(to:)`;它仅下载锁定内容,不自动 resolve/update 或修改锁。也可用 `cachedInputs()`、`plan(_:)`、`compose(_:to:)` 分阶段执行。纯用户文件与本地包无需先生成锁。缺少清单时默认只包含用户文件,显式空 `order` 则产生空组合。
 
-`CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,使用 `.string` 读取统一 `/` 分隔的表示。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
+`CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
 Windows 的输出目录必须不存在、为空或为 Pinewind 管理的 junction。所有平台均要求所在文件系统支持对应的原子发布与锁操作;不支持时明确失败,保留旧输出。
 

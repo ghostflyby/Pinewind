@@ -101,15 +101,19 @@ public struct PackageRequest: Hashable, Sendable {
 
   public init(
     source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
-    filter: FileFilter = FileFilter()
+    filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
   ) throws {
     if let recipe { try SafePath.validate(recipe + ".recipe.yaml") }
     try filter.validate()
     switch source {
-    case .git(let repository): self.url = repository.url
-    case .directory(let location): self.url = try location.url
+    case .git(let repository):
+      self.url = repository.url
+      self.source = source
+    case .directory(let location):
+      let location = try location.resolved(relativeTo: relativeTo)
+      self.url = try location.url
+      self.source = .directory(location)
     }
-    self.source = source
     self.recipe = recipe
     self.options = options
     self.filter = filter

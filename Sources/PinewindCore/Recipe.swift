@@ -10,13 +10,13 @@ import Yams
 
 struct Recipe {
   struct Patch {
-    let target: String
+    let target: RelativePath
     let rx: String
     let body: String
   }
   struct Download {
     let url: URL
-    let path: String
+    let path: RelativePath
   }
   let patterns: [String]?
   let patches: [Patch]
@@ -79,8 +79,7 @@ struct Recipe {
         throw reader.error("download_files requires HTTPS resources")
       }
       let path = parts.count == 2 ? parts[0] : url.lastPathComponent
-      try SafePath.validate(path)
-      return Download(url: url, path: path)
+      return try Download(url: url, path: RelativePath(path))
     }
     guard Set(resources.map(\.path)).count == resources.count else {
       throw reader.error("download_files targets must be unique")
@@ -93,11 +92,15 @@ struct Recipe {
     guard !rx.contains("\n"), !rx.contains("\r") else {
       throw reader.error("Rx identity cannot contain newlines")
     }
+    var patchTargets = Set<RelativePath>()
     let patches: [Patch] =
       try root["patch_files"].map { node in
         try reader.mapping(node).sorted { $0.key < $1.key }.map { target, body in
           let expanded = try Template.expand(target, options: request.options, declared: declared)
-          try SafePath.validate(expanded)
+          let target = try RelativePath(expanded)
+          guard patchTargets.insert(target).inserted else {
+            throw reader.error("patch_files targets must be unique after normalization")
+          }
           guard body.sequence != nil else {
             throw reader.error("patch body must be a YAML sequence", at: body)
           }
@@ -108,7 +111,7 @@ struct Recipe {
           guard let parsed = try compose(yaml: substituted), parsed.sequence != nil else {
             throw reader.error("expanded patch body must be a YAML sequence")
           }
-          return Patch(target: expanded, rx: rx, body: substituted)
+          return Patch(target: target, rx: rx, body: substituted)
         }
       } ?? []
     return Recipe(patterns: patterns, patches: patches, downloads: resources)

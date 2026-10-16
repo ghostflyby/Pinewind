@@ -53,9 +53,9 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
   public func prepareSource(_ identity: SourceIdentity, cacheRoot: FilePath) async throws
     -> SourceSnapshot
   {
+    let cacheRoot = try NativePath.absolute(cacheRoot)
     let transport = transport
     return try await BlockingIO.run {
-      try NativePath.requireAbsolute(cacheRoot)
       let key = Self.cacheKey(identity.url)
       return try NativeLock.withLock(cacheRoot.appending("locks/" + key + ".lock")) {
         if let cached = try Self.cached(identity, cacheRoot: cacheRoot) { return cached }
@@ -150,7 +150,7 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     guard url.scheme?.lowercased() == "https", url.host != nil else {
       throw PinewindError(.invalidConfiguration, "download resources require HTTPS")
     }
-    try NativePath.requireAbsolute(destination)
+    let destination = try NativePath.absolute(destination)
     try Task.checkCancellation()
     let temporary: URL
     let response: URLResponse

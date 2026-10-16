@@ -188,12 +188,27 @@ struct WorkspaceTests {
   @Test func explicitRelativeBaseAndDisabledOverrides() async throws {
     let f = try Fixture(local: false)
     defer { f.remove() }
-    #expect(throws: PinewindError.self) {
-      _ = try WorkspaceLocations(
-        userFilesRoot: .path("input"),
-        configuration: ConfigurationFiles(manifest: .path("manifest"), lock: .path("lock")),
-        stateRoot: "state", cacheRoot: "cache")
+    let captured = FilePath(FileManager.default.currentDirectoryPath)
+    let implicit = try WorkspaceLocations(
+      userFilesRoot: .path("input"),
+      configuration: ConfigurationFiles(manifest: .path("manifest"), lock: .path("lock")),
+      stateRoot: "state", cacheRoot: "cache")
+    #expect(implicit.relativeTo == captured)
+    #expect(implicit.stateRoot == captured.appending("state"))
+    #expect(implicit.cacheRoot == captured.appending("cache"))
+    if case .path(let input) = implicit.userFilesRoot {
+      #expect(input == captured.appending("input"))
+    } else {
+      Issue.record("native user path changed representation")
     }
+    let identity = try SourceIdentity(
+      url: #require(URL(string: "https://example.com/repository")),
+      commit: CommitID(String(repeating: "a", count: 40)))
+    #expect(
+      try SourceSnapshot(identity: identity, directory: "source").directory
+        == captured.appending("source"))
+    let local = try PackageRequest(source: .directory(.path("package")))
+    #expect(local.source == .directory(.path(captured.appending("package"))))
     let locations = try WorkspaceLocations(
       userFilesRoot: .path("input"),
       configuration: ConfigurationFiles(
@@ -461,10 +476,30 @@ struct WorkspaceTests {
         ).evaluate()
       }
     }
-    for path in ["", "/root", "a//b", "a/../b", "a/./b", "a\\b", "C:relative", "a\0b"] {
+    for path in [
+      "", "/root", "../outside", "a/../../outside", ".", "a/..", "a\\b", "C:relative",
+      "C:/../outside", "a\0b",
+    ] {
       #expect(throws: PinewindError.self) { _ = try RelativePath(path) }
     }
     #expect(try RelativePath("词典/emoji 😀.txt").string == "词典/emoji 😀.txt")
+    let normalized = try RelativePath(FilePath("a//./nested/../emoji.txt/"))
+    #expect(normalized.filePath == FilePath("a/emoji.txt"))
+    #expect(normalized.string == "a/emoji.txt")
+    #expect(try RelativePath("a/emoji.txt") == normalized)
+    #expect(try Set([normalized, RelativePath("a/emoji.txt")]).count == 1)
+    let composed = try RelativePath("caf\u{e9}.yaml")
+    let decomposed = try RelativePath("cafe\u{301}.yaml")
+    #expect(composed != decomposed)
+    #expect((composed < decomposed) != (decomposed < composed))
+    #if os(Windows)
+      #expect(try RelativePath(FilePath("a\\b")).string == "a/b")
+      for path in [
+        FilePath("C:relative"), FilePath("\\relative"), FilePath("\\\\server\\share\\file"),
+      ] {
+        #expect(throws: PinewindError.self) { _ = try RelativePath(path) }
+      }
+    #endif
   }
   @Test func snapshotsCannotBeUsedAcrossWorkspaces() async throws {
     let first = try Fixture()

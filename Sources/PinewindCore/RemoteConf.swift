@@ -61,7 +61,7 @@ actor RemoteConfCapture: ConfResourceCapture {
     guard pins.count < limits.maximumSources else {
       throw PinewindError(.resourceLimit, "conf resource count exceeded")
     }
-    let destination = try SafePath.file(relative.string, in: directory)
+    let destination = try SafePath.file(relative, in: directory)
     try FileManager.default.createDirectory(
       at: destination.removingLastComponent(), withIntermediateDirectories: true)
     try FileManager.default.copyItem(at: dataPath, to: destination)
@@ -174,10 +174,10 @@ actor LocalConfCapture: ConfResourceCapture {
     let relative = try RelativePath(String(normalized.dropFirst(6)))
     if captured.contains(relative) { return }
     let source = root.appendingPathComponent(relative.string)
-    let destination = try SafePath.file(relative.string, in: directory)
+    let destination = try SafePath.file(relative, in: directory)
     let maximum = limits.maximumFileBytes
     let remaining = UInt64(limits.maximumTotalBytes) - totalBytes
-    _ = try SafePath.file(relative.string, in: NativePath.from(root))
+    _ = try SafePath.file(relative, in: NativePath.from(root))
     let size = try await coordinator.coordinate([FileAccessRequest(url: source, intent: .read)]) {
       urls in
       let source = try NativePath.from(urls[0])

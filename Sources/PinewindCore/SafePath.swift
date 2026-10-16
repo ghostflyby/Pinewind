@@ -9,17 +9,22 @@ import SystemPackage
 
 enum SafePath {
   static func validate(_ path: String) throws {
-    _ = try RelativePath(path)
+    guard try RelativePath(path).string == path else {
+      throw PinewindError(.invalidPath, "source paths must already be normalized", source: path)
+    }
   }
 
   static func file(_ path: String, in root: FilePath) throws -> FilePath {
-    try validate(path)
+    try file(RelativePath(path), in: root)
+  }
+
+  static func file(_ path: RelativePath, in root: FilePath) throws -> FilePath {
     #if os(Windows)
       let canonicalRoot = try WindowsDirectoryPublisher.resolvedURL(root)
     #else
       let canonicalRoot = FilePath(try canonical(root))
     #endif
-    let candidate = canonicalRoot.appending(path)
+    let candidate = canonicalRoot.appending(path.filePath.components)
     guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
       throw PinewindError("path escapes its source root: \(path)")
     }
@@ -58,7 +63,6 @@ enum SafePath {
     #if os(Windows)
       return try WindowsDirectoryPublisher.canonicalPath(url)
     #else
-      try NativePath.requireAbsolute(url)
       var ancestor = url
       var missing: [String] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
@@ -84,7 +88,6 @@ enum SafePath {
     #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
-    try NativePath.requireAbsolute(root)
     let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true else {
       throw PinewindError("source must be a directory", source: root.string)

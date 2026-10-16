@@ -7,18 +7,38 @@
 import Foundation
 import SystemPackage
 
-/// A portable output path, independent of the host filesystem's path grammar.
+/// A normalized relative resource or output path backed by the host's FilePath.
 public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConvertible {
-  public let string: String
-  public init(_ string: String) throws {
-    let parts = string.split(separator: "/", omittingEmptySubsequences: false)
-    guard !string.isEmpty, !string.contains("\\"), !string.contains("\0"),
-      !string.contains(":"), parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
-    else { throw PinewindError(.invalidPath, "unsafe relative path '\(string)'") }
-    self.string = string
+  public let filePath: FilePath
+
+  public init(_ path: FilePath) throws {
+    guard path.root == nil,
+      path.components.allSatisfy({ !$0.string.contains(":") && !$0.string.contains("\\") })
+    else {
+      throw PinewindError(
+        .invalidPath, "resource paths require portable relative components", source: path.string)
+    }
+    let normalized = path.lexicallyNormalized()
+    guard !normalized.isEmpty, String(validating: normalized) != nil,
+      normalized.components.allSatisfy({ $0.kind == .regular })
+    else { throw PinewindError(.invalidPath, "unsafe relative path", source: path.string) }
+    filePath = normalized
   }
+
+  public init(_ string: String) throws {
+    guard !string.contains("\0"), !string.contains("\\") else {
+      throw PinewindError(
+        .invalidPath, "portable resource paths must not contain NUL or backslashes")
+    }
+    try self.init(FilePath(string))
+  }
+
+  /// Platform-independent spelling used in documents and inspection results.
+  public var string: String { filePath.components.map(\.string).joined(separator: "/") }
   public var description: String { string }
-  public static func < (lhs: Self, rhs: Self) -> Bool { lhs.string < rhs.string }
+  public static func < (lhs: Self, rhs: Self) -> Bool {
+    lhs.string.utf8.lexicographicallyPrecedes(rhs.string.utf8)
+  }
 }
 
 /// External documents retain their original file URL for coordination and authorization.
@@ -37,14 +57,19 @@ public enum FileLocation: Hashable, Sendable {
   var url: URL {
     get throws {
       switch self {
-      case .fileURL(let url):
-        _ = try NativePath.from(url)
-        return url
+      case .fileURL(let url): return url
       case .path(let path): return try path.foundationURL
       }
     }
   }
-  var filePath: FilePath { get throws { try NativePath.from(url) } }
+  var filePath: FilePath {
+    get throws {
+      switch self {
+      case .path(let path): return path
+      case .fileURL(let url): return try NativePath.from(url)
+      }
+    }
+  }
 }
 
 public struct ConfigurationFiles: Hashable, Sendable {
@@ -63,13 +88,14 @@ public struct WorkspaceLocations: Hashable, Sendable {
   public let configuration: ConfigurationFiles
   public let stateRoot: FilePath
   public let cacheRoot: FilePath
-  public let relativeTo: FilePath?
+  public let relativeTo: FilePath
 
   public init(
     userFilesRoot: FileLocation, configuration: ConfigurationFiles,
     stateRoot: FilePath, cacheRoot: FilePath, relativeTo: FilePath? = nil
   ) throws {
-    if let relativeTo { try NativePath.requireAbsolute(relativeTo) }
+    let relativeTo = try NativePath.absolute(
+      relativeTo ?? FilePath(FileManager.default.currentDirectoryPath))
     self.relativeTo = relativeTo
     self.userFilesRoot = try userFilesRoot.resolved(relativeTo: relativeTo)
     self.configuration = try ConfigurationFiles(
@@ -105,26 +131,18 @@ public struct WorkspaceLocations: Hashable, Sendable {
 }
 
 enum NativePath {
-  static func requireAbsolute(_ path: FilePath) throws {
-    guard path.isAbsolute, String(validating: path) != nil, !path.isEmpty else {
+  /// Resolve once at a public entry point, before asynchronous work begins.
+  static func absolute(_ path: FilePath, relativeTo base: FilePath? = nil) throws -> FilePath {
+    if path.isAbsolute { return path }
+    guard path.root == nil else {
       throw PinewindError(
-        .invalidPath, "an absolute, Unicode-representable filesystem path is required",
+        .invalidPath, "drive-relative and root-relative paths require a fully qualified location",
         source: path.string)
     }
-  }
-  static func absolute(_ path: FilePath, relativeTo base: FilePath?) throws -> FilePath {
-    if path.isAbsolute {
-      try requireAbsolute(path)
-      return path
-    }
-    guard !path.isEmpty, path.root == nil, let base else {
-      throw PinewindError(
-        .invalidPath, "relative paths require an explicit absolute base", source: path.string)
-    }
-    try requireAbsolute(base)
-    let result = base.appending(path.components)
-    try requireAbsolute(result)
-    return result
+    let base =
+      try base.map { try absolute($0) }
+      ?? FilePath(FileManager.default.currentDirectoryPath)
+    return base.appending(path.components)
   }
   static func from(_ url: URL) throws -> FilePath {
     guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
@@ -149,7 +167,6 @@ enum NativePath {
       }
       let path = FilePath(representation)
     #endif
-    try requireAbsolute(path)
     return path
   }
 }
@@ -158,7 +175,6 @@ enum NativePath {
 extension FilePath {
   var foundationURL: URL {
     get throws {
-      try NativePath.requireAbsolute(self)
       guard let value = String(validating: self) else {
         throw PinewindError(.invalidPath, "unrepresentable path")
       }

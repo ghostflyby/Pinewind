@@ -176,7 +176,7 @@ public actor Workspace {
       let recipe = try await readRecipe(request, directory: source.directory)
       var pins: [PinnedResource] = []
       for download in recipe?.downloads ?? [] {
-        let path = try RelativePath(download.path)
+        let path = download.path
         let previous = oldPackages.filter { self.repository($0.request)?.key == repository.key }
           .flatMap(
             \.resources
@@ -317,7 +317,7 @@ public actor Workspace {
         let recipe = try await readRecipe(request, directory: directory)
         var pins: [PinnedResource] = []
         for download in recipe?.downloads ?? [] {
-          let path = try RelativePath(download.path)
+          let path = download.path
           if let old = locked?.resources.first(where: { $0.url == download.url && $0.path == path }
           ),
             mode != .development || repository(request) != nil
@@ -380,7 +380,7 @@ public actor Workspace {
           guard try SnapshotFiles.sha256(resource) == pin.sha256 else {
             throw PinewindError(.checksumMismatch, "cached resource checksum mismatch")
           }
-          let file = try SafePath.file(pin.path.string, in: destination)
+          let file = try SafePath.file(pin.path, in: destination)
           try FileManager.default.createDirectory(
             at: file.removingLastComponent(), withIntermediateDirectories: true)
           if FileManager.default.fileExists(atPath: file.string) {

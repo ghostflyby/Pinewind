@@ -43,8 +43,6 @@ struct Composer {
     // including optimized builds that may end a property's lifetime at last use.
     defer { withExtendedLifetime(plan.snapshot) {} }
     try Cancellation.check()
-    try NativePath.requireAbsolute(inputRoot)
-    try NativePath.requireAbsolute(requestedOutput)
     #if os(Windows)
       let outputRoot = try WindowsDirectoryPublisher.publicationPath(requestedOutput)
     #else

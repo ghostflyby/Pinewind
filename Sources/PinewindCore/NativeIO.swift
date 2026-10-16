@@ -54,7 +54,6 @@ enum NativeLock {
     _ file: FilePath, onContention: (@Sendable () -> Void)? = nil,
     _ body: () throws -> T
   ) throws -> T {
-    try NativePath.requireAbsolute(file)
     try FileManager.default.createDirectory(
       at: file.removingLastComponent(), withIntermediateDirectories: true)
     let descriptor: FileDescriptor
