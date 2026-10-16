@@ -26,7 +26,7 @@ public struct FileFilter: Hashable, Sendable {
 public struct CommitID: Hashable, Sendable, CustomStringConvertible {
   public let string: String
   public init(_ string: String) throws {
-    guard SourceIdentity.isCommit(string) else {
+    guard string.count == 40, string.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
       throw PinewindError(
         .invalidConfiguration, "commit must be a complete 40-character hexadecimal commit ID")
     }
@@ -86,6 +86,7 @@ public enum PackageSource: Hashable, Sendable {
 public struct PackageRequest: Hashable, Sendable {
   public let source: PackageSource
   public let recipe: String?
+  let recipePath: RelativePath
   public let options: [String: String]
   public let filter: FileFilter
   let url: URL
@@ -103,7 +104,7 @@ public struct PackageRequest: Hashable, Sendable {
     source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
   ) throws {
-    if let recipe { try SafePath.validate(recipe + ".recipe.yaml") }
+    let recipePath = try RelativePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml")
     try filter.validate()
     switch source {
     case .git(let repository):
@@ -114,7 +115,8 @@ public struct PackageRequest: Hashable, Sendable {
       self.url = try location.url
       self.source = .directory(location)
     }
-    self.recipe = recipe
+    self.recipe = recipe.map { _ in String(recipePath.string.dropLast(".recipe.yaml".count)) }
+    self.recipePath = recipePath
     self.options = options
     self.filter = filter
   }
@@ -166,10 +168,6 @@ public struct SourceIdentity: Hashable, Sendable {
     self.commit = commit
   }
   init(url: URL, commit: String) throws { try self.init(url: url, commit: CommitID(commit)) }
-  static func isCommit(_ text: String) -> Bool {
-    text.count == 40 && text.allSatisfy { $0.isASCII && $0.isHexDigit }
-  }
-
   static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
       _ = try NativePath.from(url)

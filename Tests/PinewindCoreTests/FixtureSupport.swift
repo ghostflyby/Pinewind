@@ -53,7 +53,8 @@ extension PinnedResource {
 }
 extension PreparedPackage {
   init(
-    request: PackageRequest, directory: URL, commit: String? = nil, resources: [PinnedResource] = []
+    request: PackageRequest, directory: URL, commit: CommitID? = nil,
+    resources: [PinnedResource] = []
   ) throws {
     try self.init(
       request: request, directory: NativePath.from(directory), commit: commit, resources: resources)
@@ -90,7 +91,7 @@ extension PlumImporter {
   }
 }
 extension SafePath {
-  static func files(in root: URL) throws -> [String] { try files(in: NativePath.from(root)) }
+  static func files(in root: URL) throws -> [RelativePath] { try files(in: NativePath.from(root)) }
 }
 
 extension SafePath {

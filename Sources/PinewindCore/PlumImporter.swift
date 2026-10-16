@@ -32,16 +32,13 @@ struct PlumImporter: Sendable {
   }
 
   func evaluate(_ request: ConfImport, inputRoot: FilePath) async throws -> [String] {
-    guard request.variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
     if request.source.hasPrefix(":") {
       return try BuiltinPackageLists.descriptors(for: request.source)
     }
     guard !request.source.contains("://") else {
       throw PinewindError("remote conf requires the HTTP resource preparation layer")
     }
-    let path =
-      request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
-    let file = try SafePath.file(path, in: inputRoot)
+    let file = try SafePath.file(RelativePath(request.source), in: inputRoot)
     return try await evaluate(
       file: file, resourceRoot: file.removingLastComponent(), variables: request.variables)
   }

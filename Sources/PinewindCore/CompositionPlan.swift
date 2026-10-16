@@ -29,23 +29,22 @@ public struct PinnedResource: Hashable, Sendable {
 struct PreparedPackage: Sendable {
   let request: PackageRequest
   let directory: FilePath
-  let commit: String?
+  let commit: CommitID?
   let resources: [PinnedResource]
 
   init(
-    request: PackageRequest, directory: FilePath, commit: String? = nil,
+    request: PackageRequest, directory: FilePath, commit: CommitID? = nil,
     resources: [PinnedResource] = []
   ) throws {
-    if !request.url.isFileURL {
+    if case .git(let repository) = request.source {
       guard let commit else { throw PinewindError("remote prepared source requires a commit") }
-      _ = try SourceIdentity(url: request.url, commit: commit)
-      if let requested = request.commit, requested != commit.lowercased() {
+      if case .commit(let requested) = repository.revision, requested != commit {
         throw PinewindError("prepared commit does not match the requested commit")
       }
     }
     self.request = request
     self.directory = directory
-    self.commit = request.url.isFileURL ? nil : commit?.lowercased()
+    self.commit = request.url.isFileURL ? nil : commit
     self.resources = resources
   }
 }
@@ -69,15 +68,14 @@ public struct CompositionContribution: Equatable, Sendable {
 }
 
 public struct CompositionPlan: Sendable {
-  let files: [String: [CompositionOperation]]
+  let files: [RelativePath: [CompositionOperation]]
   var sourceRoots: [FilePath]
   let snapshot: CompositionSnapshot
   var binding: InputBinding? = nil
   var origins: [Int: URL] = [:]
-  var stringPaths: [String] { files.keys.sorted() }
-  public var paths: [RelativePath] { stringPaths.map { try! RelativePath($0) } }
+  public var paths: [RelativePath] { files.keys.sorted() }
   public func contributions(for path: RelativePath) -> [CompositionContribution] {
-    (files[path.string] ?? []).map { operation in
+    (files[path] ?? []).map { operation in
       CompositionContribution(
         entryIndex: operation.entryIndex, source: origins[operation.entryIndex] ?? operation.source,
         kind: {
@@ -96,7 +94,7 @@ struct CompositionPlanner: Sendable {
     packages: [PreparedPackage] = [], excluding: [FilePath] = []
   ) throws -> CompositionPlan {
     try Cancellation.check()
-    var files: [String: [CompositionOperation]] = [:]
+    var files: [RelativePath: [CompositionOperation]] = [:]
     var roots: [FilePath] = [inputRoot]
     let snapshot = try PlanningSnapshot(root: snapshotRoot)
     var available = packages
@@ -112,7 +110,7 @@ struct CompositionPlanner: Sendable {
       input: inputRoot, output: snapshot.storage.directory, sources: available.map(\.directory))
     func add(_ path: RelativePath, source: URL, index: Int, action: CompositionOperation.Action) {
       // Preserve all contributions, including overwritten files, for uninstall/reorder.
-      files[path.string, default: []].append(
+      files[path, default: []].append(
         CompositionOperation(entryIndex: index, source: source, action: action))
     }
     let excluded = try Set(excluding.map { try SafePath.canonical($0) })
@@ -121,11 +119,11 @@ struct CompositionPlanner: Sendable {
       switch entry {
       case .userFiles(let filter):
         for path in try snapshot.files(in: inputRoot) where !Self.isMetadata(path) {
-          if try filter.accepts(path) {
+          if try filter.accepts(path.string) {
             let file = try SafePath.file(path, in: inputRoot)
             if try excluded.contains(SafePath.canonical(file)) { continue }
             try add(
-              RelativePath(path), source: file.foundationURL, index: index,
+              path, source: file.foundationURL, index: index,
               action: .write(snapshot.capture(file))
             )
           }
@@ -165,7 +163,7 @@ struct CompositionPlanner: Sendable {
               "download resource checksum mismatch", source: download.url.absoluteString)
           }
         }
-        var selected: [(String, FilePath)] = []
+        var selected: [(RelativePath, FilePath)] = []
         if let patterns = recipe?.patterns {
           for pattern in patterns {
             if pattern.hasPrefix("../") {
@@ -188,7 +186,9 @@ struct CompositionPlanner: Sendable {
               }
               roots.append(sibling.directory)
               let glob = try Glob.compile(segments[2])
-              let matched = try snapshot.files(in: sibling.directory).filter { glob.match($0) }
+              let matched = try snapshot.files(in: sibling.directory).filter {
+                glob.match($0.string)
+              }
               guard !matched.isEmpty else {
                 throw PinewindError("install_files pattern matched no files: \(pattern)")
               }
@@ -197,7 +197,7 @@ struct CompositionPlanner: Sendable {
               }
             } else {
               let glob = try Glob.compile(pattern)
-              let matched = candidates.filter { glob.match($0) }
+              let matched = candidates.filter { glob.match($0.string) }
               guard !matched.isEmpty else {
                 throw PinewindError("install_files pattern matched no files: \(pattern)")
               }
@@ -211,11 +211,11 @@ struct CompositionPlanner: Sendable {
             selected.append((path, try SafePath.file(path, in: prepared.directory)))
           }
         }
-        var installed = Set<String>()
+        var installed = Set<RelativePath>()
         for (path, file) in selected where installed.insert(path).inserted {
-          if try request.filter.accepts(path) {
+          if try request.filter.accepts(path.string) {
             try add(
-              RelativePath(path), source: file.foundationURL, index: index,
+              path, source: file.foundationURL, index: index,
               action: .write(snapshot.capture(file))
             )
           }
@@ -230,14 +230,14 @@ struct CompositionPlanner: Sendable {
       }
     }
     // Reject file/directory conflicts before publishing any candidate.
-    let paths = Set(files.keys)
+    let paths = Set(files.keys.map(\.filePath))
     for path in paths {
-      var parent = (path as NSString).deletingLastPathComponent
+      var parent = path.removingLastComponent()
       while !parent.isEmpty {
         guard !paths.contains(parent) else {
           throw PinewindError("file/directory output conflict at \(parent)")
         }
-        parent = (parent as NSString).deletingLastPathComponent
+        parent.removeLastComponent()
       }
     }
     return CompositionPlan(files: files, sourceRoots: roots, snapshot: snapshot.storage)
@@ -248,15 +248,16 @@ struct CompositionPlanner: Sendable {
     return name.hasPrefix("rime-") ? String(name.dropFirst(5)) : name
   }
 
-  static func isMetadata(_ path: String) -> Bool {
-    let components = path.split(separator: "/").map(String.init)
+  static func isMetadata(_ path: RelativePath) -> Bool {
+    let components = path.filePath.components.map(\.string)
     return components.contains(".DS_Store") || components.contains { $0.contains(".local.") }
   }
 
-  static func isDefaultFile(_ path: String) -> Bool {
-    let parts = path.split(separator: "/")
-    if parts.count == 2, parts[0] == "opencc" {
-      return ["json", "ocd", "ocd2", "txt"].contains((path as NSString).pathExtension)
+  static func isDefaultFile(_ relative: RelativePath) -> Bool {
+    let path = relative.string
+    let parts = relative.filePath.components
+    if parts.count == 2, parts.first?.string == "opencc" {
+      return ["json", "ocd", "ocd2", "txt"].contains(relative.filePath.extension ?? "")
     }
     guard parts.count == 1 else { return false }
     if path.hasSuffix(".yaml") {
@@ -269,7 +270,7 @@ struct CompositionPlanner: Sendable {
 
 private struct SourceVersion: Hashable {
   let url: URL
-  let commit: String?
+  let commit: CommitID?
 }
 
 /// Freeze each referenced file and directory membership once per synchronous plan.
@@ -277,12 +278,12 @@ private struct SourceVersion: Hashable {
 /// the next plan; the current plan owns disk snapshots instead of retaining bytes.
 private final class PlanningSnapshot {
   let storage: CompositionSnapshot
-  private var directoryFiles: [FilePath: [String]] = [:]
+  private var directoryFiles: [FilePath: [RelativePath]] = [:]
   private var captured: [FilePath: FilePath] = [:]
 
   init(root: FilePath) throws { storage = try CompositionSnapshot(root: root) }
 
-  func files(in root: FilePath) throws -> [String] {
+  func files(in root: FilePath) throws -> [RelativePath] {
     let key = FilePath(try SafePath.canonical(root))
     if let cached = directoryFiles[key] { return cached }
     let files = try SafePath.files(in: root)

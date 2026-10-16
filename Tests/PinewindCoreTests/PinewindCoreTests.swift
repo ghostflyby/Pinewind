@@ -212,7 +212,7 @@ struct CompositionTests {
       in: f.a)
     let entries: [ManifestEntry] = [.package(try f.request(f.a)), .package(try f.request(f.a))]
     var plan: CompositionPlan? = try f.plan(entries)
-    let operations = try #require(plan?.files["words.txt"])
+    let operations = try #require(plan?.files[RelativePath("words.txt")])
     guard case .write(let frozen) = operations[0].action,
       case .write(let repeated) = operations[1].action
     else {
@@ -341,7 +341,7 @@ struct CompositionTests {
     let b = try ManifestEntry.package(f.request(f.b))
     let composer = Composer()
     let both = try f.plan([a, b])
-    #expect(both.files["default.yaml"]?.count == 2)
+    #expect(try both.files[RelativePath("default.yaml")]?.count == 2)
     _ = try await composer.compose(both, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("default.yaml") == "source: B\n")
     _ = try await composer.compose(f.plan([a]), inputRoot: f.input, outputRoot: f.output)
@@ -553,10 +553,12 @@ struct CompositionTests {
     #expect(result.removedPaths.map(\.string) == ["dicts/old.yaml"])
   }
 
-  @Test func patchRunsImmediatelyAndLaterSelfCanReplaceIt() async throws {
+  @Test(arguments: ["customize", "./nested/../customize"])
+  func patchRunsImmediatelyAndLaterSelfCanReplaceIt(_ recipe: String) async throws {
     let f = try Fixture("PatchOrder")
     defer { f.remove() }
-    let request = try f.request(f.a, recipe: "customize")
+    let request = try f.request(f.a, recipe: recipe)
+    #expect(request.recipe == "customize")
     let composer = Composer()
     _ = try await composer.compose(
       f.plan([.userFiles(FileFilter()), .package(request)]), inputRoot: f.input,
@@ -574,7 +576,7 @@ struct CompositionTests {
     let request = try PackageRequest(
       url: #require(URL(string: "https://github.com/rime/rime-emoji")), recipe: "customize")
     let prepared = try PreparedPackage(
-      request: request, directory: f.a, commit: String(repeating: "a", count: 40))
+      request: request, directory: f.a, commit: CommitID(String(repeating: "a", count: 40)))
     let plan = try f.plan(
       [.userFiles(FileFilter()), .package(request), .package(request)], packages: [prepared])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
@@ -644,7 +646,7 @@ struct CompositionTests {
       url: #require(URL(string: "https://\(host)/rime/rime-essay.git")))
     let sharedAgain = try PackageRequest(
       url: #require(URL(string: "https://\(host)/rime/rime-essay")), recipe: "other")
-    let commit = String(repeating: "a", count: 40)
+    let commit = try CommitID(String(repeating: "a", count: 40))
     let views = try [
       PreparedPackage(request: consumer, directory: f.a, commit: commit),
       PreparedPackage(request: shared, directory: f.b, commit: commit),
@@ -652,15 +654,17 @@ struct CompositionTests {
     ]
     let plan = try f.plan([.package(consumer)], packages: views)
     #expect(plan.paths.map(\.string) == ["consumer.custom.yaml", "shared.yaml"])
-    let patch = try #require(plan.files["consumer.custom.yaml"]?.first)
+    let patch = try #require(plan.files[RelativePath("consumer.custom.yaml")]?.first)
     guard case .patch(let rx, _) = patch.action else {
       Issue.record("expected a recipe patch")
       return
     }
     #expect(rx == "rime/rime-consumer::")
-    #expect(plan.files["shared.yaml"]?.first?.source == f.b.appendingPathComponent("shared.yaml"))
+    #expect(
+      try plan.files[RelativePath("shared.yaml")]?.first?.source
+        == f.b.appendingPathComponent("shared.yaml"))
     let conflicting = try PreparedPackage(
-      request: shared, directory: f.b, commit: String(repeating: "b", count: 40))
+      request: shared, directory: f.b, commit: CommitID(String(repeating: "b", count: 40)))
     #expect(throws: PinewindError.self) {
       try f.plan([.package(consumer)], packages: views + [conflicting])
     }
@@ -680,6 +684,22 @@ struct CompositionTests {
     let filtered = try PackageRequest(
       url: f.a, recipe: "customize", filter: FileFilter(exclude: ["*.custom.yaml"]))
     #expect(try f.plan([.package(filtered)]).paths.isEmpty)
+  }
+
+  @Test func planningPreservesDistinctNativeUnicodePathIdentities() throws {
+    let f = try Fixture("LiteralOptions")
+    defer { f.remove() }
+    let names = ["caf\u{e9}", "cafe\u{301}"]
+    let entries = try names.map { name in
+      ManifestEntry.package(
+        try PackageRequest(url: f.a, recipe: "customize", options: ["schema": name]))
+    }
+    let plan = try f.plan(entries)
+    #expect(plan.paths.count == 2)
+    for (index, name) in names.enumerated() {
+      let path = try RelativePath(name + ".custom.yaml")
+      #expect(plan.contributions(for: path).map(\.entryIndex) == [index])
+    }
   }
 
   @Test func normalizedPatchTargetsAppearOnceInThePlanAndOutput() async throws {
@@ -726,7 +746,7 @@ struct CompositionTests {
       url: url, path: path,
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     let prepared = try PreparedPackage(
-      request: request, directory: f.a, commit: String(repeating: "a", count: 40),
+      request: request, directory: f.a, commit: CommitID(String(repeating: "a", count: 40)),
       resources: [resource])
     let plan = try f.plan([.package(request)], packages: [prepared])
     #expect(plan.paths.map(\.string) == [path])
@@ -771,7 +791,8 @@ struct ConfTests {
       ])
     let prepared = try ["emoji", "essay"].map {
       try PreparedPackage(
-        request: PlumImporter.package($0), directory: f.a, commit: String(repeating: "a", count: 40)
+        request: PlumImporter.package($0), directory: f.a,
+        commit: CommitID(String(repeating: "a", count: 40))
       )
     }
     let composer = Composer()

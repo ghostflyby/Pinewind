@@ -137,7 +137,8 @@ struct GitKitRepositoryProviderTests {
       try String(contentsOf: new.directory.appending("default.yaml"), encoding: .utf8)
         == "value: second\n")
     let request = try PackageRequest(url: f.url, revision: .commit(CommitID(first)))
-    let prepared = try PreparedPackage(request: request, directory: old.directory, commit: first)
+    let prepared = try PreparedPackage(
+      request: request, directory: old.directory, commit: CommitID(first))
     let input = f.root.appendingPathComponent("input")
     try FileManager.default.createDirectory(at: input, withIntermediateDirectories: true)
     let plan = try CompositionPlanner(snapshotRoot: f.root.appendingPathComponent("planning")).plan(
@@ -212,7 +213,9 @@ struct GitKitRepositoryProviderTests {
     #expect(
       !FileManager.default.fileExists(atPath: directory.appendingPathComponent("partial.txt").path))
     #expect(
-      try SafePath.files(in: directory) == [".gitattributes", "default.yaml", "dicts/words.txt"])
+      try SafePath.files(in: directory).map(\.string) == [
+        ".gitattributes", "default.yaml", "dicts/words.txt",
+      ])
   }
 
   @Test func unavailableCommitsNeverFallBackToBranchTips() async throws {

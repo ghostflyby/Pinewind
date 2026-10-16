@@ -17,17 +17,6 @@ public struct CompositionResult: Sendable {
   public let changedPaths: [RelativePath]
   public let removedPaths: [RelativePath]
   public let reusedPaths: [RelativePath]
-  init(
-    directory: FilePath, paths: [String], changedPaths: [String], removedPaths: [String],
-    reusedPaths: [String]
-  ) throws {
-    self.directory = directory
-    self.paths = try paths.map(RelativePath.init)
-    self.changedPaths = try changedPaths.map(RelativePath.init)
-    self.removedPaths = try removedPaths.map(RelativePath.init)
-    self.reusedPaths = try reusedPaths.map(RelativePath.init)
-  }
-
 }
 
 /// Renders a candidate generation and atomically publishes it as the active
@@ -88,11 +77,12 @@ struct Composer {
     try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
     var retained = false
     defer { if !retained { try? fm.removeItem(at: candidate) } }
-    var reused: [String] = []
-    var changed: [String] = []
-    for path in plan.stringPaths {
+    let files = plan.files.sorted { $0.key < $1.key }
+    let paths = files.map(\.key)
+    var reused: [RelativePath] = []
+    var changed: [RelativePath] = []
+    for (path, operations) in files {
       try Cancellation.check()
-      guard let operations = plan.files[path] else { continue }
       let destination = try SafePath.file(path, in: candidate)
       try fm.createDirectory(
         at: destination.removingLastComponent(), withIntermediateDirectories: true)
@@ -110,13 +100,13 @@ struct Composer {
         changed.append(path)
       }
     }
-    let current = Set(plan.stringPaths)
+    let current = Set(paths)
     let removed = previous.filter { !current.contains($0) }
     if exists && changed.isEmpty && removed.isEmpty {
       try plan.binding?.validate()
       try Cancellation.check()
-      return try CompositionResult(
-        directory: outputRoot, paths: plan.stringPaths,
+      return CompositionResult(
+        directory: outputRoot, paths: paths,
         changedPaths: [], removedPaths: [], reusedPaths: reused)
     }
     try plan.binding?.validate()
@@ -141,8 +131,8 @@ struct Composer {
         try fm.moveItem(at: candidate, to: outputRoot)
       }
     #endif
-    return try CompositionResult(
-      directory: outputRoot, paths: plan.stringPaths,
+    return CompositionResult(
+      directory: outputRoot, paths: paths,
       changedPaths: changed, removedPaths: removed, reusedPaths: reused)
   }
 

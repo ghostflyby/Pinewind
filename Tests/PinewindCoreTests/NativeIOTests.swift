@@ -61,7 +61,7 @@ struct NativeIOTests {
       at: root.appending("source/link").foundationURL,
       withDestinationURL: root.appending("outside").foundationURL)
     #expect(throws: PinewindError.self) {
-      _ = try SafePath.file("link/value", in: root.appending("source"))
+      _ = try SafePath.file(RelativePath("link/value"), in: root.appending("source"))
     }
     #expect(throws: PinewindError.self) { _ = try SafePath.files(in: root.appending("source")) }
   }

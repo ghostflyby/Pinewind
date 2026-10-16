@@ -99,11 +99,28 @@ struct ConfigurationDocumentTests {
       order: [emoji]
       """)
     #expect(throws: PinewindError.self) { try document.evaluate() }
+    #expect(try ManifestDocument.parse(document.yaml()) == document)
     document.names["emoji"]?.url = .value(remote)
     #expect(try document.evaluate().entries.count == 1)
     #expect(throws: PinewindError.self) {
       try ManifestDocument(order: [.named("emoji", overrides: PackageFields(url: .value(remote)))])
         .yaml()
+    }
+  }
+
+  @Test(arguments: [
+    PackageFields(url: .value(URL(string: "relative")!)),
+    PackageFields(
+      url: .value(URL(fileURLWithPath: "/package")), revision: .value(.branch("main"))),
+    PackageFields(revision: .value(.reference(""))),
+    PackageFields(include: .value(["../escape"])),
+  ])
+  func invalidDraftFieldsAreRejectedConsistently(_ fields: PackageFields) {
+    let document = ManifestDocument(names: ["unused": fields], order: [])
+    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
+    #expect(throws: PinewindError.self) { _ = try document.yaml() }
+    #expect(throws: PinewindError.self) {
+      _ = try LocalOverridesDocument(names: ["unused": fields]).yaml()
     }
   }
 

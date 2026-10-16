@@ -158,9 +158,17 @@ struct GitKitTransport: GitTransport {
       else {
         throw PinewindError("Git tree contains an invalid entry")
       }
-      let component = String(cString: name)
+      guard let component = String(validatingCString: name) else {
+        throw PinewindError(.invalidPath, "Git tree entry name must be UTF-8")
+      }
       let path = prefix + component
-      try SafePath.validate(path)
+      // Tree entries are individual names, not expressions to normalize before checkout.
+      let relative = try RelativePath(component)
+      guard relative.filePath.components.count == 1,
+        relative.string.utf8.elementsEqual(component.utf8)
+      else {
+        throw PinewindError(.invalidPath, "Git tree entry must be a single filename", source: path)
+      }
       guard component != ".git" else {
         throw PinewindError("Git tree contains reserved metadata", source: path)
       }

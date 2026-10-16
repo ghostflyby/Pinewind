@@ -217,7 +217,7 @@ struct RemoteReferences {
     return String(branch.name.dropFirst("refs/heads/".count))
   }
 
-  func commit(for ref: String) throws -> String {
+  func commit(for ref: String) throws -> CommitID {
     let names =
       ref == "HEAD" || ref.hasPrefix("refs/") ? [ref] : ["refs/heads/" + ref, "refs/tags/" + ref]
     let matches = names.compactMap { name in values.first { $0.name == name } }
@@ -229,9 +229,6 @@ struct RemoteReferences {
     }
     let peeled = values.first { $0.name == found.name + "^{}" }
     let commit = (peeled ?? found).commit
-    guard SourceIdentity.isCommit(commit) else {
-      throw PinewindError("remote advertised an invalid commit ID")
-    }
-    return commit.lowercased()
+    return try CommitID(commit)
   }
 }

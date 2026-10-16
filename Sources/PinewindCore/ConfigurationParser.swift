@@ -12,8 +12,10 @@ import Yams
 struct YAMLReader {
   let source: String
 
-  func error(_ message: String, at node: Node? = nil) -> PinewindError {
-    PinewindError(message, source: source, line: node?.mark.map { $0.line })
+  func error(_ message: String, at node: Node? = nil, field: String? = nil) -> PinewindError {
+    PinewindError(
+      .invalidConfiguration, message, source: source, line: node?.mark.map { $0.line }, field: field
+    )
   }
 
   func document(_ yaml: String) throws -> Node {
@@ -63,8 +65,9 @@ struct YAMLReader {
   func filter(_ fields: [String: Node]) throws -> FileFilter {
     let include = try fields["include"].flatMap { $0.tag == Tag(.null) ? nil : try strings($0) }
     let exclude = try fields["exclude"].map { $0.tag == Tag(.null) ? [] : try strings($0) } ?? []
-    for pattern in (include ?? []) + exclude { _ = try Glob.compile(pattern) }
-    return FileFilter(include: include, exclude: exclude)
+    let filter = FileFilter(include: include, exclude: exclude)
+    try filter.validate()
+    return filter
   }
 }
 
@@ -116,23 +119,6 @@ enum ConfigurationParser {
       return .package(name: name, fields: fields.filter { $0.key != "name" })
     }
   }
-
-  static func validateFields(_ fields: [String: Node], reader: YAMLReader) throws {
-    for key in ["url", "recipe"] {
-      if let node = fields[key], node.tag != Tag(.null) { _ = try reader.string(node) }
-    }
-    if let node = fields["revision"], node.tag != Tag(.null) {
-      _ = try DocumentCodec.revision(node, reader: reader)
-    }
-    if let node = fields["options"], node.tag != Tag(.null) { _ = try reader.stringMap(node) }
-    _ = try reader.filter(fields)
-    if let node = fields["url"], node.tag != Tag(.null),
-      URL(string: try reader.string(node))?.isFileURL == true,
-      let revision = fields["revision"], revision.tag != Tag(.null)
-    {
-      throw reader.error("file sources cannot specify revision", at: revision)
-    }
-  }
 }
 
 // A single typed evaluator serves document editing, snapshots, and deployment.
@@ -154,26 +140,14 @@ enum ConfigurationEvaluator {
     result.exclude = choose(updates.exclude, result.exclude)
     return result
   }
-  static func value<T>(_ field: FieldOverride<T>) -> T? {
-    if case .value(let value) = field { return value }
-    return nil
-  }
-  static func validate(_ fields: PackageFields) throws {
-    try FileFilter(include: value(fields.include), exclude: value(fields.exclude) ?? []).validate()
-    if let revision = value(fields.revision) { try revision.validate() }
-    if value(fields.url)?.isFileURL == true, value(fields.revision) != nil {
-      throw PinewindError("file sources cannot specify revision")
-    }
-  }
   static func request(_ fields: PackageFields) throws -> PackageRequest {
-    try validate(fields)
-    guard let url = value(fields.url) else {
+    guard let url = fields.url.value else {
       throw PinewindError("package requires an absolute source URL")
     }
     return try PackageRequest(
-      url: url, revision: value(fields.revision), recipe: value(fields.recipe),
-      options: value(fields.options) ?? [:],
-      filter: FileFilter(include: value(fields.include), exclude: value(fields.exclude) ?? []))
+      url: url, revision: fields.revision.value, recipe: fields.recipe.value,
+      options: fields.options.value ?? [:],
+      filter: FileFilter(include: fields.include.value, exclude: fields.exclude.value ?? []))
   }
   static func diagnostics(_ document: ManifestDocument, local: LocalOverridesDocument?)
     -> [Diagnostic]
@@ -192,7 +166,7 @@ enum ConfigurationEvaluator {
     for (name, fields) in document.names.sorted(by: { $0.key < $1.key }) {
       do {
         guard name != "self" else { throw PinewindError("self is a reserved name") }
-        try validate(fields)
+        try fields.validate()
       } catch { append(error, field: "names." + name) }
     }
     for (name, fields) in (local?.names ?? [:]).sorted(by: { $0.key < $1.key }) {
@@ -200,7 +174,7 @@ enum ConfigurationEvaluator {
         guard name != "self" else {
           throw PinewindError("self is a reserved name", source: "pinewind.local.yaml")
         }
-        try validate(fields)
+        try fields.validate()
       } catch { append(error, field: "names." + name) }
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
@@ -218,13 +192,13 @@ enum ConfigurationEvaluator {
     var names = document.names
     for (name, fields) in names {
       guard name != "self" else { throw PinewindError("self is a reserved name") }
-      try validate(fields)
+      try fields.validate()
     }
     for (name, fields) in local?.names ?? [:] {
       guard name != "self" else {
         throw PinewindError("self is a reserved name", source: "pinewind.local.yaml")
       }
-      try validate(fields)
+      try fields.validate()
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
     let entries = try document.order.enumerated().map { index, entry -> ManifestEntry in

@@ -8,24 +8,15 @@ import Foundation
 import SystemPackage
 
 enum SafePath {
-  static func validate(_ path: String) throws {
-    guard try RelativePath(path).string == path else {
-      throw PinewindError(.invalidPath, "source paths must already be normalized", source: path)
-    }
-  }
-
-  static func file(_ path: String, in root: FilePath) throws -> FilePath {
-    try file(RelativePath(path), in: root)
-  }
-
   static func file(_ path: RelativePath, in root: FilePath) throws -> FilePath {
+    let rootIdentity = try canonical(root)
     #if os(Windows)
       let canonicalRoot = try WindowsDirectoryPublisher.resolvedURL(root)
     #else
-      let canonicalRoot = FilePath(try canonical(root))
+      let canonicalRoot = FilePath(rootIdentity)
     #endif
     let candidate = canonicalRoot.appending(path.filePath.components)
-    guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
+    guard try canonical(candidate).hasPrefix(prefix(rootIdentity)) else {
       throw PinewindError("path escapes its source root: \(path)")
     }
     return candidate
@@ -82,7 +73,7 @@ enum SafePath {
     #endif
   }
 
-  static func files(in root: FilePath) throws -> [String] {
+  static func files(in root: FilePath) throws -> [RelativePath] {
     #if os(Windows)
       let root = try WindowsDirectoryPublisher.resolvedURL(root)
     #endif
@@ -104,7 +95,7 @@ enum SafePath {
     else {
       throw PinewindError("cannot enumerate source", source: root.string)
     }
-    var result: [String] = []
+    var result: [RelativePath] = []
     let base = try NativePath.from(root.foundationURL.standardizedFileURL)
     for case let file as URL in iterator {
       try Cancellation.check()
@@ -119,10 +110,8 @@ enum SafePath {
       }
       if values.isRegularFile == true {
         let native = try NativePath.from(file.standardizedFileURL)
-        let path = native.components.dropFirst(base.components.count).map(\.string).joined(
-          separator: "/")
-        try validate(path)
-        result.append(path)
+        let path = FilePath(root: nil, native.components.dropFirst(base.components.count))
+        result.append(try RelativePath(path))
       }
     }
     if let enumerationError { throw enumerationError }

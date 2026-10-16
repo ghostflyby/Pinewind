@@ -26,8 +26,7 @@ struct Recipe {
     throws
     -> Recipe?
   {
-    let name = request.recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"
-    let file = try SafePath.file(name, in: directory)
+    let file = try SafePath.file(request.recipePath, in: directory)
     guard FileManager.default.fileExists(atPath: file.string) else {
       if request.recipe != nil {
         throw PinewindError("explicit recipe not found", source: file.string)

@@ -288,7 +288,7 @@ public actor Workspace {
             repository($0.request)?.key == repository(request)?.key && repository(request) != nil
           }
         let directory: FilePath
-        let commit: String?
+        let commit: CommitID?
         if let repository = repository(request) {
           let identity: SourceIdentity
           if let locked, self.repository(locked.request)?.key == repository.key {
@@ -309,7 +309,7 @@ public actor Workspace {
           try validate(identity, against: repository)
           identities[repository.key] = identity
           directory = try await source(identity, network: network).directory
-          commit = identity.commit.string
+          commit = identity.commit
         } else {
           directory = try NativePath.from(request.url)
           commit = nil
@@ -552,15 +552,14 @@ public actor Workspace {
             .invalidConfiguration, "conf sources require HTTPS or a relative local path")
         }
         let manifest = try snapshot.locations.configuration.manifest.url
-        let path =
-          request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
+        let path = try RelativePath(request.source)
         let source = try SafePath.file(
           path, in: NativePath.from(manifest.deletingLastPathComponent()))
         let view = try await BlockingIO.run {
           try CompositionSnapshot(root: snapshot.locations.cacheRoot.appending("imports"))
         }
         defer { withExtendedLifetime(view) {} }
-        let rootURL = manifest.deletingLastPathComponent().appendingPathComponent(path)
+        let rootURL = manifest.deletingLastPathComponent().appendingPathComponent(path.string)
           .deletingLastPathComponent()
         let capture = LocalConfCapture(
           root: rootURL, directory: view.directory, coordinator: store.coordinator,
