@@ -11,7 +11,10 @@ enum SafePath {
   static func file(_ path: RelativePath, in root: FilePath) throws(FileSystemFailure) -> FilePath {
     let rootIdentity = try canonical(root)
     #if os(Windows)
-      let canonicalRoot = try WindowsDirectoryPublisher.resolvedPath(root)
+      let canonicalRoot: FilePath
+      do { canonicalRoot = try WindowsDirectoryPublisher.resolvedPath(root) } catch {
+        throw FileSystemFailure.unresolvable(root)
+      }
     #else
       let canonicalRoot = rootIdentity
     #endif
@@ -50,7 +53,9 @@ enum SafePath {
 
   static func canonical(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
     #if os(Windows)
-      return try WindowsDirectoryPublisher.canonicalPath(url)
+      do { return try WindowsDirectoryPublisher.canonicalPath(url) } catch {
+        throw FileSystemFailure.unresolvable(url)
+      }
     #else
       var ancestor = url
       var missing: [FilePath.Component] = []
