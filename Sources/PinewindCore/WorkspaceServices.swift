@@ -12,7 +12,9 @@ public protocol RepositoryProvider: Sendable {
   func prepareSource(_ identity: SourceIdentity, cacheRoot: FilePath) async throws -> SourceSnapshot
 }
 public protocol ResourceDownloader: Sendable {
-  func download(_ url: URL, to destination: FilePath) async throws
+  /// Downloads to a candidate file. When `maximumBytes` is set, the transfer
+  /// itself aborts as soon as the limit is exceeded.
+  func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws
 }
 public struct SourceSnapshot: Sendable {
   public let identity: SourceIdentity

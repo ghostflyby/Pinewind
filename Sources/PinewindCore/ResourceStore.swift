@@ -11,14 +11,25 @@ struct ResourceStore: Sendable {
   let root: FilePath
   let downloader: any ResourceDownloader
   func path(_ pin: PinnedResource) -> FilePath { root.appending("resources/" + pin.sha256) }
-  func pin(_ url: URL, target: RelativePath) async throws -> PinnedResource {
+  func pin(_ url: URL, target: RelativePath, maximumBytes: Int? = nil) async throws
+    -> PinnedResource
+  {
     let candidate = root.appending("downloads/" + UUID().uuidString)
     try await BlockingIO.run {
       try FileManager.default.createDirectory(
         at: candidate.removingLastComponent(), withIntermediateDirectories: true)
     }
     defer { try? FileManager.default.removeItem(at: candidate) }
-    try await downloader.download(url, to: candidate)
+    try await downloader.download(url, to: candidate, maximumBytes: maximumBytes)
+    if let maximumBytes {
+      // Injectable downloaders may ignore the transfer cap; the store enforces it
+      // before the bytes enter the content-addressed cache.
+      let size = try await BlockingIO.run { try SnapshotFiles.byteCount(candidate) }
+      guard size <= maximumBytes else {
+        throw PinewindError(
+          .resourceLimit, "downloaded resource exceeds the size limit", source: url.absoluteString)
+      }
+    }
     let hash = try await BlockingIO.run { try SnapshotFiles.sha256(candidate) }
     let pin = try PinnedResource(url: url, path: target, sha256: hash)
     try await BlockingIO.run {

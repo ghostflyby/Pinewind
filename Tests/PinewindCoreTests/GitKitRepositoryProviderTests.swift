@@ -304,6 +304,28 @@ struct GitKitRepositoryProviderTests {
     }
   }
 
+  @Test func downloadAbortsMidTransferWhenByteCapIsExceeded() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [ResourceProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    let downloader = HTTPSResourceDownloader(session: session)
+    let file = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: file) }
+    await #expect {
+      try await downloader.download(
+        URL(string: "https://resource.test/ok")!, to: file, maximumBytes: 2)
+    } throws: { error in
+      guard let error = error as? PinewindError else { return false }
+      return error.code == .resourceLimit && error.source == "https://resource.test/ok"
+    }
+    #expect(!FileManager.default.fileExists(atPath: file.string))
+    try await downloader.download(
+      URL(string: "https://resource.test/ok")!, to: file, maximumBytes: 8)
+    #expect(try Data(contentsOf: file) == Data("resource".utf8))
+  }
+
   @Test func downloadTransportFailuresKeepErrorCodesAndCancellation() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
@@ -371,7 +393,7 @@ private func downloadedData(using downloader: HTTPSResourceDownloader, from url:
   let file = native(
     FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
   defer { try? FileManager.default.removeItem(at: file) }
-  try await downloader.download(url, to: file)
+  try await downloader.download(url, to: file, maximumBytes: nil)
   return try Data(contentsOf: file)
 }
 

@@ -44,17 +44,20 @@ actor RemoteConfCapture: ConfResourceCapture {
   func ensure(_ relative: RelativePath) async throws {
     try Task.checkCancellation()
     if pins[relative] != nil { return }
+    guard pins.count < limits.maximumSources else {
+      throw PinewindError(.resourceLimit, "conf resource count exceeded")
+    }
+    guard totalBytes < limits.maximumTotalBytes else {
+      throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
+    }
     let endpoint =
       relative.string == url.lastPathComponent
       ? url : url.deletingLastPathComponent().appendingPathComponent(relative.string)
-    let pin = try await store.pin(endpoint, target: relative)
+    let pin = try await store.pin(endpoint, target: relative, maximumBytes: limits.maximumFileBytes)
     let dataPath = store.path(pin)
     let size = try SnapshotFiles.byteCount(dataPath)
-    guard size <= limits.maximumFileBytes, totalBytes + size <= limits.maximumTotalBytes else {
+    guard totalBytes + size <= limits.maximumTotalBytes else {
       throw PinewindError(.resourceLimit, "conf file exceeds resource limit")
-    }
-    guard pins.count < limits.maximumSources else {
-      throw PinewindError(.resourceLimit, "conf resource count exceeded")
     }
     let destination = try SafePath.file(relative, in: directory)
     try FileManager.default.createDirectory(

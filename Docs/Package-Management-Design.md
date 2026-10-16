@@ -107,7 +107,7 @@ resolve/update 在全部解析、下载和校验完成后,再次协调检查共�
 
 `RepositoryProvider.resolve` 一次返回确定 SourceIdentity,默认后端将默认分支识别与 commit 选择放在同次 refs 广播。prepareSource 接收 FilePath 缓存根,返回完整不可变源码快照。HTTPS Git 使用进程内 GitKit/libgit2,不使用外部 git/ssh 或 GitHub REST API。没有自动子模块和 LFS 内容获取,commit 不可用时失败,不替换成分支最新版本。
 
-`ResourceDownloader.download` 写入 FilePath 候选文件。资源缓存按实际字节的 SHA-256 固定,不归一化换行或编码,不 hash 源码目录树。resolve 保留仍匹配的资源版本,update 可单独更新资源。fetch 校验不符即失败,不自动接受新内容或改锁。
+`ResourceDownloader.download` 写入 FilePath 候选文件;调用方携带的单文件字节上限在传输中生效,超限即中断并清理候选,存储层在内容进入缓存前复核同一上限。资源缓存按实际字节的 SHA-256 固定,不归一化换行或编码,不 hash 源码目录树。resolve 保留仍匹配的资源版本,update 可单独更新资源。fetch 校验不符即失败,不自动接受新内容或改锁。
 
 库识别 recipe、解析下载需求并构建条目资源视图。下载覆盖该条目视图中的源码,不会修改共享源码缓存。本地树在规划时重新读取,有下载资源时先建立本次视图再捕获文件。准备后本地 recipe 改变导致资源不匹配时拒绝规划,需要重新准备。
 

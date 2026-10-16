@@ -147,25 +147,96 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
 public struct HTTPSResourceDownloader: ResourceDownloader {
   private let session: URLSession
   public init(session: URLSession = .shared) { self.session = session }
-  public func download(_ url: URL, to destination: FilePath) async throws {
+  public func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     guard url.scheme?.lowercased() == "https", url.host != nil else {
       throw PinewindError(.invalidConfiguration, "download resources require HTTPS")
     }
     let destination = try NativePath.absolute(destination)
     try Task.checkCancellation()
+    let request = URLRequest(url: url)
+    if let maximumBytes {
+      try await downloadBounded(request, to: destination, maximumBytes: maximumBytes, url: url)
+    } else {
+      try await downloadUnbounded(request, to: destination, url: url)
+    }
+  }
+
+  /// Uncapped downloads use the fast download-to-file path.
+  private func downloadUnbounded(_ request: URLRequest, to destination: FilePath, url: URL)
+    async throws
+  {
     let temporary: URL
     let response: URLResponse
     do {
       (temporary, response) = try await session.download(
-        for: URLRequest(url: url), delegate: HTTPSRedirectGuard())
+        for: request, delegate: HTTPSRedirectGuard())
     } catch {
-      if Task.isCancelled || (error as? URLError)?.code == .cancelled {
-        throw CancellationError()
-      }
-      throw PinewindError.wrap(error, source: url.absoluteString)
+      throw transportFailure(error, url: url)
     }
     defer { try? FileManager.default.removeItem(at: temporary) }
-    guard let response = response as? HTTPURLResponse, response.url?.scheme?.lowercased() == "https"
+    _ = try validatedResponse(response, url: url)
+    try Task.checkCancellation()
+    let source = try NativePath.from(temporary)
+    try await BlockingIO.run {
+      try FileManager.default.createDirectory(
+        at: destination.removingLastComponent(), withIntermediateDirectories: true)
+      try FileManager.default.copyItem(at: source, to: destination)
+    }
+  }
+
+  /// The size cap takes effect while bytes are in flight, so an oversized
+  /// transfer is aborted instead of written and inspected afterwards.
+  private func downloadBounded(
+    _ request: URLRequest, to destination: FilePath, maximumBytes: Int, url: URL
+  ) async throws {
+    let stream: URLSession.AsyncBytes
+    let response: URLResponse
+    do {
+      (stream, response) = try await session.bytes(
+        for: request, delegate: HTTPSRedirectGuard())
+    } catch {
+      throw transportFailure(error, url: url)
+    }
+    _ = try validatedResponse(response, url: url)
+    try await BlockingIO.run {
+      try FileManager.default.createDirectory(
+        at: destination.removingLastComponent(), withIntermediateDirectories: true)
+    }
+    let handle = try FileDescriptor.open(
+      destination, .writeOnly, options: [.create, .truncate],
+      permissions: [.ownerReadWrite, .groupRead, .otherRead])
+    defer { try? handle.close() }
+    do {
+      var pending: [UInt8] = []
+      pending.reserveCapacity(65536)
+      func flush() throws {
+        _ = try handle.writeAll(pending)
+        pending.removeAll(keepingCapacity: true)
+      }
+      var received = 0
+      for try await byte in stream {
+        try Task.checkCancellation()
+        received += 1
+        if received > maximumBytes {
+          throw PinewindError(
+            .resourceLimit, "download exceeds the resource size limit", source: url.absoluteString)
+        }
+        pending.append(byte)
+        if pending.count == 65536 { try flush() }
+      }
+      if !pending.isEmpty { try flush() }
+    } catch let error as PinewindError {
+      try? FileManager.default.removeItem(at: destination)
+      throw error
+    } catch {
+      try? FileManager.default.removeItem(at: destination)
+      throw transportFailure(error, url: url)
+    }
+  }
+
+  private func validatedResponse(_ response: URLResponse, url: URL) throws -> HTTPURLResponse {
+    guard let response = response as? HTTPURLResponse,
+      response.url?.scheme?.lowercased() == "https"
     else {
       throw PinewindError(.io, "download did not return HTTPS", source: url.absoluteString)
     }
@@ -175,13 +246,12 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
           ? .authenticationFailed : (response.statusCode == 404 ? .contentMissing : .io),
         "download returned HTTP \(response.statusCode)", source: url.absoluteString)
     }
-    try Task.checkCancellation()
-    let source = try NativePath.from(temporary)
-    try await BlockingIO.run {
-      try FileManager.default.createDirectory(
-        at: destination.removingLastComponent(), withIntermediateDirectories: true)
-      try FileManager.default.copyItem(at: source, to: destination)
-    }
+    return response
+  }
+
+  private func transportFailure(_ error: any Error, url: URL) -> any Error {
+    if Task.isCancelled || (error as? URLError)?.code == .cancelled { return CancellationError() }
+    return PinewindError.wrap(error, source: url.absoluteString)
   }
 }
 private final class HTTPSRedirectGuard: NSObject, URLSessionTaskDelegate {

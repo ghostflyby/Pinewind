@@ -73,7 +73,7 @@ private actor Downloads: ResourceDownloader {
   var files: [URL: Data] = [:]
   var calls = 0
   func set(_ endpoint: URL, _ text: String) { files[endpoint] = Data(text.utf8) }
-  func download(_ endpoint: URL, to destination: FilePath) async throws {
+  func download(_ endpoint: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     calls += 1
     guard let bytes = files[endpoint] else {
       throw PinewindError(.contentMissing, "fixture HTTP 404", source: endpoint.absoluteString)
