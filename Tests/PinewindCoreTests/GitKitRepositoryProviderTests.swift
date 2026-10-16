@@ -304,7 +304,12 @@ struct GitKitRepositoryProviderTests {
     }
   }
 
-  @Test func downloadAbortsMidTransferWhenByteCapIsExceeded() async throws {
+  #if canImport(FoundationNetworking)
+    @Test(.disabled("Corelibs Foundation download tasks trap with custom URLProtocol"))
+  #else
+    @Test
+  #endif
+  func downloadAbortsMidTransferWhenByteCapIsExceeded() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
     let session = URLSession(configuration: config)
