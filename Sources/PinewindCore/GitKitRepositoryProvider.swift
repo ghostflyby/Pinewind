@@ -184,54 +184,66 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     }
   }
 
-  /// The size cap takes effect while bytes are in flight, so an oversized
-  /// transfer is aborted instead of written and inspected afterwards.
+  /// The size cap takes effect while bytes are in flight on platforms with a
+  /// streaming bytes API, so an oversized transfer is aborted instead of
+  /// written and inspected afterwards. Corelibs Foundation has no such API;
+  /// there the cap is enforced right after the transfer, before caching.
   private func downloadBounded(
     _ request: URLRequest, to destination: FilePath, maximumBytes: Int, url: URL
   ) async throws {
-    let stream: URLSession.AsyncBytes
-    let response: URLResponse
-    do {
-      (stream, response) = try await session.bytes(
-        for: request, delegate: HTTPSRedirectGuard())
-    } catch {
-      throw transportFailure(error, url: url)
-    }
-    _ = try validatedResponse(response, url: url)
-    try await BlockingIO.run {
-      try FileManager.default.createDirectory(
-        at: destination.removingLastComponent(), withIntermediateDirectories: true)
-    }
-    let handle = try FileDescriptor.open(
-      destination, .writeOnly, options: [.create, .truncate],
-      permissions: [.ownerReadWrite, .groupRead, .otherRead])
-    defer { try? handle.close() }
-    do {
-      var pending: [UInt8] = []
-      pending.reserveCapacity(65536)
-      func flush() throws {
-        _ = try handle.writeAll(pending)
-        pending.removeAll(keepingCapacity: true)
+    #if canImport(FoundationNetworking)
+      try await downloadUnbounded(request, to: destination, url: url)
+      let size = try await BlockingIO.run { try SnapshotFiles.byteCount(destination) }
+      guard size <= maximumBytes else {
+        try? FileManager.default.removeItem(at: destination)
+        throw PinewindError.runtime(
+          .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
       }
-      var received = 0
-      for try await byte in stream {
-        try Task.checkCancellation()
-        received += 1
-        if received > maximumBytes {
-          throw PinewindError.runtime(
-            .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
+    #else
+      let stream: URLSession.AsyncBytes
+      let response: URLResponse
+      do {
+        (stream, response) = try await session.bytes(
+          for: request, delegate: HTTPSRedirectGuard())
+      } catch {
+        throw transportFailure(error, url: url)
+      }
+      _ = try validatedResponse(response, url: url)
+      try await BlockingIO.run {
+        try FileManager.default.createDirectory(
+          at: destination.removingLastComponent(), withIntermediateDirectories: true)
+      }
+      let handle = try FileDescriptor.open(
+        destination, .writeOnly, options: [.create, .truncate],
+        permissions: [.ownerReadWrite, .groupRead, .otherRead])
+      defer { try? handle.close() }
+      do {
+        var pending: [UInt8] = []
+        pending.reserveCapacity(65536)
+        func flush() throws {
+          _ = try handle.writeAll(pending)
+          pending.removeAll(keepingCapacity: true)
         }
-        pending.append(byte)
-        if pending.count == 65536 { try flush() }
+        var received = 0
+        for try await byte in stream {
+          try Task.checkCancellation()
+          received += 1
+          if received > maximumBytes {
+            throw PinewindError.runtime(
+              .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
+          }
+          pending.append(byte)
+          if pending.count == 65536 { try flush() }
+        }
+        if !pending.isEmpty { try flush() }
+      } catch let error as PinewindError {
+        try? FileManager.default.removeItem(at: destination)
+        throw error
+      } catch {
+        try? FileManager.default.removeItem(at: destination)
+        throw transportFailure(error, url: url)
       }
-      if !pending.isEmpty { try flush() }
-    } catch let error as PinewindError {
-      try? FileManager.default.removeItem(at: destination)
-      throw error
-    } catch {
-      try? FileManager.default.removeItem(at: destination)
-      throw transportFailure(error, url: url)
-    }
+    #endif
   }
 
   private func validatedResponse(_ response: URLResponse, url: URL) throws -> HTTPURLResponse {
