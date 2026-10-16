@@ -205,7 +205,7 @@ struct FileAccessCoordinatorTests {
     #expect(
       try String(contentsOf: f.input.appendingPathComponent("pinewind.local.yaml"), encoding: .utf8)
         == "not valid YAML: [")
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: FileSystemFailure.self) {
       try await loadConfiguration(
         inputRoot: f.input, localStateRoot: f.input.appendingPathComponent("local"))
     }

@@ -14,10 +14,10 @@ public struct PinnedResource: Hashable, Sendable {
 
   public init(url: URL, path: RelativePath, sha256: String) throws {
     guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
-      throw PinewindError.runtime(.declaration(.unsupportedSourceURL(url)))
+      throw DeclarationFailure.unsupportedSourceURL(url)
     }
     guard sha256.count == 64, sha256.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
-      throw PinewindError.runtime(.declaration(.invalidChecksum(sha256)))
+      throw DeclarationFailure.invalidChecksum(sha256)
     }
     self.url = url
     self.path = path
@@ -38,11 +38,10 @@ struct PreparedPackage: Sendable {
     resources: [PinnedResource] = []
   ) throws {
     if case .git(let repository) = request.source {
-      guard let commit else { throw PinewindError.runtime(.declaration(.preparedCommitMissing)) }
+      guard let commit else { throw DeclarationFailure.preparedCommitMissing }
       if case .commit(let requested) = repository.revision, requested != commit {
-        throw PinewindError.runtime(
-          .declaration(
-            .preparedCommitMismatch(requested: requested.string, prepared: commit.string)))
+        throw DeclarationFailure.preparedCommitMismatch(
+          requested: requested.string, prepared: commit.string)
       }
     }
     self.request = request
@@ -132,16 +131,16 @@ struct CompositionPlanner: Sendable {
           }
         }
       case .importConf:
-        throw PinewindError.runtime(.declaration(.importNotExpanded))
+        throw DeclarationFailure.importNotExpanded
       case .package(let request):
         let matches = available.filter { $0.request == request }
         guard Set(matches.map { $0.commit }).count <= 1,
           Set(matches.map { $0.directory }).count <= 1
         else {
-          throw PinewindError.runtime(.declaration(.versionConflict))
+          throw DeclarationFailure.versionConflict
         }
         guard let prepared = matches.first else {
-          throw PinewindError.runtime(.declaration(.missingPreparedSnapshot))
+          throw DeclarationFailure.missingPreparedSnapshot
         }
         roots.append(prepared.directory)
         let source = try SourceIdentity.normalize(request.url)
@@ -154,12 +153,12 @@ struct CompositionPlanner: Sendable {
               $0.url == download.url && $0.path == download.path
             })
           else {
-            throw PinewindError.runtime(.declaration(.unpreparedResource))
+            throw DeclarationFailure.unpreparedResource
           }
           let file = try snapshot.capture(SafePath.file(download.path, in: prepared.directory))
           let hash = try SnapshotFiles.sha256(file)
           guard hash == pinned.sha256 else {
-            throw PinewindError.runtime(.cache(.checksumMismatch(download.url)))
+            throw CacheFailure.checksumMismatch(download.url)
           }
         }
         var selected: [(RelativePath, FilePath)] = []
@@ -168,11 +167,9 @@ struct CompositionPlanner: Sendable {
             if pattern.hasPrefix("../") {
               let segments = pattern.split(separator: "/", maxSplits: 2).map(String.init)
               guard segments.count == 3, segments[0] == ".." else {
-                throw PinewindError.runtime(
-                  .declaration(
-                    .invalidPattern(
-                      pattern: pattern,
-                      detail: "cross-package pattern must be ../<package>/<pattern>")))
+                throw DeclarationFailure.invalidPattern(
+                  pattern: pattern,
+                  detail: "cross-package pattern must be ../<package>/<pattern>")
               }
               let candidates = try available.filter {
                 let sibling = try SourceIdentity.normalize($0.request.url)
@@ -185,8 +182,7 @@ struct CompositionPlanner: Sendable {
                 SourceVersion(url: try SourceIdentity.normalize($0.request.url), commit: $0.commit)
               }
               guard versions.count == 1, let sibling = versions.values.first?.first else {
-                throw PinewindError.runtime(
-                  .declaration(.crossPackageSourceUnresolved(String(segments[1]))))
+                throw DeclarationFailure.crossPackageSourceUnresolved(String(segments[1]))
               }
               roots.append(sibling.directory)
               let glob = try Glob.compile(segments[2])
@@ -194,7 +190,7 @@ struct CompositionPlanner: Sendable {
                 glob.match($0.string)
               }
               guard !matched.isEmpty else {
-                throw PinewindError.runtime(.declaration(.unmatchedPattern(pattern)))
+                throw DeclarationFailure.unmatchedPattern(pattern)
               }
               for path in matched {
                 selected.append((path, try SafePath.file(path, in: sibling.directory)))
@@ -203,7 +199,7 @@ struct CompositionPlanner: Sendable {
               let glob = try Glob.compile(pattern)
               let matched = candidates.filter { glob.match($0.string) }
               guard !matched.isEmpty else {
-                throw PinewindError.runtime(.declaration(.unmatchedPattern(pattern)))
+                throw DeclarationFailure.unmatchedPattern(pattern)
               }
               for path in matched {
                 selected.append((path, try SafePath.file(path, in: prepared.directory)))
@@ -239,7 +235,7 @@ struct CompositionPlanner: Sendable {
       var parent = path.removingLastComponent()
       while !parent.isEmpty {
         guard !paths.contains(parent) else {
-          throw PinewindError.runtime(.declaration(.outputConflict))
+          throw DeclarationFailure.outputConflict
         }
         parent.removeLastComponent()
       }

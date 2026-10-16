@@ -217,7 +217,7 @@ struct WorkspaceTests {
     let local = try PackageRequest(source: .directory(.path("package")))
     #expect(local.source == .directory(.path(captured.appending("package"))))
     let incompleteURL = try #require(URL(string: "file:relative"))
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       _ = try PackageRequest(source: .directory(.fileURL(incompleteURL)))
     }
     let locations = try WorkspaceLocations(
@@ -481,17 +481,17 @@ struct WorkspaceTests {
       "ref: main", "commit: abc", "revision: {branch: main, commit: abc}",
       "revision: {commit: abc}",
     ] {
-      #expect(throws: PinewindError.self) {
+      #expect {
         _ = try ManifestDocument.parse(
           "version: 1\norder: [{url: https://example.com/repo, \(source)}]"
         ).evaluate()
-      }
+      } throws: { ($0 as? PinewindError) != nil || $0 is DeclarationFailure }
     }
     for path in [
       "", "/root", "../outside", "a/../../outside", ".", "a/..", "C:relative",
       "C:/../outside",
     ] {
-      #expect(throws: PinewindError.self) { _ = try RelativePath(FilePath(path)) }
+      #expect(throws: FileSystemFailure.self) { _ = try RelativePath(FilePath(path)) }
     }
     #expect(try RelativePath("词典/emoji 😀.txt").string == "词典/emoji 😀.txt")
     let normalized = try RelativePath(FilePath("a//./nested/../emoji.txt/"))

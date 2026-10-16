@@ -57,7 +57,9 @@ enum NativeLock {
     try FileManager.default.createDirectory(
       at: file.removingLastComponent(), withIntermediateDirectories: true)
     let descriptor: FileDescriptor
-    do { descriptor = try FileDescriptor.openLockFile(file) } catch {
+    do { descriptor = try FileDescriptor.openLockFile(file) } catch let error as Errno {
+      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+    } catch {
       throw PinewindError.wrap(error)
     }
     // A close error must not turn a completed publication into a reported failure.

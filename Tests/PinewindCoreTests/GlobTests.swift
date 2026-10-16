@@ -44,7 +44,7 @@ struct GlobTests {
     "", "/foo", "../foo", "a/../*", "a\\*.yaml", "bad\0pattern", "[", "[]", "[z-a]",
   ])
   func rejectsUnsafeOrMalformedPatterns(_ pattern: String) {
-    #expect(throws: PinewindError.self) { try Glob.compile(pattern) }
+    #expect(throws: DeclarationFailure.self) { try Glob.compile(pattern) }
   }
 
   @Test func includeAndExcludeUseTheSameMatcher() throws {
@@ -53,7 +53,7 @@ struct GlobTests {
     #expect(try filter.accepts(RelativePath("schemas/.hidden.yaml")))
     #expect(try !filter.accepts(RelativePath("schemas/test.custom.yaml")))
     #expect(try !filter.accepts(RelativePath("words.txt")))
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try ManifestDocument.parse("version: 1\norder: [{self: {include: ['[']}}]").evaluate()
     }
   }

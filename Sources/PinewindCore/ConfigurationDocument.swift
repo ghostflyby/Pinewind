@@ -42,14 +42,14 @@ public struct PackageFields: Hashable, Sendable {
     self.exclude = exclude
   }
 
-  func validate() throws {
+  func validate() throws(DeclarationFailure) {
     if let url = url.value, url.scheme == nil {
-      throw PinewindError.runtime(.declaration(.relativeSourceURL(url)))
+      throw DeclarationFailure.relativeSourceURL(url)
     }
     try FileFilter(include: include.value, exclude: exclude.value ?? []).validate()
     try revision.value?.validate()
     if url.value?.isFileURL == true, revision.value != nil {
-      throw PinewindError.runtime(.declaration(.revisionWithFileSource))
+      throw DeclarationFailure.revisionWithFileSource
     }
   }
 }

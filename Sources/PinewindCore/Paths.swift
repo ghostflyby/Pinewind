@@ -11,16 +11,16 @@ import SystemPackage
 public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConvertible {
   public let filePath: FilePath
 
-  public init(_ path: FilePath) throws {
+  public init(_ path: FilePath) throws(FileSystemFailure) {
     guard path.root == nil,
       path.components.allSatisfy({ !$0.string.contains(":") && !$0.string.contains("\\") })
     else {
-      throw PinewindError.runtime(.file(.notPortable(path)))
+      throw FileSystemFailure.notPortable(path)
     }
     let normalized = path.lexicallyNormalized()
     guard !normalized.isEmpty, String(validating: normalized) != nil,
       normalized.components.allSatisfy({ $0.kind == .regular })
-    else { throw PinewindError.runtime(.file(.unsafeRelative(path))) }
+    else { throw FileSystemFailure.unsafeRelative(path) }
     filePath = normalized
   }
 
@@ -37,18 +37,18 @@ public enum FileLocation: Hashable, Sendable {
   case path(FilePath)
   case fileURL(URL)
 
-  func resolved(relativeTo base: FilePath?) throws -> Self {
+  func resolved(relativeTo base: FilePath?) throws(FileSystemFailure) -> Self {
     switch self {
     case .path(let path): return .path(try NativePath.absolute(path, relativeTo: base))
     case .fileURL(let url):
       guard try NativePath.from(url).isAbsolute else {
-        throw PinewindError.runtime(.file(.notAbsoluteFileURL(url)))
+        throw FileSystemFailure.notAbsoluteFileURL(url)
       }
       return self
     }
   }
   var url: URL {
-    get throws {
+    get throws(FileSystemFailure) {
       switch self {
       case .fileURL(let url): return url
       case .path(let path): return try path.foundationURL
@@ -56,7 +56,7 @@ public enum FileLocation: Hashable, Sendable {
     }
   }
   var filePath: FilePath {
-    get throws {
+    get throws(FileSystemFailure) {
       switch self {
       case .path(let path): return path
       case .fileURL(let url): return try NativePath.from(url)
@@ -100,20 +100,18 @@ public struct WorkspaceLocations: Hashable, Sendable {
     let input = try self.userFilesRoot.filePath
     for managed in [self.stateRoot, self.cacheRoot] {
       guard try !SafePath.overlaps(input, managed) else {
-        throw PinewindError.runtime(.file(.overlappingPaths(input, managed)))
+        throw FileSystemFailure.overlappingPaths(input, managed)
       }
       for file in [
         self.configuration.manifest, self.configuration.lock, self.configuration.localOverrides,
       ].compactMap({ $0 }) {
         guard try !SafePath.overlaps(managed, file.filePath) else {
-          throw PinewindError.runtime(
-            .file(.overlappingPaths(managed, try file.filePath)))
+          throw FileSystemFailure.overlappingPaths(managed, try file.filePath)
         }
       }
     }
     guard try !SafePath.overlaps(self.stateRoot, self.cacheRoot) else {
-      throw PinewindError.runtime(
-        .file(.overlappingPaths(self.stateRoot, self.cacheRoot)))
+      throw FileSystemFailure.overlappingPaths(self.stateRoot, self.cacheRoot)
     }
     let documents = try [
       self.configuration.manifest, self.configuration.lock, self.configuration.localOverrides,
@@ -121,7 +119,7 @@ public struct WorkspaceLocations: Hashable, Sendable {
     var seen: Set<FilePath> = []
     for document in documents {
       guard seen.insert(document).inserted else {
-        throw PinewindError.runtime(.file(.duplicatePath(document)))
+        throw FileSystemFailure.duplicatePath(document)
       }
     }
   }
@@ -129,22 +127,26 @@ public struct WorkspaceLocations: Hashable, Sendable {
 
 enum NativePath {
   /// Resolve once at a public entry point, before asynchronous work begins.
-  static func absolute(_ path: FilePath, relativeTo base: FilePath? = nil) throws -> FilePath {
+  static func absolute(_ path: FilePath, relativeTo base: FilePath? = nil) throws(FileSystemFailure)
+    -> FilePath
+  {
     if path.isAbsolute { return path }
     guard path.root == nil else {
-      throw PinewindError.runtime(.file(.ambiguousForm(path)))
+      throw FileSystemFailure.ambiguousForm(path)
     }
-    let base =
-      try base.map { try absolute($0) }
-      ?? FilePath(FileManager.default.currentDirectoryPath)
-    return base.appending(path.components)
+    let resolved: FilePath
+    switch base {
+    case .some(let supplied): resolved = try absolute(supplied)
+    case nil: resolved = FilePath(FileManager.default.currentDirectoryPath)
+    }
+    return resolved.appending(path.components)
   }
-  static func from(_ url: URL) throws -> FilePath {
+  static func from(_ url: URL) throws(FileSystemFailure) -> FilePath {
     guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
       let representation = url.withUnsafeFileSystemRepresentation({ pointer in
         pointer.flatMap { String(validatingCString: $0) }
       })
-    else { throw PinewindError.runtime(.file(.unrepresentableFileURL(url))) }
+    else { throw FileSystemFailure.unrepresentableFileURL(url) }
     #if os(Windows)
       var value = representation.replacingOccurrences(of: "/", with: "\\")
       if value.hasPrefix("\\"), value.dropFirst(2).hasPrefix(":") { value.removeFirst() }
@@ -158,7 +160,7 @@ enum NativePath {
       let path = FilePath(value)
     #else
       guard url.host == nil || url.host == "" || url.host == "localhost" else {
-        throw PinewindError.runtime(.file(.nonLocalFileURL(url)))
+        throw FileSystemFailure.nonLocalFileURL(url)
       }
       let path = FilePath(representation)
     #endif
@@ -169,9 +171,9 @@ enum NativePath {
 // Foundation is an adapter at the native I/O edge; managed interfaces stay FilePath-only.
 extension FilePath {
   var foundationURL: URL {
-    get throws {
+    get throws(FileSystemFailure) {
       guard let value = String(validating: self) else {
-        throw PinewindError.runtime(.file(.unresolvable(self)))
+        throw FileSystemFailure.unresolvable(self)
       }
       return URL(filePath: value, directoryHint: .notDirectory)
     }

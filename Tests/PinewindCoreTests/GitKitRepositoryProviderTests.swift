@@ -264,9 +264,9 @@ struct GitKitRepositoryProviderTests {
   ])
   func rejectsNonHTTPSAndMalformedSources(_ text: String) async throws {
     let url = try #require(URL(string: text))
-    await #expect(throws: PinewindError.self) {
+    await #expect {
       try await GitKitRepositoryProvider().resolve(RepositoryRequest(url: url)).commit.string
-    }
+    } throws: { ($0 as? PinewindError) != nil || $0 is Failure }
   }
 
   @Test func explicitCommitResolutionIsOfflineAndNormalizesCase() async throws {

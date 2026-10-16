@@ -72,29 +72,45 @@ public actor Workspace {
     }
     return Workspace(locations: locations, services: services, options: options)
   }
+  /// Guarantees that everything surfacing from the pipeline is a `PinewindError`
+  /// while cancellation keeps its own type.
+  private func pipeline<T>(_ body: () async throws -> T) async throws -> T {
+    do { return try await body() } catch let error as CancellationError { throw error } catch {
+      throw PinewindError.embed(error)
+    }
+  }
   public func configuration() async throws -> ConfigurationSession {
-    ConfigurationSession(snapshot: try await store.load(), store: store)
+    try await pipeline { ConfigurationSession(snapshot: try await store.load(), store: store) }
   }
   public func resolve(progress: OperationProgress? = nil) async throws -> Resolution {
-    try await resolveSnapshot(store.load(), preview: false, update: nil, progress: progress)
+    try await pipeline {
+      try await self.resolveSnapshot(store.load(), preview: false, update: nil, progress: progress)
+    }
   }
   public func resolve(preview: ConfigurationSnapshot, progress: OperationProgress? = nil)
     async throws -> Resolution
   {
-    try check(preview)
-    return try await resolveSnapshot(preview, preview: true, update: nil, progress: progress)
+    try await pipeline {
+      try check(preview)
+      return try await resolveSnapshot(preview, preview: true, update: nil, progress: progress)
+    }
   }
   public func update(_ selection: UpdateSelection = .all, progress: OperationProgress? = nil)
     async throws -> Resolution
   {
-    try await resolveSnapshot(store.load(), preview: false, update: selection, progress: progress)
+    try await pipeline {
+      try await resolveSnapshot(store.load(), preview: false, update: selection, progress: progress)
+    }
   }
   public func update(
     _ selection: UpdateSelection = .all, preview: ConfigurationSnapshot,
     progress: OperationProgress? = nil
   ) async throws -> Resolution {
-    try check(preview)
-    return try await resolveSnapshot(preview, preview: true, update: selection, progress: progress)
+    try await pipeline {
+      try check(preview)
+      return try await resolveSnapshot(
+        preview, preview: true, update: selection, progress: progress)
+    }
   }
   private func check(_ snapshot: ConfigurationSnapshot) throws {
     guard snapshot.locations == locations else {
@@ -213,12 +229,16 @@ public actor Workspace {
     _ resolution: Resolution? = nil, mode: PreparationMode = .locked,
     progress: OperationProgress? = nil
   ) async throws -> PreparedInputs {
-    try await prepare(resolution, network: true, mode: mode, progress: progress)
+    try await pipeline {
+      try await prepare(resolution, network: true, mode: mode, progress: progress)
+    }
   }
   public func cachedInputs(_ resolution: Resolution? = nil, progress: OperationProgress? = nil)
     async throws -> PreparedInputs
   {
-    try await prepare(resolution, network: false, mode: .locked, progress: progress)
+    try await pipeline {
+      try await prepare(resolution, network: false, mode: .locked, progress: progress)
+    }
   }
   private func currentResolution() async throws -> Resolution {
     let snapshot = try await store.load()
@@ -346,6 +366,12 @@ public actor Workspace {
   public func plan(_ inputs: PreparedInputs, progress: OperationProgress? = nil) async throws
     -> CompositionPlan
   {
+    try await pipeline { try await planOperation(inputs, progress: progress) }
+  }
+  private func planOperation(_ inputs: PreparedInputs, progress: OperationProgress? = nil)
+    async throws
+    -> CompositionPlan
+  {
     try check(inputs.binding.snapshot)
     progress?(.started(.planning))
     let localPackages = inputs.packages.filter { $0.request.url.isFileURL }
@@ -405,6 +431,11 @@ public actor Workspace {
   public func compose(
     _ plan: CompositionPlan, to output: FilePath, progress: OperationProgress? = nil
   ) async throws -> CompositionResult {
+    try await pipeline { try await composeOperation(plan, to: output, progress: progress) }
+  }
+  private func composeOperation(
+    _ plan: CompositionPlan, to output: FilePath, progress: OperationProgress? = nil
+  ) async throws -> CompositionResult {
     if let binding = plan.binding { try check(binding.snapshot) }
     let output = try NativePath.absolute(output, relativeTo: locations.relativeTo)
     let protected =
@@ -432,17 +463,21 @@ public actor Workspace {
   public func compose(to output: FilePath, progress: OperationProgress? = nil) async throws
     -> CompositionResult
   {
-    let inputs = try await cachedInputs(progress: progress)
-    let plan = try await self.plan(inputs, progress: progress)
-    return try await compose(plan, to: output, progress: progress)
+    try await pipeline {
+      let inputs = try await cachedInputs(progress: progress)
+      let plan = try await self.plan(inputs, progress: progress)
+      return try await compose(plan, to: output, progress: progress)
+    }
   }
   public func fetchAndCompose(
     to output: FilePath, mode: PreparationMode = .locked,
     progress: OperationProgress? = nil
   ) async throws -> CompositionResult {
-    let inputs = try await fetch(mode: mode, progress: progress)
-    let plan = try await self.plan(inputs, progress: progress)
-    return try await compose(plan, to: output, progress: progress)
+    try await pipeline {
+      let inputs = try await fetch(mode: mode, progress: progress)
+      let plan = try await self.plan(inputs, progress: progress)
+      return try await compose(plan, to: output, progress: progress)
+    }
   }
 
   private func repository(_ request: PackageRequest) -> RepositoryRequest? {

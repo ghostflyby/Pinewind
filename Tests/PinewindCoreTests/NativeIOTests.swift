@@ -16,7 +16,9 @@ struct NativeIOTests {
     @Test func windowsRootsAndUNCFileURLsUseNativePathSemantics() throws {
       let base = FilePath("C:\\workspace")
       for path in [FilePath("C:package"), FilePath("\\package")] {
-        #expect(throws: PinewindError.self) { _ = try NativePath.absolute(path, relativeTo: base) }
+        #expect(throws: FileSystemFailure.self) {
+          _ = try NativePath.absolute(path, relativeTo: base)
+        }
       }
       let endpoint = URL(string: "file://server/share/package")!
       let path = try NativePath.from(endpoint)
@@ -37,10 +39,10 @@ struct NativeIOTests {
       return
     }
     #expect(preserved == endpoint)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       _ = try NativePath.from(URL(string: "https://example.com/path")!)
     }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       _ = try NativePath.from(URL(string: "file:///tmp/a%00b")!)
     }
   }
@@ -60,10 +62,10 @@ struct NativeIOTests {
     try FileManager.default.createSymbolicLink(
       at: root.appending("source/link").foundationURL,
       withDestinationURL: root.appending("outside").foundationURL)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       _ = try SafePath.file(RelativePath("link/value"), in: root.appending("source"))
     }
-    #expect(throws: PinewindError.self) { _ = try SafePath.files(in: root.appending("source")) }
+    #expect(throws: FileSystemFailure.self) { _ = try SafePath.files(in: root.appending("source")) }
   }
 
   @Test func descriptorLocksContendAndReleaseOnCloseOrThrow() throws {
@@ -100,7 +102,7 @@ struct NativeIOTests {
     try FileManager.default.createSymbolicLink(
       at: root.appending("link").foundationURL, withDestinationURL: target.foundationURL)
     for name in ["directory", "link"] {
-      #expect(throws: PinewindError.self) {
+      #expect(throws: FileSystemFailure.self) {
         try NativeLock.withLock(root.appending(name)) { Issue.record("locked a nonregular file") }
       }
     }

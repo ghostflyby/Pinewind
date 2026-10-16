@@ -14,9 +14,9 @@
   enum WindowsDirectoryPublisher {
     /// Resolve parent aliases and expand the entry's short name without following
     /// the final managed junction into its replaceable generation.
-    static func publicationPath(_ output: FilePath) throws -> FilePath {
+    static func publicationPath(_ output: FilePath) throws(FileSystemFailure) -> FilePath {
       guard let component = output.lastComponent else {
-        throw PinewindError.runtime(.file(.isFilesystemRoot(output)))
+        throw FileSystemFailure.isFilesystemRoot(output)
       }
       let parent = try resolvedPath(output.removingLastComponent())
       let entry = parent.appending(component)
@@ -26,7 +26,7 @@
         GetLongPathNameW($0, &buffer, DWORD(buffer.count))
       }
       guard count > 0, Int(count) < buffer.count else {
-        throw PinewindError.runtime(.file(.unresolvable(entry)))
+        throw FileSystemFailure.unresolvable(entry)
       }
       return FilePath(platformString: buffer)
     }
@@ -36,7 +36,7 @@
         "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
     }
 
-    static func validate(_ output: FilePath) throws {
+    static func validate(_ output: FilePath) throws(FileSystemFailure) {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedPath(target)
@@ -45,26 +45,24 @@
             == canonicalPath(storage(for: output)),
           isGeneration(target.lastComponent?.string ?? "")
         else {
-          throw PinewindError.runtime(
-            .file(
-              .publicationFailed(
-                detail: "composition output is not a Pinewind generation junction")))
+          throw FileSystemFailure(
+            .publicationFailed(
+              detail: "composition output is not a Pinewind generation junction"))
         }
       } else if FileManager.default.fileExists(atPath: output.string, isDirectory: &isDirectory) {
         guard isDirectory.boolValue else {
-          throw PinewindError.runtime(
-            .file(.publicationFailed(detail: "Windows composition output must be a directory")))
+          throw FileSystemFailure.publicationFailed(
+            detail: "Windows composition output must be a directory")
         }
         guard try FileManager.default.contentsOfDirectory(atPath: output.string).isEmpty else {
-          throw PinewindError.runtime(
-            .file(
-              .publicationFailed(
-                detail: "Windows composition output must be empty or managed by Pinewind")))
+          throw FileSystemFailure(
+            .publicationFailed(
+              detail: "Windows composition output must be empty or managed by Pinewind"))
         }
       }
     }
 
-    static func publish(_ candidate: FilePath, at output: FilePath) throws {
+    static func publish(_ candidate: FilePath, at output: FilePath) throws(FileSystemFailure) {
       let fm = FileManager.default
       if try currentTarget(output) != nil || fm.fileExists(atPath: output.string) {
         try redirect(output, to: candidate)
@@ -112,10 +110,9 @@
           nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError.runtime(
-          .file(
-            .publicationFailed(
-              detail: "cannot open composition junction (Windows error \(GetLastError()))")))
+        throw FileSystemFailure(
+          .publicationFailed(
+            detail: "cannot open composition junction (Windows error \(GetLastError()))"))
       }
       defer { _ = CloseHandle(handle) }
       return try body(handle)
@@ -123,18 +120,17 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: FilePath) throws -> FilePath {
+    static func canonicalPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
       FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedPath(_ url: FilePath) throws -> FilePath {
+    static func resolvedPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
       var ancestor = url
       var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
         guard parent != ancestor, let component = ancestor.lastComponent else {
-          throw PinewindError.runtime(
-            .file(.publicationFailed(detail: "cannot resolve composition path")))
+          throw FileSystemFailure.publicationFailed(detail: "cannot resolve composition path")
         }
         missing.append(component)
         ancestor = parent
@@ -143,10 +139,9 @@
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
-          throw PinewindError.runtime(
-            .file(
-              .publicationFailed(
-                detail: "cannot resolve composition path (Windows error \(GetLastError()))")))
+          throw FileSystemFailure(
+            .publicationFailed(
+              detail: "cannot resolve composition path (Windows error \(GetLastError()))"))
         }
         let path = FilePath(platformString: buffer)
         return try windowsNativePath(path)
@@ -157,7 +152,7 @@
       return resolved
     }
 
-    static func currentTarget(_ output: FilePath) throws -> FilePath? {
+    static func currentTarget(_ output: FilePath) throws(FileSystemFailure) -> FilePath? {
       let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }
@@ -166,10 +161,9 @@
         if error == DWORD(ERROR_FILE_NOT_FOUND) || error == DWORD(ERROR_PATH_NOT_FOUND) {
           return nil
         }
-        throw PinewindError.runtime(
-          .file(
-            .publicationFailed(detail: "cannot inspect composition output (Windows error \(error))")
-          ))
+        throw FileSystemFailure(
+          .publicationFailed(detail: "cannot inspect composition output (Windows error \(error))")
+        )
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
       return try withHandle(output, access: 0) { handle in
@@ -181,16 +175,15 @@
             DWORD($0.count), &count, nil)
         }
         guard ok else {
-          throw PinewindError.runtime(
-            .file(
-              .publicationFailed(
-                detail: "cannot read composition junction (Windows error \(GetLastError()))")))
+          throw FileSystemFailure(
+            .publicationFailed(
+              detail: "cannot read composition junction (Windows error \(GetLastError()))"))
         }
         guard count >= 16,
           buffer.integer(at: 0, as: UInt32.self) == UInt32(IO_REPARSE_TAG_MOUNT_POINT)
         else {
-          throw PinewindError.runtime(
-            .file(.publicationFailed(detail: "composition output is not a directory junction")))
+          throw FileSystemFailure.publicationFailed(
+            detail: "composition output is not a directory junction")
         }
         let offset = 16 + Int(buffer.integer(at: 8, as: UInt16.self))
         let length = Int(buffer.integer(at: 10, as: UInt16.self))
@@ -199,8 +192,7 @@
             data: buffer.subdata(in: offset..<(offset + length)), encoding: .utf16LittleEndian),
           path.hasPrefix("\\??\\")
         else {
-          throw PinewindError.runtime(
-            .file(.publicationFailed(detail: "invalid composition junction target")))
+          throw FileSystemFailure.publicationFailed(detail: "invalid composition junction target")
         }
         path.removeFirst(4)
         if path.hasPrefix("UNC\\") { path = "\\\\" + path.dropFirst(4) }
@@ -208,7 +200,7 @@
       }
     }
 
-    static func redirect(_ output: FilePath, to candidate: FilePath) throws {
+    static func redirect(_ output: FilePath, to candidate: FilePath) throws(FileSystemFailure) {
       let printName = try windowsNativePath(candidate).string
       let substituteName =
         printName.hasPrefix("\\\\")
@@ -217,8 +209,7 @@
       let printable = Array(printName.utf16)
       let dataLength = 8 + (substitute.count + printable.count + 2) * 2
       guard dataLength + 8 <= 16_384 else {
-        throw PinewindError.runtime(
-          .file(.publicationFailed(detail: "composition junction path is too long")))
+        throw FileSystemFailure.publicationFailed(detail: "composition junction path is too long")
       }
       var data = Data()
       data.appendInteger(UInt32(IO_REPARSE_TAG_MOUNT_POINT))
@@ -237,10 +228,9 @@
             nil)
         }
         guard ok else {
-          throw PinewindError.runtime(
-            .file(
-              .publicationFailed(
-                detail: "cannot publish composition junction (Windows error \(GetLastError()))")))
+          throw FileSystemFailure(
+            .publicationFailed(
+              detail: "cannot publish composition junction (Windows error \(GetLastError()))"))
         }
       }
     }

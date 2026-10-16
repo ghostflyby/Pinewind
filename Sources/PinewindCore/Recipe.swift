@@ -131,11 +131,17 @@ struct Recipe {
 }
 
 enum Template {
-  static func expand(_ text: String, options: [String: String], declared: Set<String>) throws
+  static func expand(_ text: String, options: [String: String], declared: Set<String>)
+    throws(DeclarationFailure)
     -> String
   {
-    let expression = try NSRegularExpression(
-      pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
+    let expression: NSRegularExpression
+    do {
+      expression = try NSRegularExpression(
+        pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
+    } catch {
+      throw DeclarationFailure.invalidTemplateRange
+    }
     var result = text
     for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
       .reversed()
@@ -145,7 +151,7 @@ enum Template {
       }
       let key = capture(1) ?? capture(3) ?? ""
       guard declared.contains(key) else {
-        throw PinewindError.runtime(.declaration(.undeclaredOption(key)))
+        throw DeclarationFailure.undeclaredOption(key)
       }
       let fallback = capture(2)
       let value: String
@@ -154,10 +160,10 @@ enum Template {
       } else if let fallback {
         value = fallback
       } else {
-        throw PinewindError.runtime(.declaration(.optionValueMissing(key)))
+        throw DeclarationFailure.optionValueMissing(key)
       }
       guard let range = Range(match.range, in: result) else {
-        throw PinewindError.runtime(.declaration(.invalidTemplateRange))
+        throw DeclarationFailure.invalidTemplateRange
       }
       // Literal replacement: substituted values are never reparsed as shell code.
       result.replaceSubrange(range, with: value)

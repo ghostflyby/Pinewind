@@ -37,6 +37,17 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
     return self
   }
 
+  /// Converts anything surfacing from the pipeline into a `PinewindError`.
+  /// Cancellation is not embeddable and must be rethrown before this call.
+  static func embed(_ error: any Error) -> PinewindError {
+    switch error {
+    case let pinned as PinewindError: return pinned
+    case let failure as Failure: return .runtime(failure)
+    default:
+      return .runtime(.defect(.wrapped(detail: String(describing: error), origin: Origin())))
+    }
+  }
+
   /// Preserves cancellation and already-typed failures; wraps everything else
   /// as a boundary defect. The origin captures the wrapping site.
   static func wrap(_ error: any Error, origin: Origin = Origin()) -> any Error {
@@ -124,7 +135,7 @@ public struct Origin: Sendable, Hashable, CustomStringConvertible {
 // MARK: - Fact vocabulary
 
 /// The single fact vocabulary, grouped by pipeline subject matter.
-public enum Failure: Sendable, Hashable, CustomStringConvertible {
+public enum Failure: Error, Sendable, Hashable, CustomStringConvertible {
   case git(GitFailure)
   case file(FileSystemFailure)
   case network(NetworkFailure)
@@ -150,7 +161,7 @@ public enum Failure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum GitFailure: Sendable, Hashable, CustomStringConvertible {
+public enum GitFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case referenceNotFound(String)
   case ambiguousReference(String)
   case defaultBranchIndeterminate(URL)
@@ -198,7 +209,7 @@ public enum TreeEntry: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum FileSystemFailure: Sendable, Hashable, CustomStringConvertible {
+public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case notFound(FilePath)
   case notRegularFile(FilePath)
   case notADirectory(FilePath)
@@ -260,7 +271,7 @@ public enum FileSystemFailure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum NetworkFailure: Sendable, Hashable, CustomStringConvertible {
+public enum NetworkFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case rejected(status: Int, url: URL)
   case transportFailed(url: URL, detail: String)
   case insecureScheme(URL)
@@ -280,7 +291,7 @@ public enum NetworkFailure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum InterpreterFailure: Sendable, Hashable, CustomStringConvertible {
+public enum InterpreterFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case evaluationFailed(detail: String)
   case timedOut
   case budgetExceeded(Budget)
@@ -314,7 +325,7 @@ public enum Budget: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum DeclarationFailure: Sendable, Hashable, CustomStringConvertible {
+public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case reservedName(String)
   case unknownName(String)
   case nameStillReferenced(String)
@@ -404,7 +415,7 @@ public enum DeclarationFailure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum LockFailure: Sendable, Hashable, CustomStringConvertible {
+public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case incompatible(detail: String)
   case malformed(detail: String)
   case declarationChanged
@@ -422,7 +433,7 @@ public enum LockFailure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum StateFailure: Sendable, Hashable, CustomStringConvertible {
+public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case externallyModified
   case staleSnapshot
   case staleInputs
@@ -444,7 +455,7 @@ public enum StateFailure: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum CacheFailure: Sendable, Hashable, CustomStringConvertible {
+public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case contentMissing(URL)
   case checksumMismatch(URL)
 
@@ -460,7 +471,7 @@ public enum CacheFailure: Sendable, Hashable, CustomStringConvertible {
 
 /// Failures of the library's own reasoning or of its foreign-error boundaries.
 /// The audience is the library developer; the origin is the payload.
-public enum Defect: Sendable, Hashable, CustomStringConvertible {
+public enum Defect: Error, Sendable, Hashable, CustomStringConvertible {
   case invariant(detail: String, origin: Origin)
   case wrapped(detail: String, origin: Origin)
 

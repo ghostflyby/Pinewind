@@ -8,7 +8,7 @@ import Foundation
 import SystemPackage
 
 enum SafePath {
-  static func file(_ path: RelativePath, in root: FilePath) throws -> FilePath {
+  static func file(_ path: RelativePath, in root: FilePath) throws(FileSystemFailure) -> FilePath {
     let rootIdentity = try canonical(root)
     #if os(Windows)
       let canonicalRoot = try WindowsDirectoryPublisher.resolvedPath(root)
@@ -17,36 +17,38 @@ enum SafePath {
     #endif
     let candidate = canonicalRoot.appending(path.filePath.components)
     guard try canonical(candidate).starts(with: rootIdentity) else {
-      throw PinewindError.runtime(.file(.escapesRoot(path: candidate, root: rootIdentity)))
+      throw FileSystemFailure.escapesRoot(path: candidate, root: rootIdentity)
     }
     return candidate
   }
 
-  static func validateOutputRoot(_ output: FilePath) throws {
+  static func validateOutputRoot(_ output: FilePath) throws(FileSystemFailure) {
     guard output.lastComponent != nil else {
-      throw PinewindError.runtime(.file(.isFilesystemRoot(output)))
+      throw FileSystemFailure.isFilesystemRoot(output)
     }
   }
 
-  static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath]) throws {
+  static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath])
+    throws(FileSystemFailure)
+  {
     try validateOutputRoot(output)
     let roots = [input] + sources
     let out = try canonical(output)
     for root in roots {
       let path = try canonical(root)
       guard !out.starts(with: path), !path.starts(with: out) else {
-        throw PinewindError.runtime(.file(.overlappingPaths(out, path)))
+        throw FileSystemFailure.overlappingPaths(out, path)
       }
     }
   }
 
-  static func overlaps(_ first: FilePath, _ second: FilePath) throws -> Bool {
+  static func overlaps(_ first: FilePath, _ second: FilePath) throws(FileSystemFailure) -> Bool {
     let a = try canonical(first)
     let b = try canonical(second)
     return a.starts(with: b) || b.starts(with: a)
   }
 
-  static func canonical(_ url: FilePath) throws -> FilePath {
+  static func canonical(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
     #if os(Windows)
       return try WindowsDirectoryPublisher.canonicalPath(url)
     #else
@@ -55,7 +57,7 @@ enum SafePath {
       while !FileManager.default.fileExists(atPath: ancestor.string) {
         let parent = ancestor.removingLastComponent()
         guard parent != ancestor, let component = ancestor.lastComponent else {
-          throw PinewindError.runtime(.file(.unresolvable(url)))
+          throw FileSystemFailure.unresolvable(url)
         }
         missing.append(component)
         ancestor = parent
@@ -77,7 +79,7 @@ enum SafePath {
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
     let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true else {
-      throw PinewindError.runtime(.file(.notADirectory(root)))
+      throw FileSystemFailure.notADirectory(root)
     }
     var enumerationError: (any Error)?
     guard
@@ -89,7 +91,7 @@ enum SafePath {
           return false
         })
     else {
-      throw PinewindError.runtime(.file(.enumerationFailed(root)))
+      throw FileSystemFailure.enumerationFailed(root)
     }
     var result: [RelativePath] = []
     let base = try NativePath.from(root.foundationURL.standardizedFileURL)
@@ -97,7 +99,7 @@ enum SafePath {
       try Cancellation.check()
       let values = try file.resourceValues(forKeys: Set(keys))
       if values.isSymbolicLink == true {
-        throw PinewindError.runtime(.file(.symbolicLinkNotAllowed(FilePath(file.path))))
+        throw FileSystemFailure.symbolicLinkNotAllowed(FilePath(file.path))
       }
       if values.isDirectory == true && file.lastPathComponent == ".git" {
         iterator.skipDescendants()

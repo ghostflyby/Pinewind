@@ -8,25 +8,24 @@ import struct Glob.Pattern
 
 /// Path globs are deterministic and independent of the host shell and locale.
 public enum Glob {
-  static func compile(_ pattern: String) throws -> Pattern {
+  static func compile(_ pattern: String) throws(DeclarationFailure) -> Pattern {
     guard !pattern.isEmpty, !pattern.hasPrefix("/"), !pattern.contains("\\"),
       !pattern.contains("\0"), !pattern.split(separator: "/").contains("..")
     else {
-      throw PinewindError.runtime(
-        .declaration(
-          .invalidPattern(
-            pattern: pattern, detail: "pattern must be a portable relative path")))
+      throw DeclarationFailure.invalidPattern(
+        pattern: pattern, detail: "pattern must be a portable relative path")
     }
     do {
       return try Pattern(pattern, options: options)
     } catch {
-      throw PinewindError.runtime(
-        .declaration(
-          .invalidPattern(pattern: pattern, detail: String(describing: error.underlyingError))))
+      throw DeclarationFailure.invalidPattern(
+        pattern: pattern, detail: String(describing: error.underlyingError))
     }
   }
 
-  public static func matches(_ pattern: String, path: RelativePath) throws -> Bool {
+  public static func matches(_ pattern: String, path: RelativePath) throws(DeclarationFailure)
+    -> Bool
+  {
     try compile(pattern).match(path.string)
   }
 

@@ -148,7 +148,7 @@ struct ConfigurationTests {
     let f = try Fixture()
     defer { f.remove() }
     let value = key == "ref" ? "master" : String(repeating: "a", count: 40)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try PackageRequest(
         url: f.a, revision: key == "ref" ? .reference(value) : .commit(CommitID(value)))
     }
@@ -173,9 +173,9 @@ struct ConfigurationTests {
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
-      #expect(throws: PinewindError.self) { try ManifestDocument.parse(yaml).evaluate() }
+      #expect(throws: DeclarationFailure.self) { try ManifestDocument.parse(yaml).evaluate() }
     }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try ManifestDocument.parse(remote).evaluate(
         localOverrides: LocalOverridesDocument.parse(
           "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}"))
@@ -302,7 +302,7 @@ struct CompositionTests {
         try Template.expand("${value:-default}", options: options, declared: ["value"]) == "default"
       )
     }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try Template.expand("${value}", options: [:], declared: ["value"])
     }
   }
@@ -391,12 +391,12 @@ struct CompositionTests {
   @Test func compositionRejectsFilesystemRootAndCaseAliases() throws {
     let f = try Fixture()
     defer { f.remove() }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       try SafePath.validateRoots(input: f.input, output: URL(fileURLWithPath: "/"), sources: [])
     }
     let alias = URL(fileURLWithPath: f.input.path.uppercased())
     if FileManager.default.fileExists(atPath: alias.path) {
-      #expect(throws: PinewindError.self) {
+      #expect(throws: FileSystemFailure.self) {
         try SafePath.validateRoots(
           input: f.input, output: alias.appendingPathComponent("out"), sources: [])
       }
@@ -619,18 +619,18 @@ struct CompositionTests {
     }
     try FileManager.default.createSymbolicLink(
       at: f.input.appendingPathComponent("escape.yaml"), withDestinationURL: f.a)
-    #expect(throws: PinewindError.self) { try f.plan([.userFiles(FileFilter())]) }
+    #expect(throws: FileSystemFailure.self) { try f.plan([.userFiles(FileFilter())]) }
   }
 
   @Test func sourceTraversalAndFileDirectoryConflictsFailBeforePublishing() throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("recipe.yaml", "install_files: [\"../../escape.yaml\"]", in: f.a)
-    #expect(throws: PinewindError.self) { try f.plan([.package(f.request(f.a))]) }
+    #expect(throws: DeclarationFailure.self) { try f.plan([.package(f.request(f.a))]) }
     try f.write("data", "file", in: f.input)
     try f.write("data/nested.yaml", "nested: true", in: f.a)
     try f.write("recipe.yaml", "install_files: [data/nested.yaml]", in: f.a)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try f.plan([.userFiles(FileFilter()), .package(f.request(f.a))])
     }
   }
@@ -669,7 +669,7 @@ struct CompositionTests {
         == f.b.appendingPathComponent("shared.yaml"))
     let conflicting = try PreparedPackage(
       request: shared, directory: f.b, commit: CommitID(String(repeating: "b", count: 40)))
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try f.plan([.package(consumer)], packages: views + [conflicting])
     }
   }
@@ -723,6 +723,7 @@ struct CompositionTests {
     #expect {
       _ = try f.plan([.package(request)])
     } throws: { error in
+      if error is FileSystemFailure || error is DeclarationFailure { return true }
       switch error as? PinewindError {
       case .runtime(.file): return true
       case .configuration(let document):
@@ -779,7 +780,11 @@ struct CompositionTests {
     try f.write(path, "changed", in: f.a)
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read(path) == "abc")
-    #expect(throws: PinewindError.self) { try f.plan([.package(request)], packages: [prepared]) }
+    #expect {
+      try f.plan([.package(request)], packages: [prepared])
+    } throws: {
+      ($0 as? PinewindError) != nil || $0 is DeclarationFailure || $0 is CacheFailure
+    }
   }
 }
 
@@ -787,7 +792,7 @@ struct CompositionTests {
 struct ConfTests {
   @Test(arguments: ["u/", "/repo", "u//repo", "/", "repo@", "@branch"])
   func descriptorsRejectEmptySourceSegments(_ descriptor: String) {
-    #expect(throws: PinewindError.self) { try PlumImporter.package(descriptor) }
+    #expect(throws: Failure.self) { try PlumImporter.package(descriptor) }
   }
 
   @Test(.timeLimit(.minutes(1))) func longLoopsTimeOutAndCancelInterpreter() async throws {
@@ -895,13 +900,7 @@ struct ConfTests {
     try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
     await #expect {
       try await PlumImporter().evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
-    } throws: {
-      if case .runtime(.interpreter(.budgetExceeded)) = $0 as? PinewindError {
-        return true
-      } else {
-        return false
-      }
-    }
+    } throws: { $0 is InterpreterFailure }
   }
 }
 

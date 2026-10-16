@@ -103,7 +103,7 @@ YAML/conf 定位信息是错误载荷的一部分,不设独立 validation 通道
 
 - **查询型批量**(validate:找出文档全部问题):返回值 `-> [PWError]`。找出问题是询问的成功回答,不是控制流异常;致命失败(文档本身读不出)同样以错误值入数组,不区分第二通道。
 - **管线型批量**(独立单元的执行):收集后抛聚合容器。聚合是独立类型(如 `failures: [PWError]`),不是词表 case——单复数是基数差异,塞入词表会迫使每个单数匹配顺手排除聚合。批量只出现在操作主动声明单元独立的签名上;失败相关的操作首错中断。
-- typed throws:错误面确定的函数以 `throws(PWError)` 标注,批量操作以 `throws(聚合)` 标注;取消保持 `CancellationError` 独立传播,不被词表吸收;含取消或外来错误传播的签名保持 untyped。
+- typed throws:事实层的签名携带**层级最底层的具体类型**——单域链路用域类型(`throws(FileSystemFailure)`/`throws(DeclarationFailure)`…),跨域事实函数用 `throws(Failure)`,抛出点直接抛词表值;归因边界(解析/求值/文档方法/lock 解码)不标注顶层类型,以普通 `throws` 承载 PinewindError——类型系统不做 Failure⇄PinewindError 隐式转换,跨域归因边界强行标注只会制造全量 do/catch 噪声,归因语义由构造点保证。被取消(CancellationError)或外来错误(Foundation/Errno)污染的签名保持 untyped。公共管线入口(Workspace)以 embed 兜底:取消原样穿透,Failure 归位 runtime,其余入 defect——保证管线表面恒为 PinewindError。
 
 ## 10. 迁移
 

@@ -38,11 +38,10 @@ struct PlumImporter: Sendable {
     // Remote conf imports are dispatched by the acquisition layer; the local
     // evaluator must never see them.
     guard let path = request.localPath else {
-      throw PinewindError.runtime(
-        .defect(
-          .invariant(
-            detail: "remote conf requires the HTTP resource preparation layer",
-            origin: Origin())))
+      throw Failure.defect(
+        .invariant(
+          detail: "remote conf requires the HTTP resource preparation layer",
+          origin: Origin()))
     }
     let file = try SafePath.file(path, in: inputRoot)
     return try await evaluate(
@@ -56,13 +55,13 @@ struct PlumImporter: Sendable {
     -> [String]
   {
     guard variables["root_dir"] == nil else {
-      throw PinewindError.runtime(.declaration(.reservedVariable("root_dir")))
+      throw DeclarationFailure.reservedVariable("root_dir")
     }
     guard
       (try SafePath.canonical(file.removingLastComponent()))
         == (try SafePath.canonical(resourceRoot))
     else {
-      throw PinewindError.runtime(.interpreter(.forbiddenOperation(path: file.string)))
+      throw InterpreterFailure.forbiddenOperation(path: file.string)
     }
     let context = try DocumentContext(path: file)
     let name = file.lastComponent?.string ?? ""
@@ -132,8 +131,7 @@ struct PlumImporter: Sendable {
     let sections = descriptor.split(separator: ":", omittingEmptySubsequences: false).map(
       String.init)
     guard !sections[0].isEmpty else {
-      throw PinewindError.runtime(
-        .interpreter(.evaluationFailed(detail: "empty plum package descriptor")))
+      throw Failure.interpreter(.evaluationFailed(detail: "empty plum package descriptor"))
     }
     let source = sections[0].split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
       .map(String.init)
@@ -142,23 +140,21 @@ struct PlumImporter: Sendable {
     guard segments.count == 1 || segments.count == 2, segments.allSatisfy({ !$0.isEmpty }),
       source.count == 1 || !source[1].isEmpty
     else {
-      throw PinewindError.runtime(
-        .interpreter(.evaluationFailed(detail: "invalid plum package descriptor")))
+      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum package descriptor"))
     }
     let owner = segments.count == 2 ? segments[0] : "rime"
     let repository =
       segments.count == 2
       ? segments[1] : (segments[0].hasPrefix("rime-") ? segments[0] : "rime-" + segments[0])
     guard let url = URL(string: "https://github.com/\(owner)/\(repository)") else {
-      throw PinewindError.runtime(
-        .interpreter(.evaluationFailed(detail: "invalid plum repository")))
+      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum repository"))
     }
     var options: [String: String] = [:]
     for token in sections.dropFirst(2).flatMap({ $0.split(separator: ",").map(String.init) }) {
       let pair = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
       guard pair.count == 2, !pair[0].isEmpty, options[String(pair[0])] == nil else {
-        throw PinewindError.runtime(
-          .interpreter(.evaluationFailed(detail: "plum options must be unique key=value literals")))
+        throw Failure.interpreter(
+          .evaluationFailed(detail: "plum options must be unique key=value literals"))
       }
       options[String(pair[0])] = String(pair[1])
     }
@@ -176,17 +172,17 @@ private actor ConfSourceBudget {
   private var calls = 0
   private var bytes = 0
 
-  func charge(_ size: Int) throws {
+  func charge(_ size: Int) throws(InterpreterFailure) {
     calls += 1
     bytes += size
     guard calls <= limits.maximumSources else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.sources)))
+      throw InterpreterFailure.budgetExceeded(.sources)
     }
     guard size <= limits.maximumFileBytes else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.fileBytes)))
+      throw InterpreterFailure.budgetExceeded(.fileBytes)
     }
     guard bytes <= limits.maximumTotalBytes else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
+      throw InterpreterFailure.budgetExceeded(.totalBytes)
     }
   }
 }

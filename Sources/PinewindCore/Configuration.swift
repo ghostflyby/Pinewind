@@ -14,20 +14,32 @@ public struct FileFilter: Hashable, Sendable {
     self.include = include
     self.exclude = exclude
   }
-  public func accepts(_ path: RelativePath) throws -> Bool {
-    let included = try include.map { try $0.contains { try Glob.matches($0, path: path) } } ?? true
-    return try included && !(exclude.contains { try Glob.matches($0, path: path) })
+  public func accepts(_ path: RelativePath) throws(DeclarationFailure) -> Bool {
+    if let include {
+      var matched = false
+      for pattern in include {
+        if try Glob.matches(pattern, path: path) {
+          matched = true
+          break
+        }
+      }
+      if !matched { return false }
+    }
+    for pattern in exclude {
+      if try Glob.matches(pattern, path: path) { return false }
+    }
+    return true
   }
-  func validate() throws {
+  func validate() throws(DeclarationFailure) {
     for pattern in (include ?? []) + exclude { _ = try Glob.compile(pattern) }
   }
 }
 
 public struct CommitID: Hashable, Sendable, CustomStringConvertible {
   public let string: String
-  public init(_ string: String) throws {
+  public init(_ string: String) throws(DeclarationFailure) {
     guard string.count == 40, string.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
-      throw PinewindError.runtime(.declaration(.invalidCommitID(string)))
+      throw DeclarationFailure.invalidCommitID(string)
     }
     self.string = string.lowercased()
   }
@@ -48,9 +60,9 @@ public enum GitRevision: Hashable, Sendable {
     case .reference(let value): return value
     }
   }
-  func validate() throws {
+  func validate() throws(DeclarationFailure) {
     if let value = reference, value.isEmpty || value.contains("\0") || value.hasSuffix("/") {
-      throw PinewindError.runtime(.declaration(.invalidRevision))
+      throw DeclarationFailure.invalidRevision
     }
   }
 }
@@ -65,12 +77,12 @@ public struct RepositoryRequest: Hashable, Sendable {
   public let revision: GitRevision
   let canonicalURL: URL
   var key: RepositoryKey { RepositoryKey(url: canonicalURL, revision: revision) }
-  public init(url: URL, revision: GitRevision = .defaultBranch) throws {
+  public init(url: URL, revision: GitRevision = .defaultBranch) throws(Failure) {
     let normalized = try SourceIdentity.normalize(url, preservingGitSuffix: true)
     guard !normalized.isFileURL else {
-      throw PinewindError.runtime(.git(.unsupportedSourceURL(normalized)))
+      throw Failure.git(.unsupportedSourceURL(normalized))
     }
-    try revision.validate()
+    do { try revision.validate() } catch { throw Failure.declaration(error) }
     self.url = normalized
     self.canonicalURL = try SourceIdentity.normalize(normalized)
     self.revision = revision
@@ -104,7 +116,7 @@ public struct PackageRequest: Hashable, Sendable {
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
   ) throws {
     if let recipe, recipe.contains("\0") || recipe.contains("\\") {
-      throw PinewindError.runtime(.file(.notPortable(FilePath(recipe))))
+      throw Failure.file(.notPortable(FilePath(recipe)))
     }
     let recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
     try filter.validate()
@@ -128,7 +140,7 @@ public struct PackageRequest: Hashable, Sendable {
   ) throws {
     if url.isFileURL {
       guard revision == nil else {
-        throw PinewindError.runtime(.declaration(.revisionWithFileSource))
+        throw DeclarationFailure.revisionWithFileSource
       }
       try self.init(
         source: .directory(.fileURL(url)), recipe: recipe, options: options, filter: filter)
@@ -144,23 +156,23 @@ public struct ConfImport: Hashable, Sendable {
   public let source: String
   public let variables: [String: String]
   let localPath: RelativePath?
-  public init(source: String, variables: [String: String] = [:]) throws {
+  public init(source: String, variables: [String: String] = [:]) throws(Failure) {
     guard variables["root_dir"] == nil else {
-      throw PinewindError.runtime(.declaration(.reservedVariable("root_dir")))
+      throw Failure.declaration(.reservedVariable("root_dir"))
     }
     guard !source.isEmpty else {
-      throw PinewindError.runtime(.declaration(.importSourceRequired))
+      throw Failure.declaration(.importSourceRequired)
     }
     guard !source.contains("\0") else {
-      throw PinewindError.runtime(.file(.notPortable(FilePath(source))))
+      throw Failure.file(.notPortable(FilePath(source)))
     }
     if source.hasPrefix(":") || source.contains("://") {
       localPath = nil
     } else {
       guard !source.contains("\\") else {
-        throw PinewindError.runtime(.file(.notPortable(FilePath(source))))
+        throw Failure.file(.notPortable(FilePath(source)))
       }
-      localPath = try RelativePath(FilePath(source))
+      do { localPath = try RelativePath(FilePath(source)) } catch { throw Failure.file(error) }
     }
     self.source = localPath?.string ?? source
     self.variables = variables
@@ -179,17 +191,17 @@ typealias Manifest = EvaluatedManifest
 public struct SourceIdentity: Hashable, Sendable {
   public let url: URL
   public let commit: CommitID
-  public init(url: URL, commit: CommitID) throws {
+  public init(url: URL, commit: CommitID) throws(Failure) {
     self.url = try Self.normalize(url, preservingGitSuffix: true)
     guard !url.isFileURL else {
-      throw PinewindError.runtime(.git(.unsupportedSourceURL(url)))
+      throw Failure.git(.unsupportedSourceURL(url))
     }
     self.commit = commit
   }
   init(url: URL, commit: String) throws { try self.init(url: url, commit: CommitID(commit)) }
-  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
+  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws(Failure) -> URL {
     if url.isFileURL {
-      _ = try NativePath.from(url)
+      do { _ = try NativePath.from(url) } catch { throw Failure.file(error) }
       // File URL spelling carries authority and provider information. Filesystem
       // identity checks use NativePath/SafePath rather than URL normalization.
       return url
@@ -197,7 +209,7 @@ public struct SourceIdentity: Hashable, Sendable {
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
       parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
       parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil
-    else { throw PinewindError.runtime(.declaration(.unsupportedSourceURL(url))) }
+    else { throw Failure.declaration(.unsupportedSourceURL(url)) }
     parts.scheme = "https"
     parts.host = host.lowercased()
     if parts.port == 443 { parts.port = nil }
@@ -207,7 +219,7 @@ public struct SourceIdentity: Hashable, Sendable {
     }
     if host.lowercased() == "github.com" { parts.path = parts.path.lowercased() }
     guard let normalized = parts.url else {
-      throw PinewindError.runtime(.git(.malformedRepositoryURL(url)))
+      throw Failure.git(.malformedRepositoryURL(url))
     }
     return normalized
   }
