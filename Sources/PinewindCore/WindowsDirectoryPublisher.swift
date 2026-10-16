@@ -14,7 +14,7 @@
   enum WindowsDirectoryPublisher {
     /// Resolve parent aliases and expand the entry's short name without following
     /// the final managed junction into its replaceable generation.
-    static func publicationPath(_ output: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func publicationPath(_ output: FilePath) throws -> FilePath {
       guard let component = output.lastComponent else {
         throw FileSystemFailure.isFilesystemRoot(output)
       }
@@ -36,7 +36,7 @@
         "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
     }
 
-    static func validate(_ output: FilePath) throws(FileSystemFailure) {
+    static func validate(_ output: FilePath) throws {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedPath(target)
@@ -60,7 +60,7 @@
       }
     }
 
-    static func publish(_ candidate: FilePath, at output: FilePath) throws(FileSystemFailure) {
+    static func publish(_ candidate: FilePath, at output: FilePath) throws {
       let fm = FileManager.default
       if try currentTarget(output) != nil || fm.fileExists(atPath: output.string) {
         try redirect(output, to: candidate)
@@ -117,11 +117,11 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func canonicalPath(_ url: FilePath) throws -> FilePath {
       FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func resolvedPath(_ url: FilePath) throws -> FilePath {
       var ancestor = url
       var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
@@ -148,7 +148,7 @@
       return resolved
     }
 
-    static func currentTarget(_ output: FilePath) throws(FileSystemFailure) -> FilePath? {
+    static func currentTarget(_ output: FilePath) throws -> FilePath? {
       let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }
@@ -194,7 +194,7 @@
       }
     }
 
-    static func redirect(_ output: FilePath, to candidate: FilePath) throws(FileSystemFailure) {
+    static func redirect(_ output: FilePath, to candidate: FilePath) throws {
       let printName = try windowsNativePath(candidate).string
       let substituteName =
         printName.hasPrefix("\\\\")
