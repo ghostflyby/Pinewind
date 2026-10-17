@@ -96,6 +96,31 @@ public actor Workspace {
       try await self.resolveSnapshot(store.load(), preview: false, update: nil, progress: progress)
     }
   }
+  /// Resolve an edited draft before saving it. Preparation remains a separate
+  /// step: failures from fetch do not roll back the committed declaration and lock.
+  public func resolve(
+    editing operation: @Sendable (inout ConfigurationDraft) throws -> Void,
+    progress: OperationProgress? = nil
+  ) async throws -> Resolution {
+    try await pipeline {
+      let baseline = try await store.load()
+      var draft = ConfigurationDraft(
+        manifest: baseline.manifest, localOverrides: baseline.localOverrides)
+      try operation(&draft)
+      guard locations.configuration.localOverrides != nil || draft.localOverrides == nil else {
+        throw PinewindError.runtime(.state(.overridesDisabled))
+      }
+      _ = try draft.manifest.evaluate(localOverrides: draft.localOverrides)
+      let snapshot = ConfigurationSnapshot(
+        manifest: draft.manifest, localOverrides: draft.localOverrides,
+        sharedRevision: 0, localRevision: 0,
+        sharedIsDirty: draft.manifest != baseline.manifest,
+        localIsDirty: draft.localOverrides != baseline.localOverrides,
+        locations: locations, baseline: baseline.baseline)
+      return try await resolveSnapshot(
+        snapshot, preview: false, update: nil, progress: progress, commitConfiguration: true)
+    }
+  }
   public func resolve(preview: ConfigurationSnapshot, progress: OperationProgress? = nil)
     async throws -> Resolution
   {
@@ -109,6 +134,35 @@ public actor Workspace {
   {
     try await pipeline {
       try await resolveSnapshot(store.load(), preview: false, update: selection, progress: progress)
+    }
+  }
+  /// Refresh active named dependencies without requiring callers to decode locks
+  /// or first resolve an edited manifest just to obtain selection IDs.
+  public func update(packagesNamed names: Set<String>, progress: OperationProgress? = nil)
+    async throws -> Resolution
+  {
+    try await pipeline {
+      let snapshot = try await store.load()
+      let declarations = try snapshot.evaluate(.shared)
+      var selected = Set<PackageRequest>()
+      for name in names {
+        guard snapshot.manifest.names[name] != nil else {
+          throw PinewindError.runtime(.declaration(.unknownName(name)))
+        }
+        var found = false
+        for (entry, declaration) in zip(snapshot.manifest.order, declarations.entries) {
+          if case .named(let reference, _) = entry, reference == name,
+            case .package(let request) = declaration, repository(request) != nil
+          {
+            selected.insert(request)
+            found = true
+          }
+        }
+        guard found else { throw PinewindError.runtime(.state(.unknownSelection)) }
+      }
+      return try await resolveSnapshot(
+        snapshot, preview: false, update: .packages([]), progress: progress,
+        refreshingRequests: selected)
     }
   }
   public func update(
@@ -129,7 +183,8 @@ public actor Workspace {
 
   private func resolveSnapshot(
     _ snapshot: ConfigurationSnapshot, preview: Bool, update: UpdateSelection?,
-    progress: OperationProgress?
+    progress: OperationProgress?, commitConfiguration: Bool = false,
+    refreshingRequests: Set<PackageRequest> = []
   ) async throws -> Resolution {
     try check(snapshot)
     let phase: OperationPhase = update == nil ? .resolving : .updating
@@ -145,7 +200,12 @@ public actor Workspace {
       return false
     }()
     let refreshedRepositories = Set(
-      oldPackages.filter { selected($0.id, in: update) }.compactMap { repository($0.request)?.key })
+      oldPackages.filter { selected($0.id, in: update) }.compactMap { repository($0.request)?.key }
+    )
+    .union(refreshingRequests.compactMap { repository($0)?.key })
+    func refresh(_ request: PackageRequest) -> Bool {
+      refreshingRequests.contains(request) || selected(PackageID(request), in: update)
+    }
     var imports: [ResolvedImport] = []
     var entries: [ManifestEntry] = []
     for (index, entry) in declarations.entries.enumerated() {
@@ -191,7 +251,7 @@ public actor Workspace {
       }
       try validate(identity, against: repository)
       identities[repository.key] = identity
-      if !refreshAll, !selected(PackageID(request), in: update),
+      if !refreshAll, !refresh(request),
         !resourcesSelected(request, in: update),
         let old = oldPackages.first(where: { $0.request == request && $0.commit == identity.commit }
         )
@@ -210,7 +270,7 @@ public actor Workspace {
           )
           .first { $0.url == download.url && $0.path == path }
         let force =
-          refreshAll || selected(PackageID(request), in: update)
+          refreshAll || refresh(request)
           || previous.map {
             selected(ResourceID(package: PackageID(request), resource: $0), in: update)
           } == true
@@ -227,10 +287,16 @@ public actor Workspace {
       imports: imports, snapshot: snapshot, preview: preview)
     if !preview {
       let bytes = try ResolutionCodec.encode(result)
-      try await store.commitLock(bytes, expected: snapshot.baseline)
+      let committed: ConfigurationSnapshot
+      if commitConfiguration {
+        committed = try await store.commitConfiguration(snapshot, lock: bytes)
+      } else {
+        try await store.commitLock(bytes, expected: snapshot.baseline)
+        committed = snapshot
+      }
       result = try Resolution(
         declarations: declarations, expanded: result.expanded, packages: packages, imports: imports,
-        snapshot: snapshot, preview: false, lockBytes: bytes)
+        snapshot: committed, preview: false, lockBytes: bytes)
     }
     progress?(.completed(phase))
     return result
@@ -446,12 +512,16 @@ public actor Workspace {
     return result
   }
   public func compose(
-    _ plan: CompositionPlan, to output: FilePath, progress: OperationProgress? = nil
+    _ plan: CompositionPlan, to output: FilePath, publication: PublicationMode = .directory,
+    progress: OperationProgress? = nil
   ) async throws -> CompositionResult {
-    try await pipeline { try await composeOperation(plan, to: output, progress: progress) }
+    try await pipeline {
+      try await composeOperation(plan, to: output, publication: publication, progress: progress)
+    }
   }
   private func composeOperation(
-    _ plan: CompositionPlan, to output: FilePath, progress: OperationProgress? = nil
+    _ plan: CompositionPlan, to output: FilePath, publication: PublicationMode,
+    progress: OperationProgress? = nil
   ) async throws -> CompositionResult {
     if let binding = plan.binding { try check(binding.snapshot) }
     let output = try NativePath.absolute(output, relativeTo: locations.relativeTo)
@@ -472,18 +542,29 @@ public actor Workspace {
       var plan = plan
       plan.binding?.coordinatedURLs = urls
       try plan.binding?.validate()
-      return try Composer().compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
+      switch publication {
+      case .directory:
+        return try Composer().compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
+      case .managedFiles:
+        return try ManagedFilePublisher(
+          stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
+        )
+        .compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
+      }
     }
     progress?(.completed(.composing))
     return result
   }
-  public func compose(to output: FilePath, progress: OperationProgress? = nil) async throws
+  public func compose(
+    to output: FilePath, publication: PublicationMode = .directory,
+    progress: OperationProgress? = nil
+  ) async throws
     -> CompositionResult
   {
     try await pipeline {
       let inputs = try await cachedInputs(progress: progress)
       let plan = try await self.plan(inputs, progress: progress)
-      return try await compose(plan, to: output, progress: progress)
+      return try await compose(plan, to: output, publication: publication, progress: progress)
     }
   }
   public func fetchAndCompose(

@@ -17,6 +17,29 @@ public struct CompositionResult: Sendable {
   public let changedPaths: [RelativePath]
   public let removedPaths: [RelativePath]
   public let reusedPaths: [RelativePath]
+  /// Formerly managed files kept because they were modified outside Pinewind.
+  public let preservedPaths: [RelativePath]
+
+  init(
+    directory: FilePath, paths: [RelativePath], changedPaths: [RelativePath],
+    removedPaths: [RelativePath], reusedPaths: [RelativePath], preservedPaths: [RelativePath] = []
+  ) {
+    self.directory = directory
+    self.paths = paths
+    self.changedPaths = changedPaths
+    self.removedPaths = removedPaths
+    self.reusedPaths = reusedPaths
+    self.preservedPaths = preservedPaths
+  }
+}
+
+public enum PublicationMode: Sendable {
+  /// Atomically replace a complete directory generation.
+  case directory
+  /// Update only generated files, preserving unrelated input-method data.
+  /// Individual files are atomic; an interrupted multi-file update is recovered
+  /// by a subsequent build using the persisted publication intent.
+  case managedFiles
 }
 
 /// Renders a candidate generation and atomically publishes it as the active

@@ -36,6 +36,8 @@ private actor Repositories: RepositoryProvider {
   var current: CommitID
   var resolutions = 0
   var preparations = 0
+  var rejectResolution = false
+  var rejectPreparation = false
   private var pause = false
   private var started = false
   private var continuation: CheckedContinuation<Void, Never>?
@@ -49,6 +51,7 @@ private actor Repositories: RepositoryProvider {
   }
   func resolve(_ request: RepositoryRequest) async throws -> SourceIdentity {
     resolutions += 1
+    if rejectResolution { throw NetworkFailure.rejected(status: 503, url: request.url) }
     if pause {
       started = true
       await withCheckedContinuation { continuation = $0 }
@@ -58,9 +61,14 @@ private actor Repositories: RepositoryProvider {
   func prepareSource(_ identity: SourceIdentity, cacheRoot: FilePath) async throws -> SourceSnapshot
   {
     preparations += 1
+    if rejectPreparation { throw NetworkFailure.rejected(status: 503, url: identity.url) }
     return try SourceSnapshot(identity: identity, directory: root.appending(identity.commit.string))
   }
   func counts() -> (Int, Int) { (resolutions, preparations) }
+  func rejecting(resolution: Bool = false, preparation: Bool = false) {
+    rejectResolution = resolution
+    rejectPreparation = preparation
+  }
   func pauseNext() { pause = true }
   func didStart() -> Bool { started }
   func release() {
@@ -133,6 +141,230 @@ private struct Fixture {
 
 @Suite("Public Workspace API", .timeLimit(.minutes(1)))
 struct WorkspaceTests {
+  @Test func editedResolutionFailureLeavesAllDocumentsUnchanged() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
+    await f.repositories.rejecting(resolution: true)
+    await #expect(throws: PinewindError.self) {
+      _ = try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+    }
+    #expect(!exists(f.manifest) && !exists(f.overrides) && !exists(f.lock))
+    let session = try await workspace.configuration()
+    _ = try await session.save(.shared)
+    _ = try await workspace.resolve()
+    let originalManifest = try read(f.manifest)
+    let originalLock = try Data(contentsOf: url(f.lock))
+    await #expect(throws: PinewindError.self) {
+      _ = try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+    }
+    #expect(try read(f.manifest) == originalManifest)
+    #expect(try Data(contentsOf: url(f.lock)) == originalLock)
+  }
+
+  @Test func committedEditsSurvivePreparationFailureAndRetryUsesTheirBinding() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "remote"])
+    let workspace = try await f.workspace()
+    let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
+    let resolution = try await workspace.resolve(editing: {
+      try $0.addPackage("new", request: request)
+    })
+    let manifest = try read(f.manifest)
+    let lock = try Data(contentsOf: url(f.lock))
+    try FileManager.default.removeItem(at: url(f.locations.cacheRoot))
+    await f.repositories.rejecting(preparation: true)
+    await #expect(throws: PinewindError.self) { _ = try await workspace.fetch(resolution) }
+    #expect(try read(f.manifest) == manifest)
+    #expect(try Data(contentsOf: url(f.lock)) == lock)
+    #expect(!exists(f.output))
+    await f.repositories.rejecting()
+    _ = try await workspace.fetch(resolution)
+    _ = try await workspace.compose(to: f.output)
+    #expect(try read(f.output.appending("default.yaml")) == "remote")
+  }
+
+  @Test func editedResolutionPreflightsAllDocumentsBeforeSaving() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "remote"])
+    let workspace = try await f.workspace()
+    let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
+    _ = try await workspace.resolve()
+    let lock = try Data(contentsOf: url(f.lock))
+    await f.repositories.pauseNext()
+    let task = Task {
+      try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+    }
+    while !(await f.repositories.didStart()) { try await Task.sleep(for: .milliseconds(5)) }
+    let external = try ManifestDocument(order: []).yaml()
+    try write(f.manifest, external)
+    await f.repositories.release()
+    await #expect(throws: PinewindError.self) { _ = try await task.value }
+    #expect(try read(f.manifest) == external)
+    #expect(try Data(contentsOf: url(f.lock)) == lock)
+  }
+
+  @Test func draftInsertionAndRemovalCoordinateOrderAndOverrides() throws {
+    let request = try PackageRequest(
+      source: .directory(.path(FilePath(FileManager.default.temporaryDirectory.path))))
+    var draft = ConfigurationDraft()
+    try draft.addPackage("first", request: request)
+    try draft.addPackage("last", request: request, insertion: .after("self"))
+    try draft.addPackage("middle", request: request, insertion: .before("self"))
+    #expect(
+      draft.manifest.order == [
+        .named("first"), .named("middle"), .userFiles(FileFilter()), .named("last"),
+      ])
+    draft.manifest.order.append(.named("first"))
+    try draft.redirectPackage(
+      "first", to: .path(FilePath(FileManager.default.temporaryDirectory.path)))
+    try draft.removePackage("first")
+    #expect(draft.manifest.order == [.named("middle"), .userFiles(FileFilter()), .named("last")])
+    #expect(draft.localOverrides?.names["first"] == nil)
+    let before = draft
+    #expect(throws: PinewindError.self) {
+      try draft.addPackage("new", request: request, insertion: .before("absent"))
+    }
+    #expect(draft == before)
+    draft.manifest.order.append(.named("middle"))
+    #expect(throws: PinewindError.self) {
+      try draft.addPackage("new", request: request, insertion: .after("middle"))
+    }
+  }
+
+  @Test func editedRemovalSavesSharedReferencesAndLocalOverridesTogether() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let request = try PackageRequest(source: .directory(.path(f.input)))
+    _ = try await workspace.resolve(editing: {
+      try $0.addPackage("local", request: request)
+      $0.manifest.order.append(.named("local"))
+      try $0.redirectPackage("local", to: .path(f.input))
+    })
+    #expect(exists(f.overrides))
+    _ = try await workspace.resolve(editing: { try $0.removePackage("local") })
+    let snapshot = try await workspace.configuration().snapshot()
+    #expect(snapshot.manifest.names.isEmpty)
+    #expect(snapshot.manifest.order == [.userFiles(FileFilter())])
+    #expect(snapshot.localOverrides?.names.isEmpty == true)
+    _ = try await workspace.fetch()
+  }
+
+  @Test func namedUpdateRefreshesResourcesAfterDeclarationMetadataChanges() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let resource = URL(string: "https://resources.test/extra.txt")!
+    await f.downloads.set(resource, "first")
+    try await f.repositories.install(
+      firstID, files: ["recipe.yaml": fixtureText("Recipes/implicit-download.recipe.yaml")])
+    try f.remote()
+    let workspace = try await f.workspace()
+    let first = try await workspace.resolve()
+    let session = try await workspace.configuration()
+    await session.edit { $0.manifest.names["package"]?.exclude = .value(["unused.txt"]) }
+    _ = try await session.save(.shared)
+    await f.downloads.set(resource, "second")
+    let updated = try await workspace.update(packagesNamed: ["package"])
+    #expect(updated.packages[0].commit == first.packages[0].commit)
+    #expect(updated.packages[0].resources != first.packages[0].resources)
+  }
+
+  @Test func namedUpdateHandlesEditedOrderAndPreservesOtherPins() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "first"])
+    let workspace = try await f.workspace()
+    let first = try PackageRequest(
+      source: .git(RepositoryRequest(url: endpoint, revision: .branch("main"))))
+    let other = try PackageRequest(
+      source: .git(
+        RepositoryRequest(
+          url: URL(string: "https://example.com/other.git")!, revision: .branch("main"))))
+    _ = try await workspace.resolve(editing: {
+      try $0.addPackage("first", request: first)
+      try $0.addPackage("other", request: other)
+    })
+    let session = try await workspace.configuration()
+    try await session.edit { try $0.moveEntry(from: 0, to: 2) }
+    _ = try await session.save(.shared)
+    try await f.repositories.install(secondID, files: ["default.yaml": "second"])
+    let updated = try await workspace.update(packagesNamed: ["first"])
+    #expect(updated.packages.first(where: { $0.request == first })?.commit.string == secondID)
+    #expect(updated.packages.first(where: { $0.request == other })?.commit.string == firstID)
+    let lock = try Data(contentsOf: url(f.lock))
+    await #expect(throws: PinewindError.self) {
+      _ = try await workspace.update(packagesNamed: ["absent"])
+    }
+    #expect(try Data(contentsOf: url(f.lock)) == lock)
+  }
+
+  @Test func managedPublicationPreservesRuntimeIdentityAndModifiedObsoleteFiles() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("schema.yaml"), "first")
+    try write(f.input.appending("old.txt"), "owned")
+    try write(f.input.appending("edited.txt"), "owned")
+    let runtime = f.output.appending("words.userdb/data")
+    try write(runtime, "runtime")
+    try write(f.output.appending("installation.yaml"), "installation")
+    let handle = try FileHandle(forWritingTo: url(runtime))
+    defer { try? handle.close() }
+    let workspace = try await f.workspace()
+    _ = try await workspace.compose(to: f.output, publication: .managedFiles)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(" appended".utf8))
+    #expect(try read(runtime) == "runtime appended")
+    try write(f.output.appending("edited.txt"), "external")
+    try FileManager.default.removeItem(at: url(f.input.appending("old.txt")))
+    try FileManager.default.removeItem(at: url(f.input.appending("edited.txt")))
+    try write(f.input.appending("schema.yaml"), "second")
+    let result = try await workspace.compose(to: f.output, publication: .managedFiles)
+    #expect(result.removedPaths.map(\.string) == ["old.txt"])
+    #expect(result.preservedPaths.map(\.string) == ["edited.txt"])
+    #expect(try read(f.output.appending("edited.txt")) == "external")
+    #expect(try read(f.output.appending("schema.yaml")) == "second")
+    #expect(try read(f.output.appending("installation.yaml")) == "installation")
+    #expect(try read(runtime) == "runtime appended")
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+  }
+
+  @Test func managedPublicationRecoversPendingOwnershipAndRejectsCorruptRecords() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("old.txt"), "owned")
+    let workspace = try await f.workspace()
+    _ = try await workspace.compose(to: f.output, publication: .managedFiles)
+    let records = try FileManager.default.contentsOfDirectory(
+      at: url(f.locations.stateRoot.appending("publications")), includingPropertiesForKeys: nil)
+    let record = try #require(records.first(where: { $0.pathExtension == "plist" }))
+    let pending = record.deletingPathExtension().appendingPathExtension("pending.plist")
+    try FileManager.default.moveItem(at: record, to: pending)
+    try FileManager.default.removeItem(at: url(f.input.appending("old.txt")))
+    let recovered = try await workspace.compose(to: f.output, publication: .managedFiles)
+    #expect(recovered.removedPaths.map(\.string) == ["old.txt"])
+    #expect(!FileManager.default.fileExists(atPath: pending.path))
+    #expect(FileManager.default.fileExists(atPath: record.path))
+    try Data("invalid".utf8).write(to: record)
+    try write(f.input.appending("new.txt"), "new")
+    do {
+      _ = try await workspace.compose(to: f.output, publication: .managedFiles)
+      Issue.record("invalid publication record accepted")
+    } catch {
+      guard let error = error as? PinewindError,
+        case .runtime(.state(.invalidPublicationRecord)) = error
+      else {
+        Issue.record("unexpected error: \(error)")
+        return
+      }
+    }
+    #expect(!exists(f.output.appending("new.txt")))
+  }
+
   #if !os(Windows)
     @Test func publicationThroughDirectoryAliasKeepsTheAliasAndUpdatesItsTarget() async throws {
       let f = try Fixture()

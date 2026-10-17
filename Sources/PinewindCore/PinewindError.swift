@@ -405,6 +405,8 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
   case developmentRequired
   case importSourceRequired
   case orderIndexOutOfBounds
+  case orderAnchorNotFound(String)
+  case ambiguousOrderAnchor(String)
   case undeclaredOption(String)
   case optionValueMissing(String)
   case invalidChecksum(String)
@@ -449,6 +451,8 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
     case .developmentRequired: return "declaration requires development preparation"
     case .importSourceRequired: return "conf import requires a source"
     case .orderIndexOutOfBounds: return "order entry index is out of bounds"
+    case .orderAnchorNotFound(let name): return "order anchor '\(name)' was not found"
+    case .ambiguousOrderAnchor(let name): return "order anchor '\(name)' matches multiple entries"
     case .undeclaredOption(let name):
       return "recipe option '\(name)' is not declared in recipe args"
     case .optionValueMissing(let name): return "recipe option '\(name)' has no value"
@@ -482,6 +486,7 @@ public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
 }
 
 public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
+  case invalidPublicationRecord(FilePath)
   case externallyModified
   case staleSnapshot
   case staleInputs
@@ -492,6 +497,7 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
   public var description: String {
     switch self {
+    case .invalidPublicationRecord(let path): return "invalid publication record: \(path.string)"
     case .externallyModified: return "configuration changed on disk; reload before saving"
     case .staleSnapshot: return "snapshot is stale; reload before editing"
     case .staleInputs: return "configuration or lock changed before publication"
