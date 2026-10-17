@@ -629,7 +629,7 @@ private final class HangingResourceProtocol: URLProtocol {
       url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: Data("part".utf8))
-    Task { await Self.started.release() }
+    Task { [started = HangingResourceProtocol.started] in await started.release() }
   }
   override func stopLoading() {}
 }
