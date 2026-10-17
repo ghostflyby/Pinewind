@@ -105,7 +105,8 @@ public actor Workspace {
     try await pipeline {
       let baseline = try await store.load()
       var draft = ConfigurationDraft(
-        manifest: baseline.manifest, localOverrides: baseline.localOverrides)
+        manifest: baseline.manifest, localOverrides: baseline.localOverrides,
+        relativeTo: locations.relativeTo)
       try operation(&draft)
       guard locations.configuration.localOverrides != nil || draft.localOverrides == nil else {
         throw PinewindError.runtime(.state(.overridesDisabled))
@@ -545,11 +546,13 @@ public actor Workspace {
       switch publication {
       case .directory:
         return try Composer().compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
-      case .managedFiles:
+      case .managedFiles(let overwriteUnmanaged):
         return try ManagedFilePublisher(
           stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
         )
-        .compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
+        .compose(
+          plan, inputRoot: plan.sourceRoots[0], outputRoot: output,
+          overwriteUnmanaged: overwriteUnmanaged)
       }
     }
     progress?(.completed(.composing))

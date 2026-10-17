@@ -28,6 +28,12 @@ swift run pinewind build --frontend squirrel
 
 `build` 完全离线,读取匹配 lock、缓存及实时本地来源。它先完成渲染,然后逐个更新生成文件,保留 Rime 目录本身、用户词库和其他运行文件。已不再生成的旧文件仅在内容仍匹配发布记录时删除;外部修改过的旧文件保留并报告。多文件发布中断后可重新 `build` 完成恢复。此命令生成配置,不触发 Rime 引擎重新部署。
 
+**首次构建不会静默覆盖已有个人配置。** 已存在但不受 Pinewind 管理的同名文件若与生成内容不同,`build` 会列出全部冲突并在写入任何生成文件之前失败。先将个人配置备份并整理到 `paths` 显示的个人来源目录;确认覆盖清单后才使用 `build --force`。与生成内容完全相同的文件可直接复用并纳入管理。`--force` 仅授权覆盖这些配置冲突,不允许写入词库或运行状态路径;实际覆盖与保留清单输出到 stderr。
+
+发布意图先同步落盘再修改输出。损坏的 pending 记录会被保守丢弃并发出警告,无法证明所有权的文件仍按未受管文件保护。已提交的发布记录损坏时停止构建:恢复可信备份,或将错误信息指出的记录移到别处重置所有权,再重新构建并审核冲突;这不会自动删除既有输出。
+
+Windows 的按文件发布要求输出末级是普通目录,拒绝 junction;可用 `--output` 指定实际目录。它与整目录发布共用入口锁,避免混用两种模式时写入即将淘汰的代次。
+
 CLI 不以当前目录作为项目根。默认位置如下:
 
 | 平台 | 配置目录 | 机器状态目录 | 缓存目录 |
@@ -98,7 +104,7 @@ let result = try await workspace.compose(to: outputPath)
 
 `CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:只接受 `FilePath` 初始化,通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。这些路径从文件枚举到发布一直保留类型,不会在阶段间转回字符串重复校验。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
-默认 `publication: .directory` 原子替换完整目录。该模式在 Windows 上要求输出目录不存在、为空或为 Pinewind 管理的 junction。向现存 Rime 用户目录发布时使用 `publication: .managedFiles`,只修改生成路径,并通过 `preservedPaths` 报告保留的外部修改文件。此模式逐文件原子更新,将发布意图和所有权记录保存在状态目录;中断后下一次构建恢复,不承诺多文件整体原子性。所有平台均要求所在文件系统支持对应的原子发布与锁操作。
+默认 `publication: .directory` 原子替换完整目录。该模式在 Windows 上要求输出目录不存在、为空或为 Pinewind 管理的 junction。向现存 Rime 用户目录发布时使用 `publication: .managedFiles()`,只修改生成路径,并通过 `preservedPaths` 报告保留的外部修改文件。未受管同名文件冲突报告为 `StateFailure.unmanagedOutputFiles`;明确授权时使用 `.managedFiles(overwriteUnmanaged: true)`,结果中的 `overwrittenUnmanagedPaths` 列出实际覆盖的路径,`warnings` 报告损坏 pending 的恢复。此模式逐文件原子更新,将发布意图和所有权记录保存在状态目录;中断后下一次构建恢复,不承诺多文件整体原子性。所有平台均要求所在文件系统支持对应的原子发布与锁操作。
 
 ## 清单与本地覆写
 
@@ -142,6 +148,8 @@ let receipt = try await session.save(.shared)
 `reload()` 拒绝丢弃未保存编辑;明确放弃使用 `discardChangesAndReload()`。保存保持 YAML 语义,不保留注释、引号和排版。两个文件分别保存,不构成跨文件同步事务。
 
 `workspace.resolve(editing:)` 在内存中编辑草稿,完整解析成功后才保存配置及 lock。它预检所有文件基线,逐个原子写入,最后提交 lock;中途 I/O 失败或进程中断可能留下需重新 resolve 的声明。返回结果可直接用于 `fetch`;准备失败不回滚声明。`ConfigurationDraft.addPackage` 默认插入第一个 `self` 前,支持 `PackageInsertion` 指定位置。草稿层的 `removePackage` 同时删除 order 引用和本地覆写;直接调用 `ManifestDocument.removePackage` 仍拒绝删除被引用的名称。
+
+工作区创建的草稿在 `redirectPackage` 中按工作区的 `relativeTo` 解析相对路径,保存、重载和 resolve 编辑使用同一基准;独立创建的 `ConfigurationDraft` 在初始化时捕获当前目录。
 
 工作区默认忽略未保存草稿。显式预览:
 

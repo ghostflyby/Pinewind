@@ -24,9 +24,10 @@ struct GitKitTransport: GitTransport {
     GitLibrary.ensureInitialized()
     let remote = try makeRemote(url: url)
     defer { git_remote_free(remote) }
-    return try withCallbacks(url: url) { callbacks in
+    return try withCallbacks(url: url) { callbacks, context in
       try check(
-        git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nil, nil), repository: url)
+        git_remote_connect(remote, GIT_DIRECTION_FETCH, &callbacks, nil, nil), repository: url,
+        context: context)
       defer { git_remote_disconnect(remote) }
       var heads: UnsafeMutablePointer<UnsafePointer<git_remote_head>?>?
       var count = 0
@@ -133,10 +134,11 @@ struct GitKitTransport: GitTransport {
       try check(
         git_fetch_options_init(&options, UInt32(GIT_FETCH_OPTIONS_VERSION)), repository: url)
       options.download_tags = GIT_REMOTE_DOWNLOAD_TAGS_NONE
-      try withCallbacks(url: url) { callbacks in
+      try withCallbacks(url: url) { callbacks, context in
         options.callbacks = callbacks
         defer { git_remote_disconnect(remote) }
-        try check(git_remote_fetch(remote, &array, &options, nil), repository: url)
+        try check(
+          git_remote_fetch(remote, &array, &options, nil), repository: url, context: context)
       }
     }
   }
@@ -177,8 +179,8 @@ struct GitKitTransport: GitTransport {
       }
       let path = prefix + component
       // Tree entries are individual names, not expressions to normalize before checkout.
-      let relative = try RelativePath(FilePath(component))
-      guard relative.filePath.components.count == 1,
+      guard let relative = try? RelativePath(FilePath(component)),
+        relative.filePath.components.count == 1,
         relative.string.utf8.elementsEqual(component.utf8)
       else {
         throw PinewindError.runtime(.git(.treeEntryInvalid(.notASingleComponent(path))))
@@ -217,7 +219,9 @@ struct GitKitTransport: GitTransport {
     return try body(repository)
   }
 
-  private func withCallbacks<T>(url: URL, _ body: (inout git_remote_callbacks) throws -> T) throws
+  func withCallbacks<T>(
+    url: URL, _ body: (inout git_remote_callbacks, TransferContext) throws -> T
+  ) throws
     -> T
   {
     let context = TransferContext(credentials: credentials, local: url.isFileURL)
@@ -247,16 +251,20 @@ struct GitKitTransport: GitTransport {
           return GIT_EUSER.rawValue
         }
         let context = Unmanaged<TransferContext>.fromOpaque(payload).takeUnretainedValue()
-        guard let supplied = context.credentials?(url) else { return GIT_EUSER.rawValue }
+        guard let supplied = context.credentials?(url) else {
+          context.declineCredentials()
+          return GIT_EUSER.rawValue
+        }
         if allowed & UInt32(GIT_CREDENTIAL_USERPASS_PLAINTEXT.rawValue) != 0 {
           return git_credential_userpass_plaintext_new(out, supplied.username, supplied.password)
         }
         if allowed & UInt32(GIT_CREDENTIAL_USERNAME.rawValue) != 0 {
           return git_credential_username_new(out, supplied.username)
         }
+        context.declineCredentials()
         return GIT_EUSER.rawValue
       }
-      return try body(&callbacks)
+      return try body(&callbacks, context)
     }
   }
 
@@ -274,13 +282,18 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  private func check(_ status: Int32, repository: URL, operation: String = #function) throws {
+  func check(
+    _ status: Int32, repository: URL, context: TransferContext? = nil,
+    operation: String = #function
+  ) throws {
     try Cancellation.check()
     guard status >= 0 else {
       let message =
         git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
         ?? "unknown error"
-      if status == GIT_EAUTH.rawValue {
+      if status == GIT_EAUTH.rawValue
+        || (status == GIT_EUSER.rawValue && context?.credentialsDeclined == true)
+      {
         throw PinewindError.runtime(.git(.authenticationRequired(repository)))
       }
       throw PinewindError.runtime(
@@ -291,9 +304,21 @@ struct GitKitTransport: GitTransport {
   }
 }
 
-private final class TransferContext: Sendable {
+final class TransferContext: @unchecked Sendable {
   let credentials: GitCredentialProvider?
   let local: Bool
+  private let lock = NSLock()
+  private var declined = false
+  func declineCredentials() {
+    lock.lock()
+    declined = true
+    lock.unlock()
+  }
+  var credentialsDeclined: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return declined
+  }
   init(credentials: GitCredentialProvider?, local: Bool) {
     self.credentials = credentials
     self.local = local

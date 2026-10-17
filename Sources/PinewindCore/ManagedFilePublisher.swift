@@ -30,7 +30,10 @@ struct ManagedFilePublisher {
     let files: [Entry]
   }
 
-  func compose(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath) throws
+  func compose(
+    _ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath,
+    overwriteUnmanaged: Bool = false
+  ) throws
     -> CompositionResult
   {
     let output = try SafePath.canonical(outputRoot)
@@ -43,15 +46,39 @@ struct ManagedFilePublisher {
     let files = try result.paths.map { path in
       Entry(path: path.string, sha256: try SnapshotFiles.sha256(SafePath.file(path, in: rendered)))
     }
-    let key = SHA256.hash(data: Data(output.string.utf8)).map { String(format: "%02x", $0) }
-      .joined()
-    let record = stateRoot.appending("publications/" + key + ".plist")
-    let pending = stateRoot.appending("publications/" + key + ".pending.plist")
-    let lock = output.removingLastComponent().appending(
-      "." + (output.lastComponent?.string ?? "") + ".pinewind-publication.lock")
+    #if os(Windows)
+      let publication = try WindowsDirectoryPublisher.publicationPath(outputRoot)
+    #else
+      let publication = output
+    #endif
+    let lock = publication.removingLastComponent().appending(
+      "." + (publication.lastComponent?.string ?? "") + ".pinewind-publication.lock")
     return try NativeLock.withLock(lock) {
+      #if os(Windows)
+        // Share the generation publisher's stable entry lock, and never write
+        // into a replaceable generation through its final junction.
+        guard try WindowsDirectoryPublisher.currentTarget(publication) == nil else {
+          throw StateFailure.publicationModeConflict(publication)
+        }
+      #endif
+      let output = try SafePath.canonical(publication)
+      try SafePath.validateRoots(
+        input: inputRoot, output: output, sources: plan.sourceRoots + [plan.snapshot.directory])
+      let key = SHA256.hash(data: Data(output.string.utf8)).map { String(format: "%02x", $0) }
+        .joined()
+      let record = stateRoot.appending("publications/" + key + ".plist")
+      let pending = stateRoot.appending("publications/" + key + ".pending.plist")
       var previous: [RelativePath: Set<String>] = [:]
-      for entry in try read(record, target: output) + read(pending, target: output) {
+      let committed = try read(record, target: output)
+      let pendingEntries: [Entry]
+      var warnings: [PublicationWarning] = []
+      do {
+        pendingEntries = try read(pending, target: output)
+      } catch StateFailure.invalidPublicationRecord {
+        pendingEntries = []
+        warnings.append(.discardedPendingRecord(pending))
+      }
+      for entry in committed + pendingEntries {
         previous[try RelativePath(FilePath(entry.path)), default: []].insert(entry.sha256)
       }
       let current = Set(result.paths)
@@ -59,6 +86,7 @@ struct ManagedFilePublisher {
       var reused: [RelativePath] = []
       var removed: [RelativePath] = []
       var preserved: [RelativePath] = []
+      var conflicts: [RelativePath] = []
       var expected: [RelativePath: String] = [:]
       for path in Set(previous.keys).union(current).sorted() {
         try validateParents(path, in: output)
@@ -70,6 +98,7 @@ struct ManagedFilePublisher {
             reused.append(path)
           } else {
             changed.append(path)
+            if expected[path] != nil && previous[path] == nil { conflicts.append(path) }
           }
         } else if let hash = expected[path] {
           if previous[path]?.contains(hash) == true {
@@ -78,6 +107,9 @@ struct ManagedFilePublisher {
             preserved.append(path)
           }
         }
+      }
+      guard overwriteUnmanaged || conflicts.isEmpty else {
+        throw StateFailure.unmanagedOutputFiles(directory: output, paths: conflicts)
       }
       try plan.binding?.validate()
       try Cancellation.check()
@@ -106,7 +138,8 @@ struct ManagedFilePublisher {
       try removeFile(pending)
       return CompositionResult(
         directory: output, paths: result.paths, changedPaths: changed, removedPaths: removed,
-        reusedPaths: reused, preservedPaths: preserved)
+        reusedPaths: reused, preservedPaths: preserved,
+        overwrittenUnmanagedPaths: conflicts, warnings: warnings)
     }
   }
 
@@ -132,9 +165,31 @@ struct ManagedFilePublisher {
   private func write(_ record: Record, to path: FilePath) throws {
     try FileManager.default.createDirectory(
       at: path.removingLastComponent(), withIntermediateDirectories: true)
+    let temporary = path.removingLastComponent().appending(".pinewind-record-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    try PropertyListEncoder().encode(record).write(to: temporary)
+    try synchronizeFile(temporary)
+    try moveReplacing(temporary, at: path)
+    try synchronizeDirectory(path.removingLastComponent())
+  }
+
+  private func synchronizeFile(_ path: FilePath) throws {
     try FileIO.perform(.write, paths: [path]) {
-      try PropertyListEncoder().encode(record).write(to: path, options: .atomic)
+      let descriptor = try FileDescriptor.open(path, .readWrite)
+      defer { try? descriptor.close() }
+      try descriptor.synchronize()
     }
+  }
+
+  private func synchronizeDirectory(_ path: FilePath) throws {
+    #if !os(Windows)
+      try FileIO.perform(.write, paths: [path]) {
+        let descriptor = try FileDescriptor.open(
+          path, .readOnly, options: [.directory, .closeOnExec])
+        defer { try? descriptor.close() }
+        try descriptor.synchronize()
+      }
+    #endif
   }
 
   private func hashIfPresent(_ path: FilePath) throws -> String? {
@@ -170,6 +225,12 @@ struct ManagedFilePublisher {
     let temporary = parent.appending(".pinewind-" + UUID().uuidString + ".tmp")
     defer { try? FileManager.default.removeItem(at: temporary) }
     try FileManager.default.copyItem(at: source, to: temporary)
+    try synchronizeFile(temporary)
+    try moveReplacing(temporary, at: destination)
+    try synchronizeDirectory(parent)
+  }
+
+  private func moveReplacing(_ temporary: FilePath, at destination: FilePath) throws {
     try FileIO.perform(.move, paths: [temporary, destination]) {
       #if os(Windows)
         let success = temporary.withPlatformString { source in
@@ -200,5 +261,6 @@ struct ManagedFilePublisher {
         guard status == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(status)) }
       #endif
     }
+    try synchronizeDirectory(path.removingLastComponent())
   }
 }

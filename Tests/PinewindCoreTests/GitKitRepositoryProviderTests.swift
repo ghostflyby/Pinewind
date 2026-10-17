@@ -17,6 +17,101 @@ import Testing
 
 @Suite("Pinewind GitKit acquisition")
 struct GitKitRepositoryProviderTests {
+  @Test func defaultBranchIgnoresSameNamedTagsAndRejectsIndeterminateHEAD() async throws {
+    let f = try GitFixture()
+    defer { f.remove() }
+    let first = try f.commit("first")
+    try f.tag("main", commit: first)
+    try Data("value: branch\n".utf8).write(to: f.origin.appendingPathComponent("default.yaml"))
+    let branch = try f.commit("branch")
+    #expect(try await f.backend().resolve(RepositoryRequest(url: f.url)).commit.string == branch)
+    #expect(
+      try await f.backend().resolve(RepositoryRequest(url: f.url, revision: .tag("main"))).commit
+        .string == first)
+    let values = [
+      GitReference(name: "HEAD", commit: branch, symbolicTarget: nil),
+      GitReference(name: "refs/heads/main", commit: branch, symbolicTarget: nil),
+      GitReference(name: "refs/tags/main", commit: first, symbolicTarget: nil),
+    ]
+    let refs = RemoteReferences(values, url: f.url)
+    #expect(try refs.defaultBranch() == "refs/heads/main")
+    #expect(try refs.commit(for: refs.defaultBranch()).string == branch)
+    let ambiguous = RemoteReferences(
+      values + [GitReference(name: "refs/heads/other", commit: branch, symbolicTarget: nil)],
+      url: f.url)
+    #expect(throws: PinewindError.runtime(.git(.defaultBranchIndeterminate(f.url)))) {
+      _ = try ambiguous.defaultBranch()
+    }
+  }
+
+  @Test(arguments: [false, true])
+  func declinedCredentialsBecomeAuthenticationFacts(_ hasProvider: Bool) throws {
+    let endpoint = URL(string: "https://private.example/repository.git")!
+    let provider: GitCredentialProvider?
+    if hasProvider { provider = { _ in nil } } else { provider = nil }
+    let transport = GitKitTransport(credentials: provider)
+    try transport.withCallbacks(url: endpoint) { callbacks, context in
+      var credential: UnsafeMutablePointer<git_credential>?
+      let status = endpoint.absoluteString.withCString {
+        callbacks.credentials?(
+          &credential, $0, nil, UInt32(GIT_CREDENTIAL_USERPASS_PLAINTEXT.rawValue),
+          callbacks.payload)
+      }
+      #expect(status == GIT_EUSER.rawValue)
+      #expect(context.credentialsDeclined)
+      #expect(throws: PinewindError.runtime(.git(.authenticationRequired(endpoint)))) {
+        try transport.check(try #require(status), repository: endpoint, context: context)
+      }
+      #expect(throws: PinewindError.self) {
+        try transport.check(GIT_ENOTFOUND.rawValue, repository: endpoint, context: context)
+      }
+      let signal = CancellationSignal()
+      signal.cancel()
+      #expect(throws: CancellationError.self) {
+        try Cancellation.$signal.withValue(signal) {
+          try transport.check(GIT_EUSER.rawValue, repository: endpoint, context: context)
+        }
+      }
+    }
+    do {
+      try transport.check(GIT_EUSER.rawValue, repository: endpoint)
+      Issue.record("unknown callback abort accepted")
+    } catch {
+      guard case .runtime(.git(.operationFailed(_, _, let status, _))) = error as? PinewindError
+      else {
+        Issue.record("unexpected error: \(error)")
+        return
+      }
+      #expect(status == GIT_EUSER.rawValue)
+    }
+  }
+
+  @Test(arguments: [[UInt8(0xff)], Array("../x".utf8), Array(".git".utf8)])
+  func rejectsUnsafeRawTreeEntriesBeforeCheckout(_ name: [UInt8]) async throws {
+    let f = try GitFixture()
+    defer { f.remove() }
+    let first = try f.commit("first")
+    let backend = f.backend()
+    let good = try await backend.prepareSource(
+      SourceIdentity(url: f.url, commit: first), cacheRoot: native(f.cache))
+    let bad = try f.rawTreeCommit(name: name)
+    let destination = f.root.appendingPathComponent("bad export")
+    do {
+      try GitKitTransport(credentials: nil).export(
+        commit: bad, repository: native(f.origin), destination: native(destination))
+      Issue.record("unsafe tree accepted")
+    } catch {
+      guard case .runtime(.git(.treeEntryInvalid)) = error as? PinewindError else {
+        Issue.record("unexpected rejection: \(error)")
+        return
+      }
+    }
+    #expect(!FileManager.default.fileExists(atPath: destination.path))
+    #expect(!FileManager.default.fileExists(atPath: f.root.appendingPathComponent("x").path))
+    #expect(
+      try String(contentsOf: good.directory.appending("default.yaml"), encoding: .utf8)
+        == "value: first\n")
+  }
   @Test(arguments: [
     (
       "https://GIT.EXAMPLE:443/team/Project.git/", "https://git.example/team/Project.git",
@@ -574,6 +669,38 @@ private struct GitFixture {
       var reference: OpaquePointer?
       try Self.check(git_branch_create(&reference, repository, name, target, 0))
       git_reference_free(reference)
+    }
+  }
+
+  // Raw object I/O deliberately bypasses Git's index/name validation, so the
+  // production tree validator receives malformed names without creating them on disk.
+  func rawTreeCommit(name: [UInt8]) throws -> String {
+    try withRepository { repository in
+      var database: OpaquePointer?
+      try Self.check(git_repository_odb(&database, repository))
+      defer { git_odb_free(database) }
+      var blob = git_oid()
+      try Data("fixture".utf8).withUnsafeBytes {
+        try Self.check(git_odb_write(&blob, database, $0.baseAddress, $0.count, GIT_OBJECT_BLOB))
+      }
+      var bytes = Data("100644 ".utf8)
+      bytes.append(contentsOf: name)
+      bytes.append(0)
+      withUnsafeBytes(of: blob.id) { bytes.append(contentsOf: $0) }
+      var tree = git_oid()
+      try bytes.withUnsafeBytes {
+        try Self.check(git_odb_write(&tree, database, $0.baseAddress, $0.count, GIT_OBJECT_TREE))
+      }
+      let treeID = String(cString: git_oid_tostr_s(&tree)!)
+      let commit = Data(
+        "tree \(treeID)\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nraw fixture\n"
+          .utf8)
+      var result = git_oid()
+      try commit.withUnsafeBytes {
+        try Self.check(
+          git_odb_write(&result, database, $0.baseAddress, $0.count, GIT_OBJECT_COMMIT))
+      }
+      return String(cString: git_oid_tostr_s(&result)!)
     }
   }
 

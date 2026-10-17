@@ -67,6 +67,43 @@
 
   @Suite("Command-line consumer", .timeLimit(.minutes(1)))
   struct CLITests {
+    @Test func buildProtectsUnmanagedFilesAndReportsForcedReplacementAndRecordRecovery() throws {
+      let f = try CommandFixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(at: f.user, withIntermediateDirectories: true)
+      try FileManager.default.copyItem(
+        at: f.fixture("Personal/default.yaml"), to: f.user.appendingPathComponent("default.yaml"))
+      try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
+      let destination = f.output.appendingPathComponent("default.yaml")
+      try FileManager.default.copyItem(at: f.fixture("Package/default.yaml"), to: destination)
+      let arguments = ["build", "--output", f.output.path] + f.options
+      let blocked = try f.run(arguments)
+      #expect(blocked.status != 0)
+      #expect(blocked.output.contains("default.yaml"))
+      #expect(blocked.output.contains("--force"))
+      #expect(
+        try Data(contentsOf: destination) == Data(contentsOf: f.fixture("Package/default.yaml")))
+      let forced = try f.run(arguments + ["--force"])
+      #expect(forced.status == 0, "\(forced.output)")
+      #expect(forced.output.contains("Replaced unmanaged file: default.yaml"))
+      #expect(
+        try Data(contentsOf: destination) == Data(contentsOf: f.fixture("Personal/default.yaml")))
+      let directory = f.root.appendingPathComponent("state/managed/publications")
+      let record = try #require(
+        FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+          .first { $0.pathExtension == "plist" })
+      let pending = record.deletingPathExtension().appendingPathExtension("pending.plist")
+      try Data().write(to: pending)
+      let recovered = try f.run(arguments)
+      #expect(recovered.status == 0, "\(recovered.output)")
+      #expect(recovered.output.contains("Warning: Discarded corrupt pending"))
+      #expect(!FileManager.default.fileExists(atPath: pending.path))
+      try Data().write(to: record)
+      let corrupt = try f.run(arguments)
+      #expect(corrupt.status != 0)
+      #expect(corrupt.output.contains("Restore a known-good backup"))
+      #expect(corrupt.output.contains("protected as unmanaged"))
+    }
     @Test func addPreparesBuildIsSeparateAndUserSourcesOverridePackages() throws {
       let f = try CommandFixture()
       defer { f.remove() }
@@ -132,10 +169,12 @@
       defer { f.remove() }
       try FileManager.default.createDirectory(at: f.user, withIntermediateDirectories: true)
       try Data("runtime".utf8).write(to: f.user.appendingPathComponent("user.yaml"))
-      let result = try f.run(["build", "--output", f.output.path] + f.options)
-      #expect(result.status != 0)
-      #expect(result.output.contains("Rime runtime data"))
-      #expect(!FileManager.default.fileExists(atPath: f.output.path))
+      for flags in [[], ["--force"]] {
+        let result = try f.run(["build", "--output", f.output.path] + flags + f.options)
+        #expect(result.status != 0)
+        #expect(result.output.contains("Rime runtime data"))
+        #expect(!FileManager.default.fileExists(atPath: f.output.path))
+      }
     }
 
     @Test func invalidArgumentsDoNotWriteConfigurationAndPathsIsReadOnly() throws {

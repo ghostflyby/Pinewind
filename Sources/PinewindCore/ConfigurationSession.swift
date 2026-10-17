@@ -24,11 +24,20 @@ public enum PackageInsertion: Sendable {
 public struct ConfigurationDraft: Hashable, Sendable {
   public var manifest: ManifestDocument
   public var localOverrides: LocalOverridesDocument?
+  private let relativeTo: FilePath
   public init(
     manifest: ManifestDocument = ManifestDocument(), localOverrides: LocalOverridesDocument? = nil
   ) {
+    self.init(
+      manifest: manifest, localOverrides: localOverrides,
+      relativeTo: FilePath(FileManager.default.currentDirectoryPath))
+  }
+  init(
+    manifest: ManifestDocument, localOverrides: LocalOverridesDocument?, relativeTo: FilePath
+  ) {
     self.manifest = manifest
     self.localOverrides = localOverrides
+    self.relativeTo = relativeTo
   }
   public mutating func addPackage(
     _ name: String, request: PackageRequest, insertion: PackageInsertion = .beforeUserFiles
@@ -100,7 +109,9 @@ public struct ConfigurationDraft: Hashable, Sendable {
     }
     if localOverrides == nil { localOverrides = LocalOverridesDocument() }
     var fields = localOverrides?.names[name] ?? PackageFields()
-    do { fields.url = .value(try location.url) } catch { throw PinewindError.runtime(.file(error)) }
+    do {
+      fields.url = .value(try location.resolved(relativeTo: relativeTo).url)
+    } catch { throw PinewindError.runtime(.file(error)) }
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
@@ -195,10 +206,15 @@ struct ConfigurationStore: Sendable {
       do { return try Data(contentsOf: url) } catch CocoaError.fileReadNoSuchFile { return nil }
     }
   }
-  static func replace(_ bytes: Data?, at url: URL, expected: Data?, checkCancellation: Bool = true)
+  static func replace(
+    _ bytes: Data?, at url: URL, expected: Data?, checkCancellation: Bool = true,
+    allowIdenticalReplacement: Bool = false
+  )
     throws
   {
-    guard try read(url) == expected else {
+    let current = try read(url)
+    if allowIdenticalReplacement && current == bytes { return }
+    guard current == expected else {
       throw PinewindError.runtime(.state(.externallyModified))
     }
     if bytes == expected { return }
@@ -222,7 +238,8 @@ struct ConfigurationStore: Sendable {
       else {
         throw PinewindError.runtime(.state(.staleInputs))
       }
-      try Self.replace(bytes, at: urls[1], expected: expected.lock)
+      try Self.replace(
+        bytes, at: urls[1], expected: expected.lock, allowIdenticalReplacement: true)
     }
   }
 
@@ -286,7 +303,9 @@ public actor ConfigurationSession {
   init(snapshot: ConfigurationSnapshot, store: ConfigurationStore) {
     self.store = store
     baseline = snapshot.baseline
-    draft = ConfigurationDraft(manifest: snapshot.manifest, localOverrides: snapshot.localOverrides)
+    draft = ConfigurationDraft(
+      manifest: snapshot.manifest, localOverrides: snapshot.localOverrides,
+      relativeTo: store.locations.relativeTo)
     saved = draft
   }
   public func snapshot() -> ConfigurationSnapshot {
@@ -385,7 +404,9 @@ public actor ConfigurationSession {
     } catch { throw ErrorBoundary.normalize(error) }
   }
   private func apply(_ loaded: ConfigurationSnapshot) {
-    draft = ConfigurationDraft(manifest: loaded.manifest, localOverrides: loaded.localOverrides)
+    draft = ConfigurationDraft(
+      manifest: loaded.manifest, localOverrides: loaded.localOverrides,
+      relativeTo: store.locations.relativeTo)
     saved = draft
     baseline = loaded.baseline
     sharedRevision += 1

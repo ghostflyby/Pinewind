@@ -211,6 +211,8 @@ struct Build: AsyncParsableCommand {
       "Build Rime configuration from locked dependencies and local files, without network access.")
   @OptionGroup var locations: LocationOptions
   @OptionGroup var output: OutputOptions
+  @Flag(help: "Allow replacing unmanaged files listed as conflicts in the Rime directory.")
+  var force = false
   mutating func run() async throws {
     let directory = try output.directory()
     let workspace = try await locations.open()
@@ -226,9 +228,26 @@ struct Build: AsyncParsableCommand {
         )
       }
     }
-    let result = try await workspace.compose(plan, to: directory, publication: .managedFiles)
+    let result: CompositionResult
+    do {
+      result = try await workspace.compose(
+        plan, to: directory, publication: .managedFiles(overwriteUnmanaged: force))
+    } catch PinewindError.runtime(.state(.unmanagedOutputFiles(let directory, let paths))) {
+      throw CommandFailure(
+        "Unmanaged files in \(directory.string) were left unchanged:\n"
+          + paths.map { "  " + $0.string }.joined(separator: "\n")
+          + "\nPreserve these files in your personal sources first, or review the list and use 'pinewind build --force' to replace them."
+      )
+    }
     print("Built \(result.paths.count) files in \(result.directory.string).")
-    for path in result.preservedPaths { print("Kept externally modified file: \(path.string)") }
+    func warning(_ text: String) {
+      FileHandle.standardError.write(Data((text + "\n").utf8))
+    }
+    for path in result.preservedPaths { warning("Kept externally modified file: \(path.string)") }
+    for path in result.overwrittenUnmanagedPaths {
+      warning("Replaced unmanaged file: \(path.string)")
+    }
+    for value in result.warnings { warning("Warning: \(value)") }
   }
 }
 

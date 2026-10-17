@@ -486,6 +486,8 @@ public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
 }
 
 public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
+  case publicationModeConflict(FilePath)
+  case unmanagedOutputFiles(directory: FilePath, paths: [RelativePath])
   case invalidPublicationRecord(FilePath)
   case externallyModified
   case staleSnapshot
@@ -497,7 +499,15 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
   public var description: String {
     switch self {
-    case .invalidPublicationRecord(let path): return "invalid publication record: \(path.string)"
+    case .publicationModeConflict(let path):
+      return
+        "managed-file publication cannot target a Windows junction: \(path.string). Use a real directory rather than a replaceable generation."
+    case .unmanagedOutputFiles(let directory, let paths):
+      return
+        "unmanaged files would be overwritten in \(directory.string): \(paths.map(\.string).joined(separator: ", ")). Preserve them as personal sources or explicitly approve replacement."
+    case .invalidPublicationRecord(let path):
+      return
+        "invalid publication record: \(path.string). Restore a known-good backup, or move this record aside to reset ownership; existing files will be protected as unmanaged on the next build."
     case .externallyModified: return "configuration changed on disk; reload before saving"
     case .staleSnapshot: return "snapshot is stale; reload before editing"
     case .staleInputs: return "configuration or lock changed before publication"

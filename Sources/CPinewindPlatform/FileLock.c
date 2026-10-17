@@ -23,3 +23,9 @@ int pinewind_replace_file(const char *source, const char *destination) {
 int pinewind_remove_file(const char *path) {
   return unlink(path) == 0 ? 0 : errno;
 }
+
+int pinewind_sync_file(int descriptor) {
+  int result;
+  do { result = fsync(descriptor); } while (result == -1 && errno == EINTR);
+  return result == 0 ? 0 : errno;
+}
