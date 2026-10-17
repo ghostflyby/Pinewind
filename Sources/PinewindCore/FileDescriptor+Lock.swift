@@ -16,7 +16,7 @@ import SystemPackage
 extension FileDescriptor {
   /// Opens a stable, regular lock file. Closing the descriptor releases its lock;
   /// the file itself is retained so every contender locks the same file identity.
-  static func openLockFile(_ path: FilePath) throws -> Self {
+  static func openLockFile(_ path: FilePath) throws(FileSystemFailure) -> Self {
     #if os(Windows)
       // System's open() always enables FILE_SHARE_DELETE. Lock files must not be
       // replaced while any contender holds a descriptor, including while waiting.
@@ -50,17 +50,25 @@ extension FileDescriptor {
       adopted = true
       return Self(rawValue: descriptor)
     #else
-      let descriptor = try open(
-        path, .readWrite, options: [.create, .closeOnExec, .noFollow, .nonBlocking],
-        permissions: .ownerReadWrite)
+      let descriptor: FileDescriptor
+      do {
+        descriptor = try open(
+          path, .readWrite, options: [.create, .closeOnExec, .noFollow, .nonBlocking],
+          permissions: .ownerReadWrite)
+      } catch {
+        throw FileSystemFailure.unreadable(path: path, detail: String(describing: error))
+      }
       do {
         guard try descriptor.stat().type == .regular else {
           throw FileSystemFailure.notRegularFile(path)
         }
         return descriptor
+      } catch let failure as FileSystemFailure {
+        try? descriptor.close()
+        throw failure
       } catch {
         try? descriptor.close()
-        throw error
+        throw FileSystemFailure.unreadable(path: path, detail: String(describing: error))
       }
     #endif
   }
@@ -70,7 +78,7 @@ extension FileDescriptor {
   /// POSIX locks cover the file; Windows locks the reserved first byte. Both are
   /// released by close(), including when the owning process exits. Call only on
   /// an unlocked descriptor; recursive acquisition and lock conversion are unsupported.
-  func tryLockExclusively() throws -> Bool {
+  func tryLockExclusively() throws(FileSystemFailure) -> Bool {
     #if os(Windows)
       let native = ucrt._get_osfhandle(rawValue)
       guard native != -1, let handle = UnsafeMutableRawPointer(bitPattern: native) else {

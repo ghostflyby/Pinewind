@@ -25,24 +25,38 @@ final class CompositionSnapshot: Sendable {
 enum SnapshotFiles {
   private static let chunkSize = 65_536
 
-  static func byteCount(_ file: FilePath) throws -> UInt64 {
-    let descriptor = try FileDescriptor.open(file, .readOnly)
-    return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
+  static func byteCount(_ file: FilePath) throws(FileSystemFailure) -> UInt64 {
+    let descriptor: FileDescriptor
+    do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
+      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+    }
+    do {
+      return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
+    } catch {
+      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+    }
   }
 
-  static func sha256(_ file: FilePath) throws -> String {
-    let descriptor = try FileDescriptor.open(file, .readOnly)
-    return try descriptor.closeAfter {
-      var hash = SHA256()
-      var buffer = Data(count: chunkSize)
-      while true {
-        let count = try readChunk(descriptor, into: &buffer)
-        if count == 0 { break }
-        buffer.withUnsafeBytes { bytes in
-          hash.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+  static func sha256(_ file: FilePath) throws(FileSystemFailure) -> String {
+    let descriptor: FileDescriptor
+    do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
+      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+    }
+    do {
+      return try descriptor.closeAfter {
+        var hash = SHA256()
+        var buffer = Data(count: chunkSize)
+        while true {
+          let count = try readChunk(descriptor, into: &buffer)
+          if count == 0 { break }
+          buffer.withUnsafeBytes { bytes in
+            hash.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+          }
         }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
       }
-      return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    } catch {
+      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
     }
   }
 

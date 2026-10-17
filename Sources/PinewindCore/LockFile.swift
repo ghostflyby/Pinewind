@@ -47,12 +47,13 @@ public struct LockedPackage: Hashable, Sendable {
   public let request: PackageRequest
   public let commit: CommitID
   public let resources: [PinnedResource]
-  init(request: PackageRequest, commit: CommitID, resources: [PinnedResource] = []) throws {
+  init(request: PackageRequest, commit: CommitID, resources: [PinnedResource] = [])
+    throws(LockFailure)
+  {
     guard !request.url.isFileURL, request.commit == nil || request.commit == commit.string,
       Set(resources.map(\.path)).count == resources.count
     else {
-      throw PinewindError.runtime(
-        .lock(.malformed(detail: "invalid or conflicting package resolution")))
+      throw LockFailure.malformed(detail: "invalid or conflicting package resolution")
     }
     self.request = request
     self.commit = commit
@@ -90,18 +91,18 @@ public struct Resolution: Sendable {
         return false
       })
     else {
-      throw PinewindError.runtime(.lock(.malformed(detail: "resolution requires expanded imports")))
+      throw LockFailure.malformed(detail: "resolution requires expanded imports")
     }
     var seen: [PackageRequest: LockedPackage] = [:]
     for package in packages {
       guard seen[package.request] == nil else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "duplicate package resolution")))
+        throw LockFailure.malformed(detail: "duplicate package resolution")
       }
       seen[package.request] = package
     }
     for entry in expanded.entries {
       if case .package(let request) = entry, !request.url.isFileURL, seen[request] == nil {
-        throw PinewindError.runtime(.lock(.malformed(detail: "resolution is missing a package")))
+        throw LockFailure.malformed(detail: "resolution is missing a package")
       }
     }
     let requests = Set(
@@ -110,18 +111,15 @@ public struct Resolution: Sendable {
         return nil
       })
     guard Set(seen.keys) == requests else {
-      throw PinewindError.runtime(
-        .lock(.malformed(detail: "resolution contains unrelated packages")))
+      throw LockFailure.malformed(detail: "resolution contains unrelated packages")
     }
     var sourceVersions: [RepositoryKey: CommitID] = [:]
     for package in packages {
       guard case .git(let repository) = package.request.source else {
-        throw PinewindError.runtime(
-          .lock(.malformed(detail: "local source in shared package lock")))
+        throw LockFailure.malformed(detail: "local source in shared package lock")
       }
       if let prior = sourceVersions[repository.key], prior != package.commit {
-        throw PinewindError.runtime(
-          .lock(.malformed(detail: "conflicting commits for one repository revision")))
+        throw LockFailure.malformed(detail: "conflicting commits for one repository revision")
       }
       sourceVersions[repository.key] = package.commit
     }
@@ -136,8 +134,7 @@ public struct Resolution: Sendable {
           }),
           Set(imported.resources.map(\.path)).count == imported.resources.count
         else {
-          throw PinewindError.runtime(
-            .lock(.malformed(detail: "missing or conflicting import resolution")))
+          throw LockFailure.malformed(detail: "missing or conflicting import resolution")
         }
         consumed.insert(imported.id)
         expected += imported.packages.map(ManifestEntry.package)
@@ -146,8 +143,8 @@ public struct Resolution: Sendable {
       }
     }
     guard expected == expanded.entries, consumed.count == imports.count else {
-      throw PinewindError.runtime(
-        .lock(.malformed(detail: "expanded entries disagree with locked imports and declarations")))
+      throw LockFailure.malformed(
+        detail: "expanded entries disagree with locked imports and declarations")
     }
     self.declarations = declarations
     self.expanded = expanded
@@ -201,11 +198,11 @@ enum ResolutionCodec {
       include = request.filter.include
       exclude = request.filter.exclude
     }
-    func decode() throws -> PackageRequest {
+    func decode() throws(LockFailure) -> PackageRequest {
       guard let endpoint = URL(string: url), !endpoint.isFileURL, url != "local",
         Set(options.map(\.key)).count == options.count
       else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "invalid locked package record")))
+        throw LockFailure.malformed(detail: "invalid locked package record")
       }
       let selection: GitRevision
       switch revision {
@@ -213,18 +210,25 @@ enum ResolutionCodec {
       case "branch": selection = .branch(try required())
       case "tag": selection = .tag(try required())
       case "ref": selection = .reference(try required())
-      case "commit": selection = .commit(try CommitID(required()))
+      case "commit":
+        do { selection = .commit(try CommitID(required())) } catch {
+          throw LockFailure.malformed(detail: String(describing: error))
+        }
       default:
-        throw PinewindError.runtime(.lock(.malformed(detail: "invalid locked revision selector")))
+        throw LockFailure.malformed(detail: "invalid locked revision selector")
       }
-      return try PackageRequest(
-        url: endpoint, revision: selection, recipe: recipe,
-        options: Dictionary(uniqueKeysWithValues: options.map { ($0.key, $0.value) }),
-        filter: FileFilter(include: include, exclude: exclude))
+      do {
+        return try PackageRequest(
+          url: endpoint, revision: selection, recipe: recipe,
+          options: Dictionary(uniqueKeysWithValues: options.map { ($0.key, $0.value) }),
+          filter: FileFilter(include: include, exclude: exclude))
+      } catch {
+        throw LockFailure.malformed(detail: String(describing: error))
+      }
     }
-    func required() throws -> String {
+    func required() throws(LockFailure) -> String {
       guard let value else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "locked revision value is missing")))
+        throw LockFailure.malformed(detail: "locked revision value is missing")
       }
       return value
     }
@@ -255,28 +259,29 @@ enum ResolutionCodec {
         }
       }
     }
-    func decode(shared: Manifest) throws -> ManifestEntry {
+    func decode(shared: Manifest) throws(LockFailure) -> ManifestEntry {
       switch kind {
       case "self":
         let filter = FileFilter(include: include, exclude: exclude ?? [])
-        try filter.validate()
+        do { try filter.validate() } catch {
+          throw LockFailure.malformed(detail: String(describing: error))
+        }
         return .userFiles(filter)
       case "package":
         guard let request else {
-          throw PinewindError.runtime(
-            .lock(.malformed(detail: "locked package entry has no request")))
+          throw LockFailure.malformed(detail: "locked package entry has no request")
         }
         return .package(try request.decode())
       case "local":
         guard let localIndex, shared.entries.indices.contains(localIndex),
           case .package(let request) = shared.entries[localIndex], request.url.isFileURL
         else {
-          throw PinewindError.runtime(
-            .lock(.malformed(detail: "locked local entry does not match the shared declarations")))
+          throw LockFailure.malformed(
+            detail: "locked local entry does not match the shared declarations")
         }
         return .package(request)
       default:
-        throw PinewindError.runtime(.lock(.malformed(detail: "unexpanded or invalid lock entry")))
+        throw LockFailure.malformed(detail: "unexpanded or invalid lock entry")
       }
     }
   }
@@ -289,15 +294,18 @@ enum ResolutionCodec {
       path = pin.path.string
       sha256 = pin.sha256
     }
-    func decode() throws -> PinnedResource {
+    func decode() throws(LockFailure) -> PinnedResource {
       guard let url = URL(string: url) else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "locked resource URL is invalid")))
+        throw LockFailure.malformed(detail: "locked resource URL is invalid")
       }
       guard !path.contains("\0"), !path.contains("\\") else {
-        throw PinewindError.runtime(
-          .lock(.malformed(detail: "locked resource path is not portable")))
+        throw LockFailure.malformed(detail: "locked resource path is not portable")
       }
-      return try PinnedResource(url: url, path: RelativePath(FilePath(path)), sha256: sha256)
+      do {
+        return try PinnedResource(url: url, path: RelativePath(FilePath(path)), sha256: sha256)
+      } catch {
+        throw LockFailure.malformed(detail: String(describing: error))
+      }
     }
   }
   struct Package: Codable {
@@ -319,13 +327,17 @@ enum ResolutionCodec {
     let packages: [Package]
     let imports: [Import]
   }
-  static func signature(_ manifest: Manifest) throws -> Data {
+  static func signature(_ manifest: Manifest) throws(LockFailure) -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = .sortedKeys
-    return try encoder.encode(
-      manifest.entries.enumerated().map { Entry($0.element, index: $0.offset) })
+    do {
+      return try encoder.encode(
+        manifest.entries.enumerated().map { Entry($0.element, index: $0.offset) })
+    } catch {
+      throw LockFailure.malformed(detail: String(describing: error))
+    }
   }
-  static func encode(_ resolution: Resolution) throws -> Data {
+  static func encode(_ resolution: Resolution) throws(LockFailure) -> Data {
     let entries = resolution.expanded.entries.enumerated().map { index, entry -> Entry in
       var record = Entry(entry, index: index)
       if case .package(let request) = entry, request.url.isFileURL {
@@ -350,44 +362,76 @@ enum ResolutionCodec {
             Pair(key: $0.key, value: $0.value)
           }, packages: $0.packages.map(Request.init), resources: $0.resources.map(Resource.init))
       })
-    return magic + (try PropertyListEncoder().encode(payload))
+    do { return magic + (try PropertyListEncoder().encode(payload)) } catch {
+      throw LockFailure.malformed(detail: String(describing: error))
+    }
   }
-  static func reusable(_ bytes: Data) throws -> (
+  static func reusable(_ bytes: Data) throws(LockFailure) -> (
     packages: [LockedPackage], imports: [ResolvedImport]
   ) {
     guard bytes.starts(with: magic) else {
-      throw PinewindError.runtime(.lock(.incompatible(detail: "unsupported lock")))
+      throw LockFailure.incompatible(detail: "unsupported lock")
     }
-    let payload = try PropertyListDecoder().decode(Payload.self, from: bytes.dropFirst(magic.count))
+    let payload: Payload
+    do {
+      payload = try PropertyListDecoder().decode(Payload.self, from: bytes.dropFirst(magic.count))
+    } catch {
+      throw LockFailure.malformed(detail: String(describing: error))
+    }
     guard payload.version == 1 else {
-      throw PinewindError.runtime(.lock(.incompatible(detail: "unsupported lock version")))
+      throw LockFailure.incompatible(detail: "unsupported lock version")
     }
-    let packages = try payload.packages.map {
-      try LockedPackage(
-        request: $0.request.decode(), commit: CommitID($0.commit),
-        resources: $0.resources.map { try $0.decode() })
+    let packages: [LockedPackage]
+    do {
+      packages = try payload.packages.map {
+        try LockedPackage(
+          request: $0.request.decode(), commit: CommitID($0.commit),
+          resources: $0.resources.map { try $0.decode() })
+      }
+    } catch let failure as LockFailure {
+      throw failure
+    } catch {
+      throw LockFailure.malformed(detail: String(describing: error))
     }
     guard Set(packages.map(\.request)).count == packages.count else {
-      throw PinewindError.runtime(.lock(.malformed(detail: "conflicting locked package records")))
+      throw LockFailure.malformed(detail: "conflicting locked package records")
     }
-    let imports = try payload.imports.map { record -> ResolvedImport in
-      guard Set(record.variables.map(\.key)).count == record.variables.count else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "duplicate locked variables")))
+    let imports: [ResolvedImport]
+    do {
+      imports = try payload.imports.map { record -> ResolvedImport in
+        guard Set(record.variables.map(\.key)).count == record.variables.count else {
+          throw LockFailure.malformed(detail: "duplicate locked variables")
+        }
+        return try ResolvedImport(
+          id: ImportID(
+            index: record.index,
+            request: ConfImport(
+              source: record.source,
+              variables: Dictionary(
+                uniqueKeysWithValues: record.variables.map { ($0.key, $0.value) })
+            )),
+          packages: record.packages.map { try $0.decode() },
+          resources: record.resources.map { try $0.decode() })
       }
-      return try ResolvedImport(
-        id: ImportID(
-          index: record.index,
-          request: ConfImport(
-            source: record.source,
-            variables: Dictionary(uniqueKeysWithValues: record.variables.map { ($0.key, $0.value) })
-          )),
-        packages: record.packages.map { try $0.decode() },
-        resources: record.resources.map { try $0.decode() })
+    } catch let failure as LockFailure {
+      throw failure
+    } catch {
+      throw LockFailure.malformed(detail: String(describing: error))
     }
     return (packages, imports)
   }
-  static func decode(_ bytes: Data, snapshot: ConfigurationSnapshot) throws -> Resolution {
-    let lock = try DocumentContext(path: snapshot.locations.configuration.lock.filePath)
+  static func decode(_ bytes: Data, snapshot: ConfigurationSnapshot) throws(PinewindError)
+    -> Resolution
+  {
+    let lock: DocumentContext
+    do {
+      lock = try DocumentContext(path: snapshot.locations.configuration.lock.filePath)
+    } catch let failure as FileSystemFailure {
+      throw PinewindError.runtime(.file(failure))
+    } catch {
+      throw PinewindError.runtime(
+        .defect(.wrapped(detail: String(describing: error), origin: Origin())))
+    }
     guard bytes.starts(with: magic) else {
       throw PinewindError.configuration(
         DocumentError(
@@ -399,13 +443,13 @@ enum ResolutionCodec {
       let payload = try PropertyListDecoder().decode(
         Payload.self, from: bytes.dropFirst(magic.count))
       guard payload.version == 1 else {
-        throw PinewindError.runtime(.lock(.incompatible(detail: "unsupported lock version")))
+        throw LockFailure.incompatible(detail: "unsupported lock version")
       }
       let declarations = try snapshot.evaluate(.shared)
       let encoder = JSONEncoder()
       encoder.outputFormatting = .sortedKeys
       guard try encoder.encode(payload.declarations) == signature(declarations) else {
-        throw PinewindError.runtime(.lock(.declarationChanged))
+        throw LockFailure.declarationChanged
       }
       let packages = try payload.packages.map {
         try LockedPackage(
@@ -414,8 +458,7 @@ enum ResolutionCodec {
       }
       let imports = try payload.imports.map { record -> ResolvedImport in
         guard Set(record.variables.map(\.key)).count == record.variables.count else {
-          throw PinewindError.runtime(
-            .lock(.malformed(detail: "duplicate locked import variables")))
+          throw LockFailure.malformed(detail: "duplicate locked import variables")
         }
         let request = try ConfImport(
           source: record.source,
@@ -423,8 +466,7 @@ enum ResolutionCodec {
         guard declarations.entries.indices.contains(record.index),
           declarations.entries[record.index] == .importConf(request)
         else {
-          throw PinewindError.runtime(
-            .lock(.malformed(detail: "locked import does not match the declarations")))
+          throw LockFailure.malformed(detail: "locked import does not match the declarations")
         }
         return try ResolvedImport(
           id: ImportID(index: record.index, request: request),
@@ -432,17 +474,20 @@ enum ResolutionCodec {
           resources: record.resources.map { try $0.decode() })
       }
       guard Set(imports.map(\.id)).count == imports.count else {
-        throw PinewindError.runtime(.lock(.malformed(detail: "duplicate locked import")))
+        throw LockFailure.malformed(detail: "duplicate locked import")
       }
       return try Resolution(
         declarations: declarations,
         expanded: Manifest(entries: payload.expanded.map { try $0.decode(shared: declarations) }),
         packages: packages, imports: imports, snapshot: snapshot, preview: false, lockBytes: bytes)
-    } catch let error as PinewindError {
-      // Lock-derived failures belong to the lock document; declaration failures
-      // from the evaluated manifest keep their own (unanchored) attribution.
-      if case .runtime(.lock(_)) = error { throw error.promoted(lock) }
-      throw error
+    } catch let failure as LockFailure {
+      throw PinewindError.configuration(DocumentError(context: lock, failure: .lock(failure)))
+    } catch let pinned as PinewindError {
+      throw pinned
+    } catch let failure as Failure {
+      // Declaration failures from the evaluated manifest keep their own
+      // (unanchored) attribution.
+      throw PinewindError.runtime(failure)
     } catch {
       throw PinewindError.configuration(
         DocumentError(

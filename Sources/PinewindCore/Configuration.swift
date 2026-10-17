@@ -114,20 +114,26 @@ public struct PackageRequest: Hashable, Sendable {
   public init(
     source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
-  ) throws {
+  ) throws(Failure) {
     if let recipe, recipe.contains("\0") || recipe.contains("\\") {
       throw Failure.file(.notPortable(FilePath(recipe)))
     }
-    let recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
-    try filter.validate()
+    let recipePath: RelativePath
+    do {
+      recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
+    } catch { throw Failure.file(error) }
+    do { try filter.validate() } catch { throw Failure.declaration(error) }
     switch source {
     case .git(let repository):
       self.url = repository.url
       self.source = source
     case .directory(let location):
-      let location = try location.resolved(relativeTo: relativeTo)
-      self.url = try location.url
-      self.source = .directory(location)
+      let resolved: FileLocation
+      do { resolved = try location.resolved(relativeTo: relativeTo) } catch {
+        throw Failure.file(error)
+      }
+      do { self.url = try resolved.url } catch { throw Failure.file(error) }
+      self.source = .directory(resolved)
     }
     self.recipe = recipe.map { _ in String(recipePath.string.dropLast(".recipe.yaml".count)) }
     self.recipePath = recipePath
@@ -137,10 +143,10 @@ public struct PackageRequest: Hashable, Sendable {
   init(
     url: URL, revision: GitRevision? = nil, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter()
-  ) throws {
+  ) throws(Failure) {
     if url.isFileURL {
       guard revision == nil else {
-        throw DeclarationFailure.revisionWithFileSource
+        throw Failure.declaration(.revisionWithFileSource)
       }
       try self.init(
         source: .directory(.fileURL(url)), recipe: recipe, options: options, filter: filter)
@@ -198,7 +204,11 @@ public struct SourceIdentity: Hashable, Sendable {
     }
     self.commit = commit
   }
-  init(url: URL, commit: String) throws { try self.init(url: url, commit: CommitID(commit)) }
+  init(url: URL, commit: String) throws(Failure) {
+    let id: CommitID
+    do { id = try CommitID(commit) } catch { throw Failure.declaration(error) }
+    try self.init(url: url, commit: id)
+  }
   static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws(Failure) -> URL {
     if url.isFileURL {
       do { _ = try NativePath.from(url) } catch { throw Failure.file(error) }

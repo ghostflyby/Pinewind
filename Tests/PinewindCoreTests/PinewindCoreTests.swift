@@ -148,7 +148,7 @@ struct ConfigurationTests {
     let f = try Fixture()
     defer { f.remove() }
     let value = key == "ref" ? "master" : String(repeating: "a", count: 40)
-    #expect(throws: DeclarationFailure.self) {
+    #expect(throws: Failure.self) {
       try PackageRequest(
         url: f.a, revision: key == "ref" ? .reference(value) : .commit(CommitID(value)))
     }
@@ -173,9 +173,9 @@ struct ConfigurationTests {
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
-      #expect(throws: DeclarationFailure.self) { try ManifestDocument.parse(yaml).evaluate() }
+      #expect(throws: PinewindError.self) { try ManifestDocument.parse(yaml).evaluate() }
     }
-    #expect(throws: DeclarationFailure.self) {
+    #expect(throws: PinewindError.self) {
       try ManifestDocument.parse(remote).evaluate(
         localOverrides: LocalOverridesDocument.parse(
           "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}"))
@@ -946,7 +946,7 @@ struct LockTests {
 
   @Test func workingTreesAndCorruptLocksFail() throws {
     let directory = native(FileManager.default.temporaryDirectory)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: LockFailure.self) {
       try LockedPackage(
         request: PackageRequest(source: .directory(.path(directory))),
         commit: CommitID(String(repeating: "a", count: 40)))

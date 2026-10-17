@@ -14,7 +14,7 @@
   enum WindowsDirectoryPublisher {
     /// Resolve parent aliases and expand the entry's short name without following
     /// the final managed junction into its replaceable generation.
-    static func publicationPath(_ output: FilePath) throws -> FilePath {
+    static func publicationPath(_ output: FilePath) throws(FileSystemFailure) -> FilePath {
       guard let component = output.lastComponent else {
         throw FileSystemFailure.isFilesystemRoot(output)
       }
@@ -36,7 +36,7 @@
         "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
     }
 
-    static func validate(_ output: FilePath) throws {
+    static func validate(_ output: FilePath) throws(FileSystemFailure) {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedPath(target)
@@ -117,11 +117,11 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: FilePath) throws -> FilePath {
+    static func canonicalPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
       FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedPath(_ url: FilePath) throws -> FilePath {
+    static func resolvedPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
       var ancestor = url
       var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
@@ -148,7 +148,7 @@
       return resolved
     }
 
-    static func currentTarget(_ output: FilePath) throws -> FilePath? {
+    static func currentTarget(_ output: FilePath) throws(FileSystemFailure) -> FilePath? {
       let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }

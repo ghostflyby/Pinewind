@@ -22,7 +22,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     self.manifest = manifest
     self.localOverrides = localOverrides
   }
-  public mutating func addPackage(_ name: String, request: PackageRequest) throws {
+  public mutating func addPackage(_ name: String, request: PackageRequest) throws(PinewindError) {
     guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
     guard manifest.names[name] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(name)))
@@ -36,7 +36,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     manifest.names[name] = fields
     manifest.order.append(.named(name))
   }
-  public mutating func renamePackage(_ old: String, to new: String) throws {
+  public mutating func renamePackage(_ old: String, to new: String) throws(PinewindError) {
     guard old == new || localOverrides?.names[new] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(new)))
     }
@@ -45,21 +45,23 @@ public struct ConfigurationDraft: Hashable, Sendable {
       localOverrides?.names[new] = fields
     }
   }
-  public mutating func removePackage(_ name: String) throws {
+  public mutating func removePackage(_ name: String) throws(PinewindError) {
     try manifest.removePackage(name)
     localOverrides?.names.removeValue(forKey: name)
   }
-  public mutating func redirectPackage(_ name: String, to location: FileLocation) throws {
+  public mutating func redirectPackage(_ name: String, to location: FileLocation)
+    throws(PinewindError)
+  {
     guard manifest.names[name] != nil else {
       throw PinewindError.runtime(.declaration(.unknownName(name)))
     }
     if localOverrides == nil { localOverrides = LocalOverridesDocument() }
     var fields = localOverrides?.names[name] ?? PackageFields()
-    fields.url = .value(try location.url)
+    do { fields.url = .value(try location.url) } catch { throw PinewindError.runtime(.file(error)) }
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
-  public mutating func moveEntry(from: Int, to: Int) throws {
+  public mutating func moveEntry(from: Int, to: Int) throws(PinewindError) {
     try manifest.moveEntry(from: from, to: to)
   }
 }
@@ -72,7 +74,9 @@ public struct ConfigurationSnapshot: Sendable {
   public let localIsDirty: Bool
   let locations: WorkspaceLocations
   let baseline: DocumentBaseline
-  public func evaluate(_ scope: ConfigurationScope = .effective) throws -> EvaluatedManifest {
+  public func evaluate(_ scope: ConfigurationScope = .effective) throws(PinewindError)
+    -> EvaluatedManifest
+  {
     try manifest.evaluate(localOverrides: scope == .shared ? nil : localOverrides)
   }
   public func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {

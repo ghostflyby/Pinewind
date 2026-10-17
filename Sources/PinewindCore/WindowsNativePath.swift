@@ -8,7 +8,7 @@ import Foundation
 import SystemPackage
 
 #if os(Windows)
-  func windowsNativePath(_ url: FilePath) throws -> FilePath {
+  func windowsNativePath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
     guard var path = String(validating: url) else {
       throw PinewindError.runtime(.file(.unresolvable(url)))
     }

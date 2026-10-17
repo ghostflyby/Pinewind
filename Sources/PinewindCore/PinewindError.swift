@@ -52,8 +52,49 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
   /// as a boundary defect. The origin captures the wrapping site.
   static func wrap(_ error: any Error, origin: Origin = Origin()) -> any Error {
     if error is CancellationError || error is PinewindError { return error }
+    if let failure = error as? Failure { return PinewindError.runtime(failure) }
+    switch error {
+    case is GitFailure: return PinewindError.runtime(.git(error as! GitFailure))
+    case is FileSystemFailure: return PinewindError.runtime(.file(error as! FileSystemFailure))
+    case is NetworkFailure: return PinewindError.runtime(.network(error as! NetworkFailure))
+    case is InterpreterFailure:
+      return PinewindError.runtime(.interpreter(error as! InterpreterFailure))
+    case is DeclarationFailure:
+      return PinewindError.runtime(.declaration(error as! DeclarationFailure))
+    case is LockFailure: return PinewindError.runtime(.lock(error as! LockFailure))
+    case is StateFailure: return PinewindError.runtime(.state(error as! StateFailure))
+    case is CacheFailure: return PinewindError.runtime(.cache(error as! CacheFailure))
+    case is Defect: return PinewindError.runtime(.defect(error as! Defect))
+    default: break
+    }
     return PinewindError.runtime(
       .defect(.wrapped(detail: String(describing: error), origin: origin)))
+  }
+
+  /// Relays mixed-surface work to an attributed caller: typed failures pass
+  /// through unchanged, facts become runtime failures, anything foreign becomes
+  /// a boundary defect. Synchronous parse and encode work only — no cancellation.
+  static func relay<T>(_ body: () throws -> T) throws(PinewindError) -> T {
+    do { return try body() } catch let pinned as PinewindError { throw pinned } catch let failure
+      as Failure
+    { throw PinewindError.runtime(failure) } catch let failure as GitFailure {
+      throw PinewindError.runtime(.git(failure))
+    } catch let failure as FileSystemFailure {
+      throw PinewindError.runtime(.file(failure))
+    } catch let failure as NetworkFailure {
+      throw PinewindError.runtime(.network(failure))
+    } catch let failure as InterpreterFailure {
+      throw PinewindError.runtime(.interpreter(failure))
+    } catch let failure as DeclarationFailure {
+      throw PinewindError.runtime(.declaration(failure))
+    } catch let failure as LockFailure { throw PinewindError.runtime(.lock(failure)) } catch let
+      failure as StateFailure
+    { throw PinewindError.runtime(.state(failure)) } catch let failure as CacheFailure {
+      throw PinewindError.runtime(.cache(failure))
+    } catch let failure as Defect { throw PinewindError.runtime(.defect(failure)) } catch {
+      throw PinewindError.runtime(
+        .defect(.wrapped(detail: String(describing: error), origin: Origin())))
+    }
   }
 }
 

@@ -83,7 +83,7 @@ struct ConfigurationDocumentTests {
     let local = LocalOverridesDocument(names: ["emoji": PackageFields(url: .value(directory))])
     let effective = try document.evaluate(localOverrides: local)
     #expect(effective.entries == [.package(try PackageRequest(url: directory))])
-    #expect(throws: DeclarationFailure.self) {
+    #expect(throws: PinewindError.self) {
       try document.evaluate(
         localOverrides: LocalOverridesDocument(names: [
           "emoji": PackageFields(url: .value(directory), revision: .value(.reference("main")))
@@ -117,9 +117,9 @@ struct ConfigurationDocumentTests {
   ])
   func invalidDraftFieldsAreRejectedConsistently(_ fields: PackageFields) {
     let document = ManifestDocument(names: ["unused": fields], order: [])
-    #expect(throws: DeclarationFailure.self) { _ = try document.evaluate() }
-    #expect(throws: DeclarationFailure.self) { _ = try document.yaml() }
-    #expect(throws: DeclarationFailure.self) {
+    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
+    #expect(throws: PinewindError.self) { _ = try document.yaml() }
+    #expect(throws: PinewindError.self) {
       _ = try LocalOverridesDocument(names: ["unused": fields]).yaml()
     }
   }
