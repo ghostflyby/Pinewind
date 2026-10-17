@@ -1,0 +1,7 @@
+version: 1
+order:
+  - url: https://example.com/team/package.git
+    revision: {branch: main}
+  - url: https://example.com/team/package
+    revision: {branch: main}
+    recipe: other

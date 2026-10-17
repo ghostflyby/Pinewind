@@ -4,7 +4,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import BashInterpreter
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -25,7 +27,7 @@ private struct Fixture {
     do {
       if let name {
         guard let fixtures = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
-          throw PinewindError("test fixture bundle is missing")
+          throw PinewindError.runtime(.file(.notFound(FilePath("Fixtures"))))
         }
         let source = fixtures.appendingPathComponent(name)
         for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
@@ -62,21 +64,9 @@ private struct Fixture {
 
 @Suite("Pinewind configuration")
 struct ConfigurationTests {
-  @Test(arguments: [
-    "order: [self]",
-    "version: true\norder: [self]",
-    "version: \"1\"\norder: [self]",
-    "version: 2\norder: [self]",
-    "version: 1\nversion: 1\norder: [self]",
-    "version: 1\nunknown: value\norder: [self]",
-    "version: 1\norder: [{url: https://github.com/rime/rime-emoji, name: emoji}]",
-    "version: 1\norder: [missing]",
-    "version: 1\norder: [{url: https://github.com/rime/rime-emoji, options: {schema: true}}]",
-    "version: 1\norder: [self]\n---\nversion: 1\norder: []",
-    "version: 1\nnames: {unused: {url: true}}\norder: []",
-  ])
-  func invalidDocumentsFail(_ text: String) {
-    #expect(throws: PinewindError.self) { try Manifest.parse(text) }
+  @Test func missingPackageDefinitionCannotBeEvaluated() throws {
+    let document = try ManifestDocument.parse("version: 1\norder: [missing]")
+    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
   }
 
   @Test func mergesFieldsAndClearsWithoutDeepMergingOptions() throws {
@@ -85,7 +75,7 @@ struct ConfigurationTests {
       names:
         emoji:
           url: https://github.com/rime/rime-emoji.git
-          ref: master
+          revision: {ref: master}
           recipe: customize
           options: {schema: old, other: value}
       order:
@@ -96,16 +86,17 @@ struct ConfigurationTests {
       version: 1
       names:
         emoji:
-          ref: null
+          revision: null
           recipe: null
       """
-    let manifest = try Manifest.parse(yaml, localOverrides: local)
+    let manifest = try ManifestDocument.parse(yaml).evaluate(
+      localOverrides: LocalOverridesDocument.parse(local))
     guard case .package(let request) = try #require(manifest.entries.first) else {
       Issue.record("expected package")
       return
     }
     #expect(request.url.absoluteString == "https://github.com/rime/rime-emoji")
-    #expect(request.ref == nil)
+    #expect(request.revision == .defaultBranch)
     #expect(request.recipe == nil)
     #expect(request.options == ["schema": "new"])
   }
@@ -118,7 +109,7 @@ struct ConfigurationTests {
       """
       version: 1
       names:
-        dev: {url: https://github.com/rime/rime-emoji, ref: master}
+        dev: {url: https://github.com/rime/rime-emoji, revision: {ref: master}}
       order: [dev, self]
       """, in: fixture.input)
     try fixture.write(
@@ -128,14 +119,15 @@ struct ConfigurationTests {
       names:
         dev: {url: \(fixture.a.absoluteString)}
       """, in: fixture.root.appendingPathComponent("state"))
-    let manifest = try await Manifest.load(
-      inputRoot: fixture.input, localStateRoot: fixture.root.appendingPathComponent("state"))
+    let manifest = try await loadConfiguration(
+      inputRoot: fixture.input, localStateRoot: fixture.root.appendingPathComponent("state")
+    ).snapshot().evaluate()
     guard case .package(let request) = manifest.entries[0] else {
       Issue.record("expected package")
       return
     }
     #expect(request.url == fixture.a)
-    #expect(request.ref == nil && request.commit == nil)
+    #expect(request.revision == nil)
     #expect(
       !FileManager.default.fileExists(
         atPath: fixture.input.appendingPathComponent("pinewind.lock").path))
@@ -145,10 +137,10 @@ struct ConfigurationTests {
     let fixture = try Fixture()
     defer { fixture.remove() }
     #expect(
-      try await Manifest.load(
+      try await loadConfiguration(
         inputRoot: fixture.input, localStateRoot: fixture.root.appendingPathComponent("state")
-      ).entries == [.userFiles(FileFilter())])
-    #expect(try Manifest.parse("version: 1\norder: []").entries.isEmpty)
+      ).snapshot().evaluate().entries == [.userFiles(FileFilter())])
+    #expect(try ManifestDocument.parse("version: 1\norder: []").evaluate().entries.isEmpty)
   }
 
   @Test(arguments: ["ref", "commit"])
@@ -156,51 +148,59 @@ struct ConfigurationTests {
     let f = try Fixture()
     defer { f.remove() }
     let value = key == "ref" ? "master" : String(repeating: "a", count: 40)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: Failure.self) {
       try PackageRequest(
-        url: f.a, ref: key == "ref" ? value : nil, commit: key == "commit" ? value : nil)
+        url: f.a, revision: key == "ref" ? .reference(value) : .commit(CommitID(value)))
     }
     let remote = """
       version: 1
       names:
-        dev: {url: https://github.com/rime/rime-emoji, \(key): \(value)}
+        dev: {url: https://github.com/rime/rime-emoji, revision: {\(key): \(value)}}
       order: [dev]
       """
     let override = "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}"
-    guard case .package(let local) = try Manifest.parse(remote, localOverrides: override).entries[0]
+    guard
+      case .package(let local) = try ManifestDocument.parse(remote).evaluate(
+        localOverrides: LocalOverridesDocument.parse(override)
+      ).entries[0]
     else {
       Issue.record("expected a local package")
       return
     }
-    #expect(local.url == f.a && local.ref == nil && local.commit == nil)
+    #expect(local.url == f.a && local.revision == nil)
     for yaml in [
-      "version: 1\norder: [{url: \(f.a.absoluteString), \(key): \(value)}]",
-      "version: 1\nnames: {dev: {url: \(f.a.absoluteString), \(key): \(value)}}\norder: [dev]",
-      "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, \(key): \(value)}]",
+      "version: 1\norder: [{url: \(f.a.absoluteString), revision: {\(key): \(value)}}]",
+      "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
+      "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
-      #expect(throws: PinewindError.self) { try Manifest.parse(yaml) }
+      #expect(throws: PinewindError.self) { try ManifestDocument.parse(yaml).evaluate() }
     }
     #expect(throws: PinewindError.self) {
-      try Manifest.parse(
-        remote,
-        localOverrides:
-          "version: 1\nnames: {dev: {url: \(f.a.absoluteString), \(key): \(value)}}")
+      try ManifestDocument.parse(remote).evaluate(
+        localOverrides: LocalOverridesDocument.parse(
+          "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}"))
     }
   }
 
   @Test func localVersionIsRequired() {
     #expect(throws: PinewindError.self) {
-      try Manifest.parse("version: 1\norder: [self]", localOverrides: "names: {}")
+      try ManifestDocument.parse("version: 1\norder: [self]").evaluate(
+        localOverrides: LocalOverridesDocument.parse("names: {}"))
     }
   }
 
   @Test func diagnosticReportsTheCorrectLine() {
     do {
-      _ = try Manifest.parse("version: 1\norder: []\nbad: true", source: "fixture.yaml")
+      _ = try ManifestDocument.parse("version: 1\norder: []\nbad: true", source: "fixture.yaml")
+        .evaluate()
       Issue.record("expected diagnostic")
     } catch let error as PinewindError {
-      #expect(error.source == "fixture.yaml")
-      #expect(error.line == 3)
+      guard case .configuration(let document) = error else {
+        Issue.record("expected a document verdict: \(error)")
+        return
+      }
+      #expect(document.context.path == FilePath("fixture.yaml"))
+      #expect(document.context.placement?.line == 3)
     } catch { Issue.record("unexpected error: \(error)") }
   }
 }
@@ -216,7 +216,7 @@ struct CompositionTests {
       in: f.a)
     let entries: [ManifestEntry] = [.package(try f.request(f.a)), .package(try f.request(f.a))]
     var plan: CompositionPlan? = try f.plan(entries)
-    let operations = try #require(plan?.files["words.txt"])
+    let operations = try #require(plan?.files[RelativePath("words.txt")])
     guard case .write(let frozen) = operations[0].action,
       case .write(let repeated) = operations[1].action
     else {
@@ -237,7 +237,7 @@ struct CompositionTests {
     #expect(try f.read("words.txt") == "before")
     #expect(try f.read("custom.yaml").contains("value: before"))
     plan = nil
-    #expect(!FileManager.default.fileExists(atPath: frozen.deletingLastPathComponent().path))
+    #expect(!FileManager.default.fileExists(atPath: frozen.removingLastComponent().string))
     _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("words.txt") == "after!")
     #expect(try f.read("custom.yaml").contains("value: after"))
@@ -275,7 +275,7 @@ struct CompositionTests {
     let f = try Fixture("FoldedInstall")
     defer { f.remove() }
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["opencc/emoji.txt", "schemas/test.yaml"])
+    #expect(plan.paths.map(\.string) == ["opencc/emoji.txt", "schemas/test.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("opencc/emoji.txt") == "emoji\n")
   }
@@ -286,7 +286,7 @@ struct CompositionTests {
     try f.write(
       "recipe.yaml", "patch_files: {nested/test.custom.yaml: [{schema: test}]}", in: f.a)
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["nested/test.custom.yaml"])
+    #expect(plan.paths.map(\.string) == ["nested/test.custom.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     let text = try f.read("nested/test.custom.yaml")
     #expect(text.hasPrefix("__patch:\n"))
@@ -302,7 +302,7 @@ struct CompositionTests {
         try Template.expand("${value:-default}", options: options, declared: ["value"]) == "default"
       )
     }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: Failure.declaration(.optionValueMissing("value"))) {
       try Template.expand("${value}", options: [:], declared: ["value"])
     }
   }
@@ -318,7 +318,7 @@ struct CompositionTests {
     try f.write("scratch.local.yaml", "local", in: f.input)
     let plan = try f.plan([.userFiles(FileFilter())])
     let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
-    #expect(result.paths == ["lua/helper.lua", "nested/table.txt"])
+    #expect(result.paths.map(\.string) == ["lua/helper.lua", "nested/table.txt"])
     #expect(try f.read("lua/helper.lua") == "return 1")
   }
 
@@ -332,7 +332,8 @@ struct CompositionTests {
       try f.write(path, "data", in: f.a)
     }
     let plan = try f.plan([.package(f.request(f.a))])
-    #expect(plan.paths == ["default.yaml", "model.gram", "opencc/data.ocd2", "words.txt"])
+    #expect(
+      plan.paths.map(\.string) == ["default.yaml", "model.gram", "opencc/data.ocd2", "words.txt"])
   }
 
   @Test func uninstallRestoresEarlierProviderAndReorderChangesWinner() async throws {
@@ -344,7 +345,7 @@ struct CompositionTests {
     let b = try ManifestEntry.package(f.request(f.b))
     let composer = Composer()
     let both = try f.plan([a, b])
-    #expect(both.files["default.yaml"]?.count == 2)
+    #expect(try both.files[RelativePath("default.yaml")]?.count == 2)
     _ = try await composer.compose(both, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read("default.yaml") == "source: B\n")
     _ = try await composer.compose(f.plan([a]), inputRoot: f.input, outputRoot: f.output)
@@ -368,12 +369,12 @@ struct CompositionTests {
     let after =
       try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
     #expect(unchanged.changedPaths.isEmpty)
-    #expect(unchanged.reusedPaths == ["default.yaml"])
+    #expect(unchanged.reusedPaths.map(\.string) == ["default.yaml"])
     #expect(after == sentinel)
     try f.write("default.yaml", "value: new\n", in: f.a)
     let changed = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    #expect(changed.changedPaths == ["default.yaml"])
+    #expect(changed.changedPaths.map(\.string) == ["default.yaml"])
     #expect(try f.read("default.yaml") == "value: new\n")
   }
 
@@ -390,18 +391,20 @@ struct CompositionTests {
   @Test func compositionRejectsFilesystemRootAndCaseAliases() throws {
     let f = try Fixture()
     defer { f.remove() }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: FileSystemFailure.self) {
       try SafePath.validateRoots(input: f.input, output: URL(fileURLWithPath: "/"), sources: [])
     }
-    #if os(Windows)
-      let alias = URL(fileURLWithPath: f.input.path.uppercased())
-      #expect(throws: PinewindError.self) {
+    let alias = URL(fileURLWithPath: f.input.path.uppercased())
+    if FileManager.default.fileExists(atPath: alias.path) {
+      #expect(throws: FileSystemFailure.self) {
         try SafePath.validateRoots(
           input: f.input, output: alias.appendingPathComponent("out"), sources: [])
       }
+    }
+    #if os(Windows)
       try FileManager.default.createDirectory(at: f.output, withIntermediateDirectories: true)
       try f.write("keep.txt", "keep", in: f.output)
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.validate(f.output) }
       #expect(try f.read("keep.txt") == "keep")
     #endif
   }
@@ -466,13 +469,13 @@ struct CompositionTests {
       #expect(first == bytesA || first == bytesB)
       for index in 1..<8 { #expect(try f.read("dicts/\(index).txt") == first) }
       let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
-      #expect(FileManager.default.fileExists(atPath: active.path))
+      #expect(FileManager.default.fileExists(atPath: active.string))
     }
 
     @Test(arguments: ["https://example.com/output", "file:///C:/bad%00path"])
     func malformedJunctionPathsThrowTypedErrors(_ text: String) throws {
       let url = try #require(URL(string: text))
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.currentTarget(url) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.currentTarget(url) }
       let literal = FileManager.default.temporaryDirectory.appendingPathComponent(
         "pinewind-percent%00-" + UUID().uuidString)
       #expect(try WindowsDirectoryPublisher.currentTarget(literal) == nil)
@@ -483,7 +486,7 @@ struct CompositionTests {
       defer { f.remove() }
       let bytes = Data("keep".utf8)
       try bytes.write(to: f.output)
-      #expect(throws: PinewindError.self) { try WindowsDirectoryPublisher.validate(f.output) }
+      #expect(throws: FileSystemFailure.self) { try WindowsDirectoryPublisher.validate(f.output) }
       #expect(try Data(contentsOf: f.output) == bytes)
     }
 
@@ -511,7 +514,7 @@ struct CompositionTests {
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
       let repaired = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       #expect(repaired != old)
-      #expect(FileManager.default.fileExists(atPath: repaired.path))
+      #expect(FileManager.default.fileExists(atPath: repaired.string))
       if hasFiles { #expect(try f.read("default.yaml") == "value: repaired\n") }
     }
 
@@ -527,9 +530,9 @@ struct CompositionTests {
       try WindowsDirectoryPublisher.redirect(alias, to: f.root)
       defer { try? FileManager.default.removeItem(at: alias) }
       let aliasedTarget = alias.appendingPathComponent(
-        active.deletingLastPathComponent().lastPathComponent
+        try #require(active.removingLastComponent().lastComponent).string
       )
-      .appendingPathComponent(active.lastPathComponent)
+      .appendingPathComponent(try #require(active.lastComponent).string)
       try WindowsDirectoryPublisher.redirect(f.output, to: aliasedTarget)
       try WindowsDirectoryPublisher.validate(f.output)
       let result = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
@@ -550,27 +553,16 @@ struct CompositionTests {
     try FileManager.default.removeItem(at: f.a.appendingPathComponent("dicts/old.yaml"))
     let result = try await composer.compose(
       f.plan(entries), inputRoot: f.input, outputRoot: f.output)
-    #expect(result.paths == ["dicts/new.yaml"])
-    #expect(result.removedPaths == ["dicts/old.yaml"])
+    #expect(result.paths.map(\.string) == ["dicts/new.yaml"])
+    #expect(result.removedPaths.map(\.string) == ["dicts/old.yaml"])
   }
 
-  @Test func patchRunsImmediatelyAndLaterSelfCanReplaceIt() async throws {
-    let f = try Fixture()
+  @Test(arguments: ["customize", "./nested/../customize"])
+  func patchRunsImmediatelyAndLaterSelfCanReplaceIt(_ recipe: String) async throws {
+    let f = try Fixture("PatchOrder")
     defer { f.remove() }
-    try f.write(
-      "customize.recipe.yaml",
-      """
-      recipe:
-        Rx: customize
-        args: [schema=luna_pinyin]
-      install_files: []
-      patch_files:
-        ${schema:-luna_pinyin}.custom.yaml:
-          - patch/+:
-              switch: true
-      """, in: f.a)
-    try f.write("luna_pinyin.custom.yaml", "patch:\n  user: true\n", in: f.input)
-    let request = try f.request(f.a, recipe: "customize")
+    let request = try f.request(f.a, recipe: recipe)
+    #expect(request.recipe == "customize")
     let composer = Composer()
     _ = try await composer.compose(
       f.plan([.userFiles(FileFilter()), .package(request)]), inputRoot: f.input,
@@ -588,7 +580,7 @@ struct CompositionTests {
     let request = try PackageRequest(
       url: #require(URL(string: "https://github.com/rime/rime-emoji")), recipe: "customize")
     let prepared = try PreparedPackage(
-      request: request, directory: f.a, commit: String(repeating: "a", count: 40))
+      request: request, directory: f.a, commit: CommitID(String(repeating: "a", count: 40)))
     let plan = try f.plan(
       [.userFiles(FileFilter()), .package(request), .package(request)], packages: [prepared])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
@@ -621,24 +613,24 @@ struct CompositionTests {
     defer { f.remove() }
     try f.write("default.yaml", "value: true", in: f.input)
     let plan = try f.plan([.userFiles(FileFilter())])
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: FileSystemFailure.self) {
       try await Composer().compose(
         plan, inputRoot: f.input, outputRoot: f.input.appendingPathComponent("out"))
     }
     try FileManager.default.createSymbolicLink(
       at: f.input.appendingPathComponent("escape.yaml"), withDestinationURL: f.a)
-    #expect(throws: PinewindError.self) { try f.plan([.userFiles(FileFilter())]) }
+    #expect(throws: FileSystemFailure.self) { try f.plan([.userFiles(FileFilter())]) }
   }
 
   @Test func sourceTraversalAndFileDirectoryConflictsFailBeforePublishing() throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("recipe.yaml", "install_files: [\"../../escape.yaml\"]", in: f.a)
-    #expect(throws: PinewindError.self) { try f.plan([.package(f.request(f.a))]) }
+    #expect(throws: DeclarationFailure.self) { try f.plan([.package(f.request(f.a))]) }
     try f.write("data", "file", in: f.input)
     try f.write("data/nested.yaml", "nested: true", in: f.a)
     try f.write("recipe.yaml", "install_files: [data/nested.yaml]", in: f.a)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try f.plan([.userFiles(FileFilter()), .package(f.request(f.a))])
     }
   }
@@ -658,44 +650,37 @@ struct CompositionTests {
       url: #require(URL(string: "https://\(host)/rime/rime-essay.git")))
     let sharedAgain = try PackageRequest(
       url: #require(URL(string: "https://\(host)/rime/rime-essay")), recipe: "other")
-    let commit = String(repeating: "a", count: 40)
+    let commit = try CommitID(String(repeating: "a", count: 40))
     let views = try [
       PreparedPackage(request: consumer, directory: f.a, commit: commit),
       PreparedPackage(request: shared, directory: f.b, commit: commit),
       PreparedPackage(request: sharedAgain, directory: f.b, commit: commit),
     ]
     let plan = try f.plan([.package(consumer)], packages: views)
-    #expect(plan.paths == ["consumer.custom.yaml", "shared.yaml"])
-    let patch = try #require(plan.files["consumer.custom.yaml"]?.first)
+    #expect(plan.paths.map(\.string) == ["consumer.custom.yaml", "shared.yaml"])
+    let patch = try #require(plan.files[RelativePath("consumer.custom.yaml")]?.first)
     guard case .patch(let rx, _) = patch.action else {
       Issue.record("expected a recipe patch")
       return
     }
     #expect(rx == "rime/rime-consumer::")
-    #expect(plan.files["shared.yaml"]?.first?.source == f.b.appendingPathComponent("shared.yaml"))
+    #expect(
+      try plan.files[RelativePath("shared.yaml")]?.first?.source
+        == f.b.appendingPathComponent("shared.yaml"))
     let conflicting = try PreparedPackage(
-      request: shared, directory: f.b, commit: String(repeating: "b", count: 40))
-    #expect(throws: PinewindError.self) {
+      request: shared, directory: f.b, commit: CommitID(String(repeating: "b", count: 40)))
+    #expect(throws: DeclarationFailure.self) {
       try f.plan([.package(consumer)], packages: views + [conflicting])
     }
   }
 
   @Test func optionValuesAreLiteralAndFiltersAlsoApplyToPatchTargets() async throws {
-    let f = try Fixture()
+    let f = try Fixture("LiteralOptions")
     defer { f.remove() }
-    try f.write(
-      "customize.recipe.yaml",
-      """
-      recipe: {Rx: customize, args: [schema=luna_pinyin]}
-      install_files: []
-      patch_files:
-        ${schema:-luna_pinyin}.custom.yaml:
-          - patch/+: {literal: true}
-      """, in: f.a)
     let request = try PackageRequest(
       url: f.a, recipe: "customize", options: ["schema": "$(echo literal)"])
     let plan = try f.plan([.package(request)])
-    #expect(plan.paths == ["$(echo literal).custom.yaml"])
+    #expect(plan.paths.map(\.string) == ["$(echo literal).custom.yaml"])
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(
       !FileManager.default.fileExists(
@@ -705,29 +690,101 @@ struct CompositionTests {
     #expect(try f.plan([.package(filtered)]).paths.isEmpty)
   }
 
-  @Test(arguments: ["https://example.org/extra.txt", "renamed.txt::https://example.org/extra.txt"])
-  func validatesPinnedResourceBytes(_ descriptor: String) async throws {
+  @Test func planningPreservesDistinctNativeUnicodePathIdentities() throws {
+    let f = try Fixture("LiteralOptions")
+    defer { f.remove() }
+    let names = ["caf\u{e9}", "cafe\u{301}"]
+    let entries = try names.map { name in
+      ManifestEntry.package(
+        try PackageRequest(url: f.a, recipe: "customize", options: ["schema": name]))
+    }
+    let plan = try f.plan(entries)
+    #expect(plan.paths.count == 2)
+    for (index, name) in names.enumerated() {
+      let path = try RelativePath(FilePath(name + ".custom.yaml"))
+      #expect(plan.contributions(for: path).map(\.entryIndex) == [index])
+    }
+  }
+
+  @Test func normalizedPatchTargetsAppearOnceInThePlanAndOutput() async throws {
+    let f = try Fixture("NormalizedPaths")
+    defer { f.remove() }
+    let plan = try f.plan([.package(f.request(f.a))])
+    #expect(plan.paths.map(\.string) == ["target.custom.yaml"])
+    _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
+    #expect(try f.read("target.custom.yaml").contains("schema: normalized"))
+  }
+
+  @Test(arguments: ["../escape", "/absolute", "bad\\name", "bad\0name"])
+  func recipeTargetTextCannotLoseOrReinterpretInvalidCharacters(_ target: String) throws {
+    let f = try Fixture("LiteralOptions")
+    defer { f.remove() }
+    let request = try PackageRequest(url: f.a, recipe: "customize", options: ["schema": target])
+    #expect {
+      _ = try f.plan([.package(request)])
+    } throws: { error in
+      if error is FileSystemFailure || error is DeclarationFailure { return true }
+      switch error as? PinewindError {
+      case .runtime(.file): return true
+      case .configuration(let document):
+        if case .file = document.failure { return true }
+        return false
+      default: return false
+      }
+    }
+  }
+
+  @Test(arguments: [
+    "download_files: [nested/../same.txt::https://example.org/first, same.txt::https://example.org/second]",
+    "patch_files: {nested/../same.yaml: [{value: first}], same.yaml: [{value: second}]}",
+  ])
+  func normalizedRecipeAliasesCannotDeclareTheSameTargetTwice(_ recipe: String) throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try f.write("recipe.yaml", recipe, in: f.a)
+    #expect {
+      _ = try Recipe.load(
+        request: f.request(f.a), directory: native(f.a), read: { try Data(contentsOf: $0) })
+    } throws: { error in
+      guard case .configuration(let document) = error as? PinewindError else { return false }
+      switch document.failure {
+      case .declaration(.duplicateTarget): return true
+      case .declaration(.syntaxError(let detail)): return detail.contains("targets must be unique")
+      default: return false
+      }
+    }
+  }
+
+  @Test(arguments: [
+    ("https://example.org/extra.txt", "extra.txt"),
+    ("renamed.txt::https://example.org/extra.txt", "renamed.txt"),
+    ("nested/../extra.txt::https://example.org/extra.txt", "extra.txt"),
+  ])
+  func validatesPinnedResourceBytes(_ descriptor: String, _ path: String) async throws {
     let f = try Fixture()
     defer { f.remove() }
     let request = try PackageRequest(url: #require(URL(string: "https://github.com/rime/resource")))
     let url = try #require(URL(string: "https://example.org/extra.txt"))
-    let path = descriptor.contains("::") ? "renamed.txt" : "extra.txt"
     try f.write(
       "recipe.yaml", "download_files: [\"\(descriptor)\"]\ninstall_files: [\(path)]",
       in: f.a)
     try f.write(path, "abc", in: f.a)
     let resource = try PinnedResource(
-      url: url, path: path,
+      url: url, path: RelativePath(FilePath(path)),
       sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     let prepared = try PreparedPackage(
-      request: request, directory: f.a, commit: String(repeating: "a", count: 40),
+      request: request, directory: f.a, commit: CommitID(String(repeating: "a", count: 40)),
       resources: [resource])
     let plan = try f.plan([.package(request)], packages: [prepared])
-    #expect(plan.paths == [path])
+    #expect(plan.paths.map(\.string) == [path])
     try f.write(path, "changed", in: f.a)
     _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
     #expect(try f.read(path) == "abc")
-    #expect(throws: PinewindError.self) { try f.plan([.package(request)], packages: [prepared]) }
+    #expect {
+      try f.plan([.package(request)], packages: [prepared])
+    } throws: {
+      ($0 as? PinewindError) != nil || $0 is DeclarationFailure || $0 is CacheFailure
+    }
   }
 }
 
@@ -735,7 +792,7 @@ struct CompositionTests {
 struct ConfTests {
   @Test(arguments: ["u/", "/repo", "u//repo", "/", "repo@", "@branch"])
   func descriptorsRejectEmptySourceSegments(_ descriptor: String) {
-    #expect(throws: PinewindError.self) { try PlumImporter.package(descriptor) }
+    #expect(throws: Failure.self) { try PlumImporter.package(descriptor) }
   }
 
   @Test(.timeLimit(.minutes(1))) func longLoopsTimeOutAndCancelInterpreter() async throws {
@@ -747,15 +804,23 @@ struct ConfTests {
         ConfImport(source: "loop.conf"), inputRoot: f.input)
       Issue.record("expected timeout")
     } catch let error as PinewindError {
-      #expect(error.message == "conf evaluation timed out")
+      guard case .incident(let document) = error else {
+        Issue.record("\(error)")
+        return
+      }
+      guard case .interpreter(.timedOut) = document.failure else {
+        Issue.record("\(error)")
+        return
+      }
     }
   }
 
   @Test func expandedImportsKeepSelfInterleavedWithPackages() async throws {
     let f = try Fixture("ImportOrder")
     defer { f.remove() }
-    let manifest = try await Manifest.load(
-      inputRoot: f.input, localStateRoot: f.root.appendingPathComponent("state"))
+    let manifest = try await loadConfiguration(
+      inputRoot: f.input, localStateRoot: f.root.appendingPathComponent("state")
+    ).snapshot().evaluate()
     let expanded = try await PlumImporter().expand(manifest, inputRoot: f.input)
     #expect(
       expanded.entries == [
@@ -764,7 +829,8 @@ struct ConfTests {
       ])
     let prepared = try ["emoji", "essay"].map {
       try PreparedPackage(
-        request: PlumImporter.package($0), directory: f.a, commit: String(repeating: "a", count: 40)
+        request: PlumImporter.package($0), directory: f.a,
+        commit: CommitID(String(repeating: "a", count: 40))
       )
     }
     let composer = Composer()
@@ -803,7 +869,7 @@ struct ConfTests {
     }
     let request = try PlumImporter.package("emoji@master:customize:schema=terra_pinyin")
     #expect(request.url.absoluteString == "https://github.com/rime/rime-emoji")
-    #expect(request.ref == "master")
+    #expect(request.revision == .reference("master"))
     #expect(request.recipe == "customize")
     #expect(request.options == ["schema": "terra_pinyin"])
   }
@@ -812,12 +878,18 @@ struct ConfTests {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("write.conf", "echo stolen > /conf/stolen", in: f.input)
-    await #expect(throws: (any Error).self) {
+    await #expect {
       try await PlumImporter().evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .interpreter(.evaluationFailed(let detail)) = document.failure else {
+        return false
+      }
+      return detail.contains("/conf/stolen: Permission denied")
     }
     #expect(!FileManager.default.fileExists(atPath: f.input.appendingPathComponent("stolen").path))
     try f.write("escape.conf", "source /etc/passwd", in: f.input)
-    await #expect(throws: (any Error).self) {
+    await #expect(throws: FileSystemError.notFound("/etc/passwd")) {
       try await PlumImporter().evaluate(ConfImport(source: "escape.conf"), inputRoot: f.input)
     }
   }
@@ -826,45 +898,66 @@ struct ConfTests {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
-    await #expect(throws: (any Error).self) {
+    await #expect {
       try await PlumImporter().evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
-    }
+    } throws: { $0 is InterpreterFailure }
   }
 }
 
 @Suite("Pinewind opaque lock")
 struct LockTests {
   @Test func roundTripKeepsDuplicateUrlApplicationsAndDetectsChangedDeclarations() throws {
-    let f = try Fixture()
-    defer { f.remove() }
     let url = try #require(URL(string: "https://github.com/rime/rime-emoji"))
-    let a = try PackageRequest(url: url, ref: "master", recipe: "one")
-    let b = try PackageRequest(url: url, ref: "other", recipe: "two")
-    let manifest = Manifest(entries: [.package(a), .package(b), .userFiles(FileFilter())])
-    let packages = try [
-      LockedPackage(request: a, commit: String(repeating: "a", count: 40)),
-      LockedPackage(request: b, commit: String(repeating: "b", count: 40)),
-    ]
-    let resolution = try Resolution(declarations: manifest, expanded: manifest, packages: packages)
-    let file = f.input.appendingPathComponent("pinewind.lock")
-    try resolution.write(to: file)
-    let loaded = try Resolution.read(from: file)
+    let document = ManifestDocument(order: [
+      .package(
+        PackageFields(
+          url: .value(url), revision: .value(.reference("master")), recipe: .value("one"))),
+      .package(
+        PackageFields(
+          url: .value(url), revision: .value(.reference("other")), recipe: .value("two"))),
+      .userFiles(FileFilter()),
+    ])
+    let snapshot = try configurationSnapshot(document)
+    let manifest = try snapshot.evaluate(.shared)
+    let packages = try manifest.entries.compactMap { entry -> LockedPackage? in
+      guard case .package(let request) = entry else { return nil }
+      let digit = request.recipe == "one" ? "a" : "b"
+      return try LockedPackage(
+        request: request, commit: CommitID(String(repeating: digit, count: 40)))
+    }
+    let resolution = try Resolution(
+      declarations: manifest, expanded: manifest, packages: packages, snapshot: snapshot,
+      preview: false)
+    let bytes = try ResolutionCodec.encode(resolution)
+    let loaded = try ResolutionCodec.decode(bytes, snapshot: snapshot)
     #expect(loaded.expanded == manifest)
     #expect(loaded.packages == packages)
-    try loaded.validate(against: manifest)
-    #expect(throws: PinewindError.self) {
-      try loaded.validate(against: Manifest(entries: [.package(a)]))
+    var changed = document
+    changed.order.removeLast()
+    let changedSnapshot = try configurationSnapshot(changed)
+    #expect {
+      try ResolutionCodec.decode(bytes, snapshot: changedSnapshot)
+    } throws: {
+      guard case .configuration(let document) = $0 as? PinewindError else { return false }
+      if case .lock(.declarationChanged) = document.failure { return true }
+      return false
     }
   }
 
   @Test func workingTreesAndCorruptLocksFail() throws {
-    let f = try Fixture()
-    defer { f.remove() }
-    #expect(throws: PinewindError.self) {
-      try LockedPackage(request: f.request(f.a), commit: String(repeating: "a", count: 40))
+    let directory = native(FileManager.default.temporaryDirectory)
+    #expect(throws: LockFailure.self) {
+      try LockedPackage(
+        request: PackageRequest(source: .directory(.path(directory))),
+        commit: CommitID(String(repeating: "a", count: 40)))
     }
-    let file = f.input.appendingPathComponent("pinewind.lock")
-    try Data("not a lock".utf8).write(to: file)
-    #expect(throws: PinewindError.self) { try Resolution.read(from: file) }
+    let snapshot = try configurationSnapshot(ManifestDocument())
+    #expect {
+      try ResolutionCodec.decode(Data("not a lock".utf8), snapshot: snapshot)
+    } throws: { error in
+      guard case .configuration(let document) = error as? PinewindError else { return false }
+      if case .lock(.incompatible) = document.failure { return true }
+      return false
+    }
   }
 }

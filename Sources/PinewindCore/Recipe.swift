@@ -5,36 +5,41 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Yams
 
 struct Recipe {
   struct Patch {
-    let target: String
+    let target: RelativePath
     let rx: String
     let body: String
   }
   struct Download {
     let url: URL
-    let path: String
+    let path: RelativePath
   }
   let patterns: [String]?
   let patches: [Patch]
   let downloads: [Download]
 
-  static func load(request: PackageRequest, directory: URL, read: (URL) throws -> Data) throws
+  static func load(request: PackageRequest, directory: FilePath, read: (FilePath) throws -> Data)
+    throws
     -> Recipe?
   {
-    let name = request.recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"
-    let file = try SafePath.file(name, in: directory)
-    guard FileManager.default.fileExists(atPath: file.path) else {
+    let file = try SafePath.file(request.recipePath, in: directory)
+    guard FileManager.default.fileExists(atPath: file.string) else {
       if request.recipe != nil {
-        throw PinewindError("explicit recipe not found", source: file.path)
+        throw PinewindError.configuration(
+          DocumentError(
+            context: DocumentContext(path: file, url: request.url),
+            failure: .file(.notFound(file))))
       }
       return nil
     }
-    let reader = YAMLReader(source: file.path)
-    guard let text = String(data: try read(file), encoding: .utf8) else {
-      throw reader.error("recipe must be UTF-8")
+    let bytes = try read(file)
+    let reader = YAMLReader(source: file.string, text: String(data: bytes, encoding: .utf8))
+    guard let text = reader.text else {
+      throw reader.fail(.file(.undecodableText(file)))
     }
     let root = try reader.mapping(
       reader.document(text),
@@ -77,8 +82,7 @@ struct Recipe {
         throw reader.error("download_files requires HTTPS resources")
       }
       let path = parts.count == 2 ? parts[0] : url.lastPathComponent
-      try SafePath.validate(path)
-      return Download(url: url, path: path)
+      return try Download(url: url, path: reader.relativePath(path))
     }
     guard Set(resources.map(\.path)).count == resources.count else {
       throw reader.error("download_files targets must be unique")
@@ -91,34 +95,75 @@ struct Recipe {
     guard !rx.contains("\n"), !rx.contains("\r") else {
       throw reader.error("Rx identity cannot contain newlines")
     }
+    var patchTargets = Set<RelativePath>()
     let patches: [Patch] =
       try root["patch_files"].map { node in
-        try reader.mapping(node).sorted { $0.key < $1.key }.map { target, body in
-          let expanded = try Template.expand(target, options: request.options, declared: declared)
-          try SafePath.validate(expanded)
-          guard body.sequence != nil else {
-            throw reader.error("patch body must be a YAML sequence", at: body)
-          }
-          let text = try serialize(node: body)
-            .replacingOccurrences(of: "---\n", with: "")
-            .trimmingCharacters(in: .newlines)
-          let substituted = try Template.expand(text, options: request.options, declared: declared)
-          guard let parsed = try compose(yaml: substituted), parsed.sequence != nil else {
-            throw reader.error("expanded patch body must be a YAML sequence")
-          }
-          return Patch(target: expanded, rx: rx, body: substituted)
+        _ = try reader.mapping(node)
+        guard let mapping = node.mapping else {
+          throw reader.error("patch_files must be a mapping", at: node)
         }
+        return try mapping.sorted { ($0.key.scalar?.string ?? "") < ($1.key.scalar?.string ?? "") }
+          .map { key, body in
+            let targetTemplate = try reader.string(key)
+            let expanded: String
+            do {
+              expanded = try Template.expand(
+                targetTemplate, options: request.options, declared: declared)
+            } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: key), as: .configuration)
+            }
+            let target: RelativePath
+            do { target = try reader.relativePath(expanded) } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: key), as: .configuration)
+            }
+            guard patchTargets.insert(target).inserted else {
+              throw reader.fail(.declaration(.duplicateTarget(target.string)), at: body)
+            }
+            guard body.sequence != nil else {
+              throw reader.error("patch body must be a YAML sequence", at: body)
+            }
+            let text = try serialize(node: body)
+              .replacingOccurrences(of: "---\n", with: "")
+              .trimmingCharacters(in: .newlines)
+            let substituted: String
+            do {
+              substituted = try Template.expand(text, options: request.options, declared: declared)
+            } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: body), as: .configuration)
+            }
+            let parsed: Node
+            do {
+              parsed = try YAMLReader(source: file.string, text: substituted).document(substituted)
+            } catch {
+              // Expanded YAML has generated positions; point at the authored template instead.
+              if let error = error as? PinewindError, case .configuration(let document) = error {
+                throw reader.fail(document.failure, at: body)
+              }
+              throw error
+            }
+            guard parsed.sequence != nil else {
+              throw reader.error("expanded patch body must be a YAML sequence", at: body)
+            }
+            return Patch(target: target, rx: rx, body: substituted)
+          }
       } ?? []
     return Recipe(patterns: patterns, patches: patches, downloads: resources)
   }
 }
 
 enum Template {
-  static func expand(_ text: String, options: [String: String], declared: Set<String>) throws
+  static func expand(_ text: String, options: [String: String], declared: Set<String>)
+    throws(Failure)
     -> String
   {
-    let expression = try NSRegularExpression(
-      pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
+    let expression: NSRegularExpression
+    do {
+      expression = try NSRegularExpression(
+        pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
+    } catch {
+      throw Failure.defect(
+        .invariant(detail: "invalid template replacement range", origin: Origin()))
+    }
     var result = text
     for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
       .reversed()
@@ -127,7 +172,9 @@ enum Template {
         Range(match.range(at: index), in: text).map { String(text[$0]) }
       }
       let key = capture(1) ?? capture(3) ?? ""
-      guard declared.contains(key) else { throw PinewindError("undeclared recipe option '\(key)'") }
+      guard declared.contains(key) else {
+        throw Failure.declaration(.undeclaredOption(key))
+      }
       let fallback = capture(2)
       let value: String
       if let supplied = options[key], fallback == nil || !supplied.isEmpty {
@@ -135,10 +182,11 @@ enum Template {
       } else if let fallback {
         value = fallback
       } else {
-        throw PinewindError("recipe option '\(key)' has no value")
+        throw Failure.declaration(.optionValueMissing(key))
       }
       guard let range = Range(match.range, in: result) else {
-        throw PinewindError("invalid template range")
+        throw Failure.defect(
+          .invariant(detail: "invalid template replacement range", origin: Origin()))
       }
       // Literal replacement: substituted values are never reparsed as shell code.
       result.replaceSubrange(range, with: value)

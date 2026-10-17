@@ -8,35 +8,49 @@ import Foundation
 import Yams
 
 /// An authored field: omission inherits, null clears, and a value replaces the whole field.
-public enum Field<Value: Hashable & Sendable>: Hashable, Sendable {
+public enum FieldOverride<Value: Hashable & Sendable>: Hashable, Sendable {
   case inherit
-  case clear
+  case reset
   case value(Value)
+
+  var value: Value? {
+    if case .value(let value) = self { return value }
+    return nil
+  }
 }
 
 /// Partial package declarations retain their layer, including explicit nulls.
 public struct PackageFields: Hashable, Sendable {
-  public var url: Field<URL>
-  public var ref: Field<String>
-  public var commit: Field<String>
-  public var recipe: Field<String>
-  public var options: Field<[String: String]>
-  public var include: Field<[String]>
-  public var exclude: Field<[String]>
+  public var url: FieldOverride<URL>
+  public var revision: FieldOverride<GitRevision>
+  public var recipe: FieldOverride<String>
+  public var options: FieldOverride<[String: String]>
+  public var include: FieldOverride<[String]>
+  public var exclude: FieldOverride<[String]>
 
   public init(
-    url: Field<URL> = .inherit, ref: Field<String> = .inherit,
-    commit: Field<String> = .inherit, recipe: Field<String> = .inherit,
-    options: Field<[String: String]> = .inherit,
-    include: Field<[String]> = .inherit, exclude: Field<[String]> = .inherit
+    url: FieldOverride<URL> = .inherit, revision: FieldOverride<GitRevision> = .inherit,
+    recipe: FieldOverride<String> = .inherit,
+    options: FieldOverride<[String: String]> = .inherit,
+    include: FieldOverride<[String]> = .inherit, exclude: FieldOverride<[String]> = .inherit
   ) {
     self.url = url
-    self.ref = ref
-    self.commit = commit
+    self.revision = revision
     self.recipe = recipe
     self.options = options
     self.include = include
     self.exclude = exclude
+  }
+
+  func validate() throws(DeclarationFailure) {
+    if let url = url.value, url.scheme == nil {
+      throw DeclarationFailure.relativeSourceURL(url)
+    }
+    try FileFilter(include: include.value, exclude: exclude.value ?? []).validate()
+    try revision.value?.validate()
+    if url.value?.isFileURL == true, revision.value != nil {
+      throw DeclarationFailure.revisionWithFileSource
+    }
   }
 }
 
@@ -60,33 +74,38 @@ public struct ManifestDocument: Hashable, Sendable {
     self.order = order
   }
 
-  public static func parse(_ yaml: String, source: String = "pinewind.yaml") throws -> Self {
-    try DocumentCodec.manifest(yaml, source: source)
+  public static func parse(_ yaml: String, source: String = "pinewind.yaml") throws
+    -> Self
+  {
+    let reader = YAMLReader(source: source, text: yaml)
+    do { return try DocumentCodec.manifest(yaml, source: source) } catch {
+      throw ErrorBoundary.attribute(error, to: reader.context(), as: .configuration)
+    }
   }
 
   /// Emits version 1. Invalid field combinations are diagnosed rather than discarded.
   public func yaml() throws -> String {
-    try DocumentCodec.withoutSourceLines {
-      let text = try DocumentCodec.emit(self)
-      _ = try Self.parse(text)
-      return text
-    }
+    do {
+      return try serialize(node: DocumentCodec.root(names: names, order: order), allowUnicode: true)
+    } catch { throw ErrorBoundary.normalize(error) }
   }
 
   /// Diagnostics refer to the edited document, without line numbers from generated YAML.
-  public func evaluate(localOverrides: LocalOverridesDocument? = nil) throws -> Manifest {
-    try DocumentCodec.withoutSourceLines {
-      try ConfigurationParser.parse(
-        yaml(), overrides: localOverrides?.yaml(), source: "pinewind.yaml")
+  public func evaluate(localOverrides: LocalOverridesDocument? = nil) throws
+    -> EvaluatedManifest
+  {
+    do { return try ConfigurationEvaluator.evaluate(self, local: localOverrides) } catch {
+      throw ErrorBoundary.normalize(error)
     }
   }
 
   public mutating func renamePackage(_ old: String, to new: String) throws {
-    guard let fields = names[old] else { throw PinewindError("unknown package name '\(old)'") }
-    if old == new { return }
-    guard new != "self", names[new] == nil else {
-      throw PinewindError("package name '\(new)' is reserved or already defined")
+    guard let fields = names[old] else {
+      throw PinewindError.runtime(.declaration(.unknownName(old)))
     }
+    if old == new { return }
+    guard new != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
+    guard names[new] == nil else { throw PinewindError.runtime(.declaration(.duplicateName(new))) }
     names.removeValue(forKey: old)
     names[new] = fields
     order = order.map {
@@ -98,20 +117,20 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   public mutating func removePackage(_ name: String) throws {
-    guard names[name] != nil else { throw PinewindError("unknown package name '\(name)'") }
+    guard names[name] != nil else { throw PinewindError.runtime(.declaration(.unknownName(name))) }
     guard
       !order.contains(where: {
         if case .named(let reference, _) = $0 { return reference == name }
         return false
       })
-    else { throw PinewindError("package name '\(name)' is still referenced") }
+    else { throw PinewindError.runtime(.declaration(.nameStillReferenced(name))) }
     names.removeValue(forKey: name)
   }
 
   /// Destination is the final index after moving; duplicate entries remain distinct positions.
   public mutating func moveEntry(from: Int, to: Int) throws {
     guard order.indices.contains(from), order.indices.contains(to) else {
-      throw PinewindError("order entry index is out of bounds")
+      throw PinewindError.runtime(.declaration(.orderIndexOutOfBounds))
     }
     order.insert(order.remove(at: from), at: to)
   }
@@ -123,33 +142,27 @@ public struct LocalOverridesDocument: Hashable, Sendable {
 
   public init(names: [String: PackageFields] = [:]) { self.names = names }
 
-  public static func parse(_ yaml: String, source: String = "pinewind.local.yaml") throws -> Self {
-    let reader = YAMLReader(source: source)
-    let fields = try reader.mapping(reader.document(yaml), allowed: ["version", "names"])
-    try reader.version(fields)
-    return Self(names: try DocumentCodec.names(fields["names"], reader: reader))
+  public static func parse(_ yaml: String, source: String = "pinewind.local.yaml")
+    throws -> Self
+  {
+    let reader = YAMLReader(source: source, text: yaml)
+    do {
+      let fields = try reader.mapping(reader.document(yaml), allowed: ["version", "names"])
+      try reader.version(fields)
+      return Self(names: try DocumentCodec.names(fields["names"], reader: reader))
+    } catch { throw ErrorBoundary.attribute(error, to: reader.context(), as: .configuration) }
   }
 
   public func yaml() throws -> String {
-    try DocumentCodec.withoutSourceLines {
-      let text = try serialize(node: DocumentCodec.root(names: names), allowUnicode: true)
-      _ = try Self.parse(text)
-      return text
+    do { return try serialize(node: DocumentCodec.root(names: names), allowUnicode: true) } catch {
+      throw ErrorBoundary.normalize(error)
     }
   }
 }
 
 enum DocumentCodec {
-  // Nodes emitted from an edited value have no correspondence to the original file's lines.
-  // Parsing original input still retains its source marks through YAMLReader.
-  static func withoutSourceLines<T>(_ body: () throws -> T) throws -> T {
-    do { return try body() } catch let error as PinewindError {
-      throw PinewindError(error.message, source: error.source)
-    }
-  }
-
   static func manifest(_ yaml: String, source: String) throws -> ManifestDocument {
-    let reader = YAMLReader(source: source)
+    let reader = YAMLReader(source: source, text: yaml)
     let fields = try reader.mapping(reader.document(yaml), allowed: ["version", "names", "order"])
     try reader.version(fields)
     let definitions = try names(fields["names"], reader: reader)
@@ -161,7 +174,7 @@ enum DocumentCodec {
       case .userFiles(let filter): return .userFiles(filter)
       case .importConf(let conf): return .importConf(conf)
       case .package(let name, let fields):
-        let declaration = try package(fields, reader: reader)
+        let declaration = try package(fields, reader: reader, anchor: node)
         if let name { return .named(name, overrides: declaration) }
         return .package(declaration)
       }
@@ -169,34 +182,79 @@ enum DocumentCodec {
     return ManifestDocument(names: definitions, order: order)
   }
 
-  static func names(_ node: Node?, reader: YAMLReader) throws -> [String: PackageFields] {
+  static func names(_ node: Node?, reader: YAMLReader) throws -> [String:
+    PackageFields]
+  {
     guard let node else { return [:] }
     var result: [String: PackageFields] = [:]
     for (name, value) in try reader.mapping(node) {
-      guard name != "self" else { throw reader.error("self is a reserved name", at: value) }
+      guard name != "self" else {
+        throw reader.fail(.declaration(.reservedName("self")), at: value)
+      }
       result[name] = try package(
-        reader.mapping(value, allowed: ConfigurationParser.packageKeys), reader: reader)
+        reader.mapping(value, allowed: ConfigurationParser.packageKeys), reader: reader,
+        anchor: value)
     }
     return result
   }
 
-  static func package(_ fields: [String: Node], reader: YAMLReader) throws -> PackageFields {
-    try ConfigurationParser.validateFields(fields, reader: reader)
-    func field<T>(_ key: String, _ decode: (Node) throws -> T) throws -> Field<T> {
+  static func package(
+    _ fields: [String: Node], reader: YAMLReader, anchor: Node? = nil
+  ) throws -> PackageFields {
+    func field<T>(_ key: String, _ decode: (Node) throws -> T) throws
+      -> FieldOverride<T>
+    {
       guard let node = fields[key] else { return .inherit }
-      return node.tag == Tag(.null) ? .clear : .value(try decode(node))
+      do { return node.tag == Tag(.null) ? .reset : .value(try decode(node)) } catch {
+        throw ErrorBoundary.attribute(error, to: reader.context(at: node), as: .configuration)
+      }
     }
-    return try PackageFields(
-      url: field("url") { node in
-        let text = try reader.string(node)
-        guard let url = URL(string: text), url.scheme != nil else {
-          throw reader.error("package requires an absolute source URL", at: node)
-        }
-        return url
-      },
-      ref: field("ref", reader.string), commit: field("commit", reader.string),
-      recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
-      include: field("include", reader.strings), exclude: field("exclude", reader.strings))
+    do {
+      let result = try PackageFields(
+        url: field("url") { node in
+          let text = try reader.string(node)
+          guard let url = URL(string: text) else {
+            throw reader.error("invalid URL '\(text)'", at: node)
+          }
+          return url
+        },
+        revision: field("revision") { try revision($0, reader: reader) },
+        recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
+        include: field("include", reader.strings), exclude: field("exclude", reader.strings))
+      try result.validate()
+      return result
+    } catch {
+      throw ErrorBoundary.attribute(error, to: reader.context(at: anchor), as: .configuration)
+    }
+  }
+
+  static func revision(_ node: Node, reader: YAMLReader) throws -> GitRevision {
+    if node.tag == Tag(.str), try reader.string(node) == "default" { return .defaultBranch }
+    let fields = try reader.mapping(node, allowed: ["branch", "tag", "ref", "commit"])
+    guard fields.count == 1, let (key, value) = fields.first else {
+      throw reader.error("revision requires exactly one selector", at: node)
+    }
+    let text = try reader.string(value)
+    let result: GitRevision
+    switch key {
+    case "branch": result = .branch(text)
+    case "tag": result = .tag(text)
+    case "ref": result = .reference(text)
+    default:
+      do { result = .commit(try CommitID(text)) } catch {
+        throw reader.fail(.declaration(error), at: value)
+      }
+    }
+    return result
+  }
+  static func revisionNode(_ value: GitRevision) -> Node {
+    switch value {
+    case .defaultBranch: return string("default")
+    case .branch(let text): return mapping([("branch", string(text))])
+    case .tag(let text): return mapping([("tag", string(text))])
+    case .reference(let text): return mapping([("ref", string(text))])
+    case .commit(let id): return mapping([("commit", string(id.string))])
+    }
   }
 
   static func string(_ value: String) -> Node { Node(value, Tag(.str), .doubleQuoted) }
@@ -208,18 +266,18 @@ enum DocumentCodec {
     mapping(values.sorted { $0.key < $1.key }.map { ($0.key, string($0.value)) })
   }
 
-  static func packageNode(_ fields: PackageFields) -> [(String, Node)] {
+  static func packageNode(_ fields: PackageFields) throws -> [(String, Node)] {
+    try fields.validate()
     var pairs: [(String, Node)] = []
-    func append<T>(_ key: String, _ field: Field<T>, _ encode: (T) -> Node) {
+    func append<T>(_ key: String, _ field: FieldOverride<T>, _ encode: (T) -> Node) {
       switch field {
       case .inherit: break
-      case .clear: pairs.append((key, Node("null", Tag(.null))))
+      case .reset: pairs.append((key, Node("null", Tag(.null))))
       case .value(let value): pairs.append((key, encode(value)))
       }
     }
     append("url", fields.url) { string($0.absoluteString) }
-    append("ref", fields.ref, string)
-    append("commit", fields.commit, string)
+    append("revision", fields.revision, revisionNode)
     append("recipe", fields.recipe, string)
     append("options", fields.options, stringMap)
     append("include", fields.include, strings)
@@ -227,29 +285,45 @@ enum DocumentCodec {
     return pairs
   }
 
-  static func filterNode(_ filter: FileFilter) -> Node {
+  static func filterNode(_ filter: FileFilter) throws -> Node {
+    try filter.validate()
     var pairs: [(String, Node)] = []
     if let include = filter.include { pairs.append(("include", strings(include))) }
     if !filter.exclude.isEmpty { pairs.append(("exclude", strings(filter.exclude))) }
     return mapping(pairs)
   }
 
-  static func root(names: [String: PackageFields], order: [OrderEntry]? = nil) -> Node {
+  static func root(names: [String: PackageFields], order: [OrderEntry]? = nil) throws
+    -> Node
+  {
     var pairs: [(String, Node)] = [("version", Node("1", Tag(.int)))]
     if !names.isEmpty {
       pairs.append(
         (
           "names",
-          mapping(names.sorted { $0.key < $1.key }.map { ($0.key, mapping(packageNode($0.value))) })
+          mapping(
+            try names.sorted { $0.key < $1.key }.map { name, fields in
+              guard name != "self" else {
+                throw PinewindError.runtime(.declaration(.reservedName("self")))
+              }
+              return (name, mapping(try packageNode(fields)))
+            })
         ))
     }
     if let order {
-      let entries = order.map { entry -> Node in
+      let entries = try order.map { entry -> Node in
         switch entry {
-        case .userFiles(let filter): return mapping([("self", filterNode(filter))])
+        case .userFiles(let filter): return mapping([("self", try filterNode(filter))])
         case .named(let name, let overrides):
-          return mapping([("name", string(name))] + packageNode(overrides))
-        case .package(let package): return mapping(packageNode(package))
+          guard case .inherit = overrides.url else {
+            throw PinewindError.runtime(.declaration(.namedURLForbidden))
+          }
+          return mapping([("name", string(name))] + (try packageNode(overrides)))
+        case .package(let package):
+          if case .inherit = package.url {
+            throw PinewindError.runtime(.declaration(.inlineURLRequired))
+          }
+          return mapping(try packageNode(package))
         case .importConf(let conf):
           var fields = [("import", string(conf.source))]
           if !conf.variables.isEmpty { fields.append(("variables", stringMap(conf.variables))) }
@@ -259,9 +333,5 @@ enum DocumentCodec {
       pairs.append(("order", Node(entries)))
     }
     return mapping(pairs)
-  }
-
-  static func emit(_ document: ManifestDocument) throws -> String {
-    try serialize(node: root(names: document.names, order: document.order), allowUnicode: true)
   }
 }

@@ -5,22 +5,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
 #if os(Windows)
-  func windowsNativePath(_ url: URL) throws -> String {
-    guard url.isFileURL, !url.absoluteString.contains("%00"), !url.path.contains("\0"),
-      let representation = url.withUnsafeFileSystemRepresentation({ pointer in
-        pointer.map { String(cString: $0) }
-      })
-    else { throw PinewindError("file URL has no filesystem representation") }
-    var path = representation.replacingOccurrences(of: "/", with: "\\")
-    if path.hasPrefix("\\"), path.dropFirst().dropFirst().hasPrefix(":") { path.removeFirst() }
+  func windowsNativePath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+    guard var path = String(validating: url) else {
+      throw FileSystemFailure.unresolvable(url)
+    }
     if path.hasPrefix("\\\\?\\UNC\\") {
       path = "\\\\" + path.dropFirst(8)
     } else if path.hasPrefix("\\\\?\\") {
       path.removeFirst(4)
     }
-    return path
+    return FilePath(path)
   }
 
 #endif

@@ -5,107 +5,125 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
 enum SafePath {
-  static func validate(_ path: String) throws {
-    let components = path.split(separator: "/", omittingEmptySubsequences: false)
-    guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0"), !path.contains("\\"),
-      components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
-    else { throw PinewindError("unsafe relative path '\(path)'") }
-  }
-
-  static func file(_ path: String, in root: URL) throws -> URL {
-    try validate(path)
-    let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
-    let candidate = canonicalRoot.appendingPathComponent(path)
-    guard try canonical(candidate).hasPrefix(prefix(canonical(root))) else {
-      throw PinewindError("path escapes its source root: \(path)")
+  static func file(_ path: RelativePath, in root: FilePath) throws(FileSystemFailure) -> FilePath {
+    let rootIdentity = try canonical(root)
+    #if os(Windows)
+      let canonicalRoot: FilePath
+      do { canonicalRoot = try WindowsDirectoryPublisher.resolvedPath(root) } catch {
+        throw FileSystemFailure.unresolvable(root)
+      }
+    #else
+      let canonicalRoot = rootIdentity
+    #endif
+    let candidate = canonicalRoot.appending(path.filePath.components)
+    guard try canonical(candidate).starts(with: rootIdentity) else {
+      throw FileSystemFailure.escapesRoot(path: candidate, root: rootIdentity)
     }
     return candidate
   }
 
-  static func validateOutputRoot(_ output: URL) throws {
-    guard !output.lastPathComponent.isEmpty, output.lastPathComponent != "/" else {
-      throw PinewindError("composition output must not be a filesystem root")
+  static func validateOutputRoot(_ output: FilePath) throws(FileSystemFailure) {
+    guard output.lastComponent != nil else {
+      throw FileSystemFailure.isFilesystemRoot(output)
     }
-    #if os(Windows)
-      guard !output.lastPathComponent.hasSuffix(":") else {
-        throw PinewindError("composition output must not be a filesystem root")
-      }
-    #endif
   }
 
-  static func validateRoots(input: URL, output: URL, sources: [URL]) throws {
+  static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath])
+    throws(FileSystemFailure)
+  {
     try validateOutputRoot(output)
     let roots = [input] + sources
     let out = try canonical(output)
     for root in roots {
       let path = try canonical(root)
-      guard path != out, !out.hasPrefix(prefix(path)), !path.hasPrefix(prefix(out)) else {
-        throw PinewindError("composition root must not overlap any input source")
+      guard !out.starts(with: path), !path.starts(with: out) else {
+        throw FileSystemFailure.overlappingPaths(out, path)
       }
     }
   }
 
-  static func overlaps(_ first: URL, _ second: URL) throws -> Bool {
+  static func overlaps(_ first: FilePath, _ second: FilePath) throws(FileSystemFailure) -> Bool {
     let a = try canonical(first)
     let b = try canonical(second)
-    return a == b || a.hasPrefix(prefix(b)) || b.hasPrefix(prefix(a))
+    return a.starts(with: b) || b.starts(with: a)
   }
 
-  private static func prefix(_ path: String) -> String {
-    path.hasSuffix("/") ? path : path + "/"
-  }
-
-  private static func canonical(_ url: URL) throws -> String {
+  static func canonical(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
     #if os(Windows)
-      return try WindowsDirectoryPublisher.canonicalPath(url)
+      do { return try WindowsDirectoryPublisher.canonicalPath(url) } catch {
+        throw FileSystemFailure.unresolvable(url)
+      }
     #else
-      return url.standardizedFileURL.resolvingSymlinksInPath().path
+      var ancestor = url
+      var missing: [FilePath.Component] = []
+      while !FileManager.default.fileExists(atPath: ancestor.string) {
+        let parent = ancestor.removingLastComponent()
+        guard parent != ancestor, let component = ancestor.lastComponent else {
+          throw FileSystemFailure.unresolvable(url)
+        }
+        missing.append(component)
+        ancestor = parent
+      }
+      var resolved = try NativePath.from(
+        ancestor.foundationURL.resolvingSymlinksInPath().standardizedFileURL)
+      for component in missing.reversed() { resolved.append(component) }
+      let normalized = resolved.lexicallyNormalized()
+      if normalized != resolved { return try canonical(normalized) }
+      return resolved
     #endif
   }
 
-  static func files(in root: URL) throws -> [String] {
+  static func files(in root: FilePath) throws -> [RelativePath] {
     #if os(Windows)
-      let root = try WindowsDirectoryPublisher.resolvedURL(root)
+      let root = try WindowsDirectoryPublisher.resolvedPath(root)
     #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
-    let values = try root.resourceValues(forKeys: [.isDirectoryKey])
+    let values = try FileIO.perform(.inspect, paths: [root]) {
+      try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
+    }
     guard values.isDirectory == true else {
-      throw PinewindError("source must be a directory", source: root.path)
+      throw FileSystemFailure.notADirectory(root)
     }
     var enumerationError: (any Error)?
     guard
       let iterator = fm.enumerator(
-        at: root, includingPropertiesForKeys: keys,
+        at: try root.foundationURL, includingPropertiesForKeys: keys,
         options: [],
         errorHandler: { _, error in
           enumerationError = error
           return false
         })
     else {
-      throw PinewindError("cannot enumerate source", source: root.path)
+      throw FileSystemFailure.enumerationFailed(root)
     }
-    var result: [String] = []
-    let base = root.standardizedFileURL.path
+    var result: [RelativePath] = []
+    let base = try NativePath.from(root.foundationURL.standardizedFileURL)
     for case let file as URL in iterator {
-      let values = try file.resourceValues(forKeys: Set(keys))
+      try Cancellation.check()
+      let values = try FileIO.perform(.inspect, paths: [NativePath.from(file)]) {
+        try file.resourceValues(forKeys: Set(keys))
+      }
       if values.isSymbolicLink == true {
-        throw PinewindError(
-          "symbolic links are not supported in package sources", source: file.path)
+        throw FileSystemFailure.symbolicLinkNotAllowed(FilePath(file.path))
       }
       if values.isDirectory == true && file.lastPathComponent == ".git" {
         iterator.skipDescendants()
         continue
       }
       if values.isRegularFile == true {
-        let path = String(file.standardizedFileURL.path.dropFirst(base.count + 1))
-        try validate(path)
-        result.append(path)
+        let native = try NativePath.from(file.standardizedFileURL)
+        let path = FilePath(root: nil, native.components.dropFirst(base.components.count))
+        result.append(try RelativePath(path))
       }
     }
-    if let enumerationError { throw enumerationError }
+    if let enumerationError {
+      throw FileSystemFailure.operationFailed(
+        FileOperationFailure(operation: .enumerate, paths: [root], error: enumerationError))
+    }
     return result.sorted()
   }
 }

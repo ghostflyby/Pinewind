@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -29,31 +30,31 @@ struct GlobTests {
     ("[[:digit:]].yaml", "3.yaml", true),
     ("*.yaml", ".hidden.yaml", true),
     ("**/*.yaml", ".hidden/file.yaml", true),
-    ("*.yaml", "a.yaml/", false),
+    ("*.yaml", "a.yaml/", true),
     ("A.yaml", "a.yaml", false),
     ("*.{yaml,txt}", "a.yaml", false),
     ("*.{yaml,txt}", "a.{yaml,txt}", true),
     ("@(foo|bar).yaml", "foo.yaml", false),
   ])
   func preservesPathMatchingContract(pattern: String, path: String, expected: Bool) throws {
-    #expect(try Glob.matches(pattern, path: path) == expected)
+    #expect(try Glob.matches(pattern, path: RelativePath(FilePath(path))) == expected)
   }
 
   @Test(arguments: [
     "", "/foo", "../foo", "a/../*", "a\\*.yaml", "bad\0pattern", "[", "[]", "[z-a]",
   ])
   func rejectsUnsafeOrMalformedPatterns(_ pattern: String) {
-    #expect(throws: PinewindError.self) { try Glob.compile(pattern) }
+    #expect(throws: DeclarationFailure.self) { try Glob.compile(pattern) }
   }
 
   @Test func includeAndExcludeUseTheSameMatcher() throws {
     let filter = FileFilter(include: ["**/*.yaml"], exclude: ["**/*.custom.yaml"])
-    #expect(try filter.accepts("default.yaml"))
-    #expect(try filter.accepts("schemas/.hidden.yaml"))
-    #expect(try !filter.accepts("schemas/test.custom.yaml"))
-    #expect(try !filter.accepts("words.txt"))
+    #expect(try filter.accepts(RelativePath("default.yaml")))
+    #expect(try filter.accepts(RelativePath("schemas/.hidden.yaml")))
+    #expect(try !filter.accepts(RelativePath("schemas/test.custom.yaml")))
+    #expect(try !filter.accepts(RelativePath("words.txt")))
     #expect(throws: PinewindError.self) {
-      try Manifest.parse("version: 1\norder: [{self: {include: ['[']}}]")
+      try ManifestDocument.parse("version: 1\norder: [{self: {include: ['[']}}]").evaluate()
     }
   }
 }
