@@ -341,7 +341,7 @@ private final class BoundedResourceTransfer: HTTPSResourceDelegate, URLSessionDa
     if stop { dataTask.cancel() }
   }
 
-  func urlSession(
+  override func urlSession(
     _ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?
   ) {
     let completion = lock.withLock {
@@ -368,6 +368,12 @@ class HTTPSResourceDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendab
   let originalSession: URLSession
 
   init(session: URLSession) { originalSession = session }
+
+  // A concrete witness lets streaming subclasses override completion on Corelibs;
+  // inheriting the protocol's default implementation would bypass the override.
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?
+  ) {}
 
   func urlSession(
     _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
