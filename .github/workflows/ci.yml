@@ -151,7 +151,7 @@ jobs:
         uses: sersoft-gmbh/xcodebuild-action@v4
         with:
           spm-package: .
-          scheme: PinewindCore
+          scheme: Pinewind-Package
           destination: platform=iOS Simulator,id=${{ env.SIM_ID }}
           result-bundle-path: ${{ runner.temp }}/pinewind-ios-diagnostics/Pinewind.xcresult
           parallel-testing-enabled: false
