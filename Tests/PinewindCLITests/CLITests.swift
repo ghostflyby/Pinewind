@@ -147,8 +147,8 @@
       #expect(!FileManager.default.fileExists(atPath: f.config.path))
       let paths = try f.run(["paths", "--output", f.output.path] + f.options)
       #expect(paths.status == 0, "\(paths.output)")
-      #expect(paths.output.contains(f.config.path))
-      #expect(paths.output.contains(f.output.path))
+      #expect(paths.output.contains("Manifest: " + FilePath(f.manifest.path).string))
+      #expect(paths.output.contains("Rime output: " + FilePath(f.output.path).string))
       #expect(!FileManager.default.fileExists(atPath: f.config.path))
     }
 
