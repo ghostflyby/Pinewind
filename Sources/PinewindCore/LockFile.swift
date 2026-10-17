@@ -18,6 +18,7 @@ public struct PackageID: Hashable, Sendable {
   }
 }
 public struct ImportID: Hashable, Sendable {
+  /// Position in the resolution that produced this ID, not a position in future manifests.
   public let index: Int
   public let request: ConfImport
   let packages: [PackageRequest]
@@ -39,6 +40,7 @@ public struct ResourceID: Hashable, Sendable {
 public enum UpdateSelection: Sendable {
   case all
   case packages(Set<PackageID>)
+  /// Refreshes all current occurrences of each selected request. IDs must match the old lock.
   case imports(Set<ImportID>)
   case resources(Set<ResourceID>)
 }

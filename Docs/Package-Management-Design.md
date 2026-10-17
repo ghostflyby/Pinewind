@@ -101,6 +101,8 @@ Resolution、PreparedInputs、CompositionPlan 由库创建,外部不能任意构
 
 resolve/update 在全部解析、下载和校验完成后,再次协调检查共享配置、本地配置及旧锁的基线,然后原子提交新锁。中途失败或取消不改变旧锁。UpdateSelection 支持包、import 和资源标识;不属于当前解析的标识报错。
 
+ImportID.index 是生成标识时的位置,用于校验旧锁中的标识。执行选择更新按 request 匹配当前清单,同一 request 的所有出现位置一起刷新;声明移动不影响匹配,声明已删除或 request 改变则拒绝选择。过期 expansion 标识仍被拒绝。
+
 锁只承诺语义和库读写入口,不承诺内部编码。私有 DTO 解码后完整验证来源、版本、路径、校验、重复项、展开关系与冲突。锁不记录缓存路径、本机覆写或本地树内容;本地声明仅保留不含绝对路径的拓扑和元数据。旧编码报告不兼容,显式 resolve 可重建。
 
 ## 6. 资源、导入与开发覆写
@@ -108,6 +110,8 @@ resolve/update 在全部解析、下载和校验完成后,再次协调检查共�
 `RepositoryProvider.resolve` 一次返回确定 SourceIdentity,默认后端将默认分支识别与 commit 选择放在同次 refs 广播。prepareSource 接收 FilePath 缓存根,返回完整不可变源码快照。HTTPS Git 使用进程内 GitKit/libgit2,不使用外部 git/ssh 或 GitHub REST API。没有自动子模块和 LFS 内容获取,commit 不可用时失败,不替换成分支最新版本。
 
 `ResourceDownloader.download` 写入 FilePath 候选文件;调用方携带的单文件字节上限在传输中生效,超限即中断并清理候选,存储层在内容进入缓存前复核同一上限。资源缓存按实际字节的 SHA-256 固定,不归一化换行或编码,不 hash 源码目录树。resolve 保留仍匹配的资源版本,update 可单独更新资源。fetch 校验不符即失败,不自动接受新内容或改锁。
+
+WorkspaceOptions.maximumResourceBytes 默认 64 MiB,是 recipe 下载、开发模式下载及缓存恢复共用的宿主上限。conf 初次导入和缓存恢复同时受 imports.maximumFileBytes 限制(默认 1 MiB),取更小值。已缓存内容也检查相同上限,降低策略后不能绕过限制。recipe 不能放宽宿主上限。默认 HTTPS 下载器在各平台逐块检查后写入,超限立即取消任务,取消与本地文件错误保持原有错误领域。
 
 库识别 recipe、解析下载需求并构建条目资源视图。下载覆盖该条目视图中的源码,不会修改共享源码缓存。本地树在规划时重新读取,有下载资源时先建立本次视图再捕获文件。准备后本地 recipe 改变导致资源不匹配时拒绝规划,需要重新准备。
 

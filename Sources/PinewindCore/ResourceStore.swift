@@ -10,10 +10,12 @@ import SystemPackage
 struct ResourceStore: Sendable {
   let root: FilePath
   let downloader: any ResourceDownloader
+  let maximumBytes: Int
   func path(_ pin: PinnedResource) -> FilePath { root.appending("resources/" + pin.sha256) }
   func pin(_ url: URL, target: RelativePath, maximumBytes: Int? = nil) async throws
     -> PinnedResource
   {
+    let maximumBytes = min(self.maximumBytes, maximumBytes ?? self.maximumBytes)
     let candidate = root.appending("downloads/" + UUID().uuidString)
     try await BlockingIO.run {
       try FileManager.default.createDirectory(
@@ -21,14 +23,11 @@ struct ResourceStore: Sendable {
     }
     defer { try? FileManager.default.removeItem(at: candidate) }
     try await downloader.download(url, to: candidate, maximumBytes: maximumBytes)
-    if let maximumBytes {
-      // Injectable downloaders may ignore the transfer cap; the store enforces it
-      // before the bytes enter the content-addressed cache.
-      let size = try await BlockingIO.run { try SnapshotFiles.byteCount(candidate) }
-      guard size <= maximumBytes else {
-        throw PinewindError.runtime(
-          .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
-      }
+    // Injectable downloaders may ignore the transfer cap; enforce it again before caching.
+    let size = try await BlockingIO.run { try SnapshotFiles.byteCount(candidate) }
+    guard size <= maximumBytes else {
+      throw PinewindError.runtime(
+        .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
     }
     let hash = try await BlockingIO.run { try SnapshotFiles.sha256(candidate) }
     let pin = try PinnedResource(url: url, path: target, sha256: hash)
@@ -52,9 +51,15 @@ struct ResourceStore: Sendable {
     }
     return pin
   }
-  func ensure(_ pin: PinnedResource, network: Bool) async throws {
+  func ensure(_ pin: PinnedResource, network: Bool, maximumBytes: Int? = nil) async throws {
+    let maximumBytes = min(self.maximumBytes, maximumBytes ?? self.maximumBytes)
     let cached = path(pin)
     if FileManager.default.fileExists(atPath: cached.string) {
+      let size = try await BlockingIO.run { try SnapshotFiles.byteCount(cached) }
+      guard size <= maximumBytes else {
+        throw PinewindError.runtime(
+          .network(.sizeLimitExceeded(url: pin.url, maximumBytes: maximumBytes)))
+      }
       let actual = try await BlockingIO.run { try SnapshotFiles.sha256(cached) }
       if actual == pin.sha256 { return }
       if !network {
@@ -63,7 +68,7 @@ struct ResourceStore: Sendable {
     } else if !network {
       throw CacheFailure.contentMissing(pin.url)
     }
-    let actual = try await self.pin(pin.url, target: pin.path)
+    let actual = try await self.pin(pin.url, target: pin.path, maximumBytes: maximumBytes)
     guard actual.sha256 == pin.sha256 else {
       throw PinewindError.runtime(
         .cache(.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual.sha256)))

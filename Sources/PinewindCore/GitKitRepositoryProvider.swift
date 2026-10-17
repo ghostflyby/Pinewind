@@ -183,7 +183,7 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
       throw transportFailure(error, url: url)
     }
     defer { try? FileManager.default.removeItem(at: temporary) }
-    _ = try validatedResponse(response, url: url)
+    _ = try Self.validatedResponse(response, url: url)
     try Task.checkCancellation()
     let source = try NativePath.from(temporary)
     try await BlockingIO.run {
@@ -193,71 +193,35 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     }
   }
 
-  /// The size cap takes effect while bytes are in flight on platforms with a
-  /// streaming bytes API, so an oversized transfer is aborted instead of
-  /// written and inspected afterwards. Corelibs Foundation has no such API;
-  /// there the cap is enforced right after the transfer, before caching.
+  /// Check each chunk before writing it, including on Corelibs Foundation.
   private func downloadBounded(
     _ request: URLRequest, to destination: FilePath, maximumBytes: Int, url: URL
   ) async throws {
-    #if canImport(FoundationNetworking)
-      try await downloadUnbounded(request, to: destination, url: url)
-      let size = try await BlockingIO.run { try SnapshotFiles.byteCount(destination) }
-      guard size <= maximumBytes else {
-        try? FileManager.default.removeItem(at: destination)
-        throw PinewindError.runtime(
-          .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
-      }
-    #else
-      let stream: URLSession.AsyncBytes
-      let response: URLResponse
-      do {
-        (stream, response) = try await session.bytes(
-          for: request, delegate: HTTPSRedirectGuard())
-      } catch {
-        throw transportFailure(error, url: url)
-      }
-      _ = try validatedResponse(response, url: url)
-      try await BlockingIO.run {
-        try FileManager.default.createDirectory(
-          at: destination.removingLastComponent(), withIntermediateDirectories: true)
-      }
+    try await BlockingIO.run {
+      try FileManager.default.createDirectory(
+        at: destination.removingLastComponent(), withIntermediateDirectories: true)
+    }
+    do {
       let handle = try FileIO.perform(.open, paths: [destination]) {
         try FileDescriptor.open(
           destination, .writeOnly, options: [.create, .truncate],
           permissions: [.ownerReadWrite, .groupRead, .otherRead])
       }
       defer { try? handle.close() }
-      do {
-        var pending: [UInt8] = []
-        pending.reserveCapacity(65536)
-        func flush() throws {
-          _ = try FileIO.perform(.write, paths: [destination]) { try handle.writeAll(pending) }
-          pending.removeAll(keepingCapacity: true)
-        }
-        var received = 0
-        for try await byte in stream {
-          try Task.checkCancellation()
-          received += 1
-          if received > maximumBytes {
-            throw PinewindError.runtime(
-              .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
-          }
-          pending.append(byte)
-          if pending.count == 65536 { try flush() }
-        }
-        if !pending.isEmpty { try flush() }
-      } catch let error as PinewindError {
-        try? FileManager.default.removeItem(at: destination)
-        throw error
-      } catch {
-        try? FileManager.default.removeItem(at: destination)
-        throw transportFailure(error, url: url)
-      }
-    #endif
+      let transfer = BoundedResourceTransfer(
+        session: session, destination: destination, handle: handle, url: url,
+        maximumBytes: maximumBytes)
+      try await transfer.run(request: request)
+      try Task.checkCancellation()
+    } catch {
+      try? FileManager.default.removeItem(at: destination)
+      throw transportFailure(error, url: url)
+    }
   }
 
-  private func validatedResponse(_ response: URLResponse, url: URL) throws -> HTTPURLResponse {
+  fileprivate static func validatedResponse(_ response: URLResponse, url: URL) throws
+    -> HTTPURLResponse
+  {
     guard let response = response as? HTTPURLResponse,
       response.url?.scheme?.lowercased() == "https"
     else {
@@ -279,6 +243,158 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
       .network(
         .transportFailed(
           url: url, reason: TransportFailureReason(error), detail: String(describing: error))))
+  }
+}
+// Corelibs routes native transport callbacks through the session delegate, so
+// use a session with the caller's configuration and a dedicated streaming sink.
+// The lock protects delegate callbacks and concurrent task cancellation.
+private final class BoundedResourceTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+  private let originalSession: URLSession
+  private let destination: FilePath
+  private let handle: FileDescriptor
+  private let url: URL
+  private let maximumBytes: Int
+  private let lock = NSLock()
+  private var received = 0
+  private var failure: (any Error)?
+  private var cancelled = false
+  private var task: URLSessionDataTask?
+  private var continuation: CheckedContinuation<Void, any Error>?
+
+  init(
+    session: URLSession, destination: FilePath, handle: FileDescriptor, url: URL, maximumBytes: Int
+  ) {
+    self.originalSession = session
+    self.destination = destination
+    self.handle = handle
+    self.url = url
+    self.maximumBytes = maximumBytes
+  }
+
+  func run(request: URLRequest) async throws {
+    #if canImport(FoundationNetworking)
+      let session = URLSession(
+        configuration: originalSession.configuration, delegate: self, delegateQueue: nil)
+      defer { session.invalidateAndCancel() }
+    #else
+      let session = originalSession
+    #endif
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        let task = session.dataTask(with: request)
+        task.delegate = self
+        let start = lock.withLock {
+          guard !cancelled else { return false }
+          self.task = task
+          self.continuation = continuation
+          return true
+        }
+        if start {
+          task.resume()
+        } else {
+          task.cancel()
+          continuation.resume(throwing: CancellationError())
+        }
+      }
+    } onCancel: {
+      let task = self.lock.withLock {
+        self.cancelled = true
+        return self.task
+      }
+      task?.cancel()
+    }
+  }
+
+  #if canImport(FoundationNetworking)
+    // Preserve authentication policy when Corelibs needs a dedicated session.
+    func urlSession(
+      _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+      completionHandler:
+        @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+      if let delegate = originalSession.delegate {
+        delegate.urlSession(
+          originalSession, didReceive: challenge, completionHandler: completionHandler)
+      } else {
+        completionHandler(.performDefaultHandling, nil)
+      }
+    }
+
+    func urlSession(
+      _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+      completionHandler:
+        @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+      if let delegate = originalSession.delegate as? any URLSessionTaskDelegate {
+        delegate.urlSession(
+          originalSession, task: task, didReceive: challenge, completionHandler: completionHandler)
+      } else {
+        completionHandler(.performDefaultHandling, nil)
+      }
+    }
+  #endif
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping @Sendable (URLRequest?) -> Void
+  ) {
+    completionHandler(request.url?.scheme?.lowercased() == "https" ? request : nil)
+  }
+
+  func urlSession(
+    _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+  ) {
+    do {
+      _ = try HTTPSResourceDownloader.validatedResponse(response, url: url)
+      completionHandler(.allow)
+    } catch {
+      lock.withLock { failure = error }
+      completionHandler(.cancel)
+    }
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    let stop = lock.withLock {
+      guard failure == nil, !cancelled else { return true }
+      do {
+        guard data.count <= maximumBytes - received else {
+          throw NetworkFailure.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)
+        }
+        try FileIO.perform(.write, paths: [destination]) {
+          try data.withUnsafeBytes { _ = try handle.writeAll($0) }
+        }
+        received += data.count
+        return false
+      } catch {
+        failure = error
+        return true
+      }
+    }
+    if stop { dataTask.cancel() }
+  }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?
+  ) {
+    let completion = lock.withLock {
+      let result: Result<Void, any Error>
+      if let failure {
+        result = .failure(failure)
+      } else if cancelled {
+        result = .failure(CancellationError())
+      } else if let error {
+        result = .failure(error)
+      } else {
+        result = .success(())
+      }
+      let continuation = self.continuation
+      self.continuation = nil
+      self.task = nil
+      return (continuation, result)
+    }
+    completion.0?.resume(with: completion.1)
   }
 }
 private final class HTTPSRedirectGuard: NSObject, URLSessionTaskDelegate {

@@ -284,11 +284,7 @@ struct GitKitRepositoryProviderTests {
     }
   }
 
-  #if canImport(FoundationNetworking)
-    @Test(.disabled("Corelibs Foundation does not create download files for custom URLProtocol"))
-  #else
-    @Test
-  #endif
+  @Test
   func downloadsHTTPSResourcesAndReportsHTTPFailures() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
@@ -304,12 +300,8 @@ struct GitKitRepositoryProviderTests {
     }
   }
 
-  #if canImport(FoundationNetworking)
-    @Test(.disabled("Corelibs Foundation download tasks trap with custom URLProtocol"))
-  #else
-    @Test
-  #endif
-  func downloadAbortsMidTransferWhenByteCapIsExceeded() async throws {
+  @Test(arguments: [0, 2, 6, 7])
+  func downloadAbortsMidTransferWhenByteCapIsExceeded(_ maximumBytes: Int) async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
     let session = URLSession(configuration: config)
@@ -320,12 +312,14 @@ struct GitKitRepositoryProviderTests {
     defer { try? FileManager.default.removeItem(at: file) }
     await #expect {
       try await downloader.download(
-        URL(string: "https://resource.test/ok")!, to: file, maximumBytes: 2)
+        URL(string: "https://resource.test/ok")!, to: file, maximumBytes: maximumBytes)
     } throws: { error in
-      guard case .runtime(.network(.sizeLimitExceeded(let url, _))) = error as? PinewindError else {
+      guard
+        case .runtime(.network(.sizeLimitExceeded(let url, let limit))) = error as? PinewindError
+      else {
         return false
       }
-      return url.absoluteString == "https://resource.test/ok"
+      return url.absoluteString == "https://resource.test/ok" && limit == maximumBytes
     }
     #expect(!FileManager.default.fileExists(atPath: file.string))
     try await downloader.download(
@@ -333,6 +327,23 @@ struct GitKitRepositoryProviderTests {
     #expect(try Data(contentsOf: file) == Data("resource".utf8))
   }
 
+  @Test func cancellingAnActiveBoundedDownloadRemovesPartialContent() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [HangingResourceProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    let file = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: file) }
+    let task = Task {
+      try await HTTPSResourceDownloader(session: session).download(
+        URL(string: "https://resource.test/pending")!, to: file, maximumBytes: 8)
+    }
+    await HangingResourceProtocol.started.wait()
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(!FileManager.default.fileExists(atPath: file.string))
+  }
   @Test func downloadTransportFailuresKeepErrorCodesAndCancellation() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
@@ -358,9 +369,7 @@ struct GitKitRepositoryProviderTests {
   }
 
   #if canImport(FoundationNetworking)
-    @Test(
-      .disabled("Corelibs Foundation does not create download files for custom URLProtocol"),
-      arguments: [nil, 8] as [Int?])
+    @Test(arguments: [8] as [Int?])
   #else
     @Test(arguments: [nil, 8] as [Int?])
   #endif
@@ -437,7 +446,7 @@ private func downloadedData(using downloader: HTTPSResourceDownloader, from url:
   let file = native(
     FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
   defer { try? FileManager.default.removeItem(at: file) }
-  try await downloader.download(url, to: file, maximumBytes: nil)
+  try await downloader.download(url, to: file, maximumBytes: 1024 * 1024)
   return try Data(contentsOf: file)
 }
 
@@ -604,8 +613,23 @@ private final class ResourceProtocol: URLProtocol {
     let response = HTTPURLResponse(
       url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-    client?.urlProtocol(self, didLoad: Data("resource".utf8))
+    client?.urlProtocol(self, didLoad: Data("reso".utf8))
+    client?.urlProtocol(self, didLoad: Data("urce".utf8))
     client?.urlProtocolDidFinishLoading(self)
+  }
+  override func stopLoading() {}
+}
+
+private final class HangingResourceProtocol: URLProtocol {
+  static let started = StartGate()
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    let response = HTTPURLResponse(
+      url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: Data("part".utf8))
+    Task { await Self.started.release() }
   }
   override func stopLoading() {}
 }

@@ -18,7 +18,13 @@ public enum OperationEvent: Sendable {
 public typealias OperationProgress = @Sendable (OperationEvent) -> Void
 public struct WorkspaceOptions: Sendable {
   public var imports: ImportLimits
-  public init(imports: ImportLimits = ImportLimits()) { self.imports = imports }
+  /// Host policy for each resource, including recipe downloads and cache recovery.
+  public var maximumResourceBytes: Int
+  public init(imports: ImportLimits = ImportLimits(), maximumResourceBytes: Int = 64 * 1024 * 1024)
+  {
+    self.imports = imports
+    self.maximumResourceBytes = maximumResourceBytes
+  }
 }
 public struct PreparedInputs: Sendable {
   public let manifest: EvaluatedManifest
@@ -50,7 +56,9 @@ public actor Workspace {
   private let options: WorkspaceOptions
   private let store: ConfigurationStore
   private var resources: ResourceStore {
-    ResourceStore(root: locations.cacheRoot, downloader: services.resources)
+    ResourceStore(
+      root: locations.cacheRoot, downloader: services.resources,
+      maximumBytes: options.maximumResourceBytes)
   }
   private init(
     locations: WorkspaceLocations, services: WorkspaceServices, options: WorkspaceOptions
@@ -66,7 +74,8 @@ public actor Workspace {
   ) async throws -> Workspace {
     try Task.checkCancellation()
     guard options.imports.maximumSources > 0, options.imports.maximumFileBytes > 0,
-      options.imports.maximumTotalBytes > 0, options.imports.timeout > .zero
+      options.imports.maximumTotalBytes > 0, options.imports.timeout > .zero,
+      options.maximumResourceBytes > 0
     else {
       throw PinewindError.runtime(.state(.invalidOptions))
     }
@@ -129,7 +138,8 @@ public actor Workspace {
     let previous = snapshot.baseline.lock.flatMap { try? ResolutionCodec.reusable($0) }
     let oldPackages = previous?.packages ?? []
     let oldImports = previous?.imports ?? []
-    try validateSelection(update, packages: oldPackages, imports: oldImports)
+    try validateSelection(
+      update, packages: oldPackages, imports: oldImports, declarations: declarations)
     let refreshAll: Bool = {
       if case .all = update { return true }
       return false
@@ -268,7 +278,10 @@ public actor Workspace {
     try check(resolution.snapshot)
     progress?(.started(.preparing))
     for imported in resolution.imports {
-      for pin in imported.resources { try await resources.ensure(pin, network: network) }
+      for pin in imported.resources {
+        try await resources.ensure(
+          pin, network: network, maximumBytes: options.imports.maximumFileBytes)
+      }
     }
     let effective = try resolution.snapshot.evaluate(.effective)
     var entries: [ManifestEntry] = []
@@ -642,7 +655,7 @@ public actor Workspace {
   }
   private func selected(_ id: ImportID, in selection: UpdateSelection?) -> Bool {
     if case .imports(let ids) = selection {
-      return ids.contains { $0.index == id.index && $0.request == id.request }
+      return ids.contains { $0.request == id.request }
     }
     return false
   }
@@ -660,12 +673,20 @@ public actor Workspace {
     return false
   }
   private func validateSelection(
-    _ selection: UpdateSelection?, packages: [LockedPackage], imports: [ResolvedImport]
+    _ selection: UpdateSelection?, packages: [LockedPackage], imports: [ResolvedImport],
+    declarations: EvaluatedManifest
   ) throws {
     let valid: Bool
     switch selection {
     case .packages(let ids): valid = ids.isSubset(of: Set(packages.map(\.id)))
-    case .imports(let ids): valid = ids.isSubset(of: Set(imports.map(\.id)))
+    case .imports(let ids):
+      let active = Set(
+        declarations.entries.compactMap { entry -> ConfImport? in
+          if case .importConf(let request) = entry { return request }
+          return nil
+        })
+      valid =
+        ids.isSubset(of: Set(imports.map(\.id))) && ids.allSatisfy { active.contains($0.request) }
     case .resources(let ids): valid = ids.isSubset(of: Set(packages.flatMap(\.resourceIDs)))
     default: valid = true
     }

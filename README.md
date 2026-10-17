@@ -127,6 +127,10 @@ let refreshed = try await workspace.update(.resources(resources))
 
 过期或不属于当前锁的标识会被拒绝。明确 commit 不随 update 前进。recipe 下载资源以 URL、相对路径和实际字节的 SHA-256 固定;缓存丢失后的下载若与固定校验值不同会失败,不会接受新内容或自动改锁。
 
+`ImportID.index` 表示生成该标识时的声明位置。选择更新 import 时先校验标识属于当前锁,再按 request 匹配当前清单中的所有相同声明;前方插入、删除或移动其他条目不会改变选中目标。已删除或改变 request 的声明会报错,不会静默跳过。
+
+`WorkspaceOptions.maximumResourceBytes` 默认 64 MiB,限制每个资源的传输和缓存恢复,覆盖 recipe 的 `download_files`。远程 conf 还受 `imports.maximumFileBytes` 限制,取两者较小值,默认 1 MiB。上限必须为正数,超限中断下载并清理候选文件,不提交新锁或组合结果。自定义 `ResourceDownloader` 也必须在传输中执行收到的上限;存储层会在缓存前再次检查大小。
+
 默认 `.locked` 准备模式允许共享锁定版本和本地目录改向。覆写引入其他远程选择或尚未固定的资源时,显式使用 `fetch(mode: .development)` 或 `fetchAndCompose(to:mode: .development)`。开发结果只用于本次准备,不写共享锁或本地锁。
 
 `WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现为 `GitKitRepositoryProvider`、`HTTPSResourceDownloader`。认证通过 `GitKitRepositoryProvider(credentials:)` 注入。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。

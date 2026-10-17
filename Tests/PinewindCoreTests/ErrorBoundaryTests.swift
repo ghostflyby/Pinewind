@@ -243,7 +243,7 @@ struct ErrorBoundaryTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let pin = try PinnedResource(
       url: endpoint, path: RelativePath("resource"), sha256: String(repeating: "a", count: 64))
-    let store = ResourceStore(root: root, downloader: RejectingServices())
+    let store = ResourceStore(root: root, downloader: RejectingServices(), maximumBytes: 1024)
     let path = store.path(pin)
     try FileManager.default.createDirectory(
       at: path.removingLastComponent(), withIntermediateDirectories: true)

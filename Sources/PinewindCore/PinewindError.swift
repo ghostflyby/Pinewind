@@ -497,7 +497,7 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
     case .staleInputs: return "configuration or lock changed before publication"
     case .unknownSelection: return "update selection does not belong to the current resolution"
     case .overridesDisabled: return "local overrides are disabled"
-    case .invalidOptions: return "import options must be positive"
+    case .invalidOptions: return "workspace limits and timeouts must be positive"
     case .foreignSnapshot: return "phase result belongs to another workspace"
     }
   }

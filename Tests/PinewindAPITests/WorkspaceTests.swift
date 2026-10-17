@@ -72,9 +72,11 @@ private actor Repositories: RepositoryProvider {
 private actor Downloads: ResourceDownloader {
   var files: [URL: Data] = [:]
   var calls = 0
+  var limits: [URL: [Int?]] = [:]
   func set(_ endpoint: URL, _ text: String) { files[endpoint] = Data(text.utf8) }
   func download(_ endpoint: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     calls += 1
+    limits[endpoint, default: []].append(maximumBytes)
     guard let bytes = files[endpoint] else {
       throw PinewindError.runtime(.network(.rejected(status: 404, url: endpoint)))
     }
@@ -83,6 +85,7 @@ private actor Downloads: ResourceDownloader {
     try bytes.write(to: url(destination))
   }
   func count() -> Int { calls }
+  func requestedLimits(_ endpoint: URL) -> [Int?] { limits[endpoint, default: []] }
 }
 private struct Fixture {
   let root: FilePath
@@ -113,10 +116,11 @@ private struct Fixture {
     try FileManager.default.createDirectory(at: url(input), withIntermediateDirectories: true)
   }
   func remove() { try? FileManager.default.removeItem(at: url(root)) }
-  func workspace() async throws -> Workspace {
+  func workspace(options: WorkspaceOptions = WorkspaceOptions()) async throws -> Workspace {
     try await Workspace.open(
       locations: locations,
-      services: WorkspaceServices(repositories: repositories, resources: downloads))
+      services: WorkspaceServices(repositories: repositories, resources: downloads),
+      options: options)
   }
   func remote(recipe: String? = nil, duplicate: Bool = false) throws {
     let fields = recipe.map { "\n    recipe: \($0)" } ?? ""
@@ -353,6 +357,100 @@ struct WorkspaceTests {
     _ = try await workspace.compose(to: f.output)
     #expect(try read(f.output.appending("extra.txt")) == "second")
   }
+  @Test(arguments: ["resolve", "update", "recovery", "development"])
+  func recipeDownloadsRespectHostLimits(_ operation: String) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let resource = URL(string: "https://resources.test/extra.txt")!
+    let recipe = try fixtureText("Recipes/implicit-download.recipe.yaml")
+    try await f.repositories.install(firstID, files: ["recipe.yaml": recipe])
+    try f.remote()
+    let workspace = try await f.workspace(options: WorkspaceOptions(maximumResourceBytes: 8))
+    var resolution: Resolution?
+    var baseline: Data?
+    if operation == "update" || operation == "recovery" {
+      await f.downloads.set(resource, "first")
+      resolution = try await workspace.resolve()
+      _ = try await workspace.fetchAndCompose(to: f.output)
+      baseline = try Data(contentsOf: url(f.lock))
+      if operation == "recovery" {
+        try FileManager.default.removeItem(at: url(f.locations.cacheRoot.appending("resources")))
+      }
+    } else if operation == "development" {
+      // Resolve the shared package first; only the local override introduces a download.
+      try await f.repositories.install(secondID, files: ["default.yaml": "remote"])
+      _ = try await workspace.resolve()
+      baseline = try Data(contentsOf: url(f.lock))
+      let local = f.root.appending("development")
+      try write(local.appending("recipe.yaml"), recipe)
+      let session = try await workspace.configuration()
+      try await session.edit { try $0.redirectPackage("package", to: .path(local)) }
+      _ = try await session.save(.local)
+    }
+    // This injected downloader ignores its limit, so this also tests the store's final check.
+    await f.downloads.set(resource, String(repeating: "x", count: 9))
+    await #expect(
+      throws: PinewindError.runtime(.network(.sizeLimitExceeded(url: resource, maximumBytes: 8)))
+    ) {
+      switch operation {
+      case "update":
+        _ = try await workspace.update(
+          .resources(Set(try #require(resolution).packages[0].resourceIDs)))
+      case "recovery": _ = try await workspace.fetchAndCompose(to: f.output)
+      case "development": _ = try await workspace.fetch(mode: .development)
+      default: _ = try await workspace.resolve()
+      }
+    }
+    #expect(await f.downloads.requestedLimits(resource).allSatisfy { $0 == 8 })
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        atPath: f.locations.cacheRoot.appending("downloads").string
+      ).isEmpty)
+    if let baseline {
+      #expect(try Data(contentsOf: url(f.lock)) == baseline)
+      if operation == "development" {
+        #expect(!exists(f.output))
+      } else {
+        #expect(try read(f.output.appending("extra.txt")) == "first")
+      }
+    } else {
+      #expect(!exists(f.lock))
+    }
+  }
+  @Test(arguments: [32, 128])
+  func importCacheRecoveryRetainsItsStricterLimit(_ hostLimit: Int) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let remote = URL(string: "https://conf.test/packages.conf")!
+    await f.downloads.set(remote, "package_list=(rime/first)\n")
+    try await f.repositories.install(firstID, files: ["default.yaml": "imported"])
+    try write(f.manifest, "version: 1\norder: [{import: \(remote.absoluteString)}]\n")
+    let workspace = try await f.workspace(
+      options: WorkspaceOptions(
+        imports: ImportLimits(maximumFileBytes: 64), maximumResourceBytes: hostLimit))
+    _ = try await workspace.resolve()
+    _ = try await workspace.fetchAndCompose(to: f.output)
+    let baseline = try Data(contentsOf: url(f.lock))
+    try FileManager.default.removeItem(at: url(f.locations.cacheRoot.appending("resources")))
+    await f.downloads.set(remote, String(repeating: "#", count: 65))
+    let limit = min(hostLimit, 64)
+    await #expect(
+      throws: PinewindError.runtime(.network(.sizeLimitExceeded(url: remote, maximumBytes: limit)))
+    ) {
+      _ = try await workspace.fetchAndCompose(to: f.output)
+    }
+    #expect(await f.downloads.requestedLimits(remote) == [limit, limit])
+    #expect(try Data(contentsOf: url(f.lock)) == baseline)
+    #expect(try read(f.output.appending("default.yaml")) == "imported")
+  }
+  @Test(arguments: [0, -1])
+  func resourceLimitMustBePositive(_ maximumBytes: Int) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    await #expect(throws: PinewindError.runtime(.state(.invalidOptions))) {
+      _ = try await f.workspace(options: WorkspaceOptions(maximumResourceBytes: maximumBytes))
+    }
+  }
   @Test func checksumFailureRetainsPublishedOutputAndLock() async throws {
     let f = try Fixture()
     defer { f.remove() }
@@ -566,6 +664,52 @@ struct WorkspaceTests {
     _ = try await workspace.update()
     #expect(await f.repositories.counts().0 == 0)
     #expect(try await workspace.compose(to: f.output).paths.map(\.string) == ["default.yaml"])
+  }
+  @Test(arguments: [false, true])
+  func importSelectionFollowsRequestsAfterManifestEdits(_ duplicate: Bool) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let selected = URL(string: "https://conf.test/selected.conf")!
+    let other = URL(string: "https://conf.test/other.conf")!
+    await f.downloads.set(selected, "package_list=(rime/first)\n")
+    await f.downloads.set(other, "package_list=(rime/other)\n")
+    try await f.repositories.install(firstID, files: ["default.yaml": "imported"])
+    try write(f.manifest, "version: 1\norder: [{import: \(other)}, {import: \(selected)}]\n")
+    let workspace = try await f.workspace()
+    let initial = try await workspace.resolve()
+    let id = initial.imports[1].id
+    // Insert an unrelated package before the selected import; its old index is occupied by another import.
+    let prefix = "{url: \(endpoint.absoluteString)}, {import: \(other)}"
+    let suffix = duplicate ? ", {import: \(selected)}" : ""
+    try write(f.manifest, "version: 1\norder: [\(prefix), {import: \(selected)}\(suffix)]\n")
+    await f.downloads.set(selected, "package_list=(rime/first rime/second)\n")
+    let updated = try await workspace.update(.imports([id]))
+    let refreshed = updated.imports.filter { $0.id.request == id.request }
+    #expect(refreshed.count == (duplicate ? 2 : 1))
+    #expect(refreshed.allSatisfy { $0.packages.count == 2 && $0.id.index >= 2 })
+    #expect(updated.imports[0].packages == initial.imports[0].packages)
+    #expect(await f.downloads.requestedLimits(other).count == 1)
+    #expect(await f.downloads.requestedLimits(selected).count > 1)
+    await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
+      _ = try await workspace.update(.imports([id]))
+    }
+  }
+  @Test func removedImportSelectionFailsWithoutChangingTheLock() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let remote = URL(string: "https://conf.test/packages.conf")!
+    await f.downloads.set(remote, "package_list=(rime/first)\n")
+    try await f.repositories.install(firstID, files: ["default.yaml": "imported"])
+    try write(f.manifest, "version: 1\norder: [{import: \(remote)}]\n")
+    let workspace = try await f.workspace()
+    let initial = try await workspace.resolve()
+    let baseline = try Data(contentsOf: url(f.lock))
+    try write(f.manifest, "version: 1\norder: []\n")
+    await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
+      _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+    }
+    #expect(try Data(contentsOf: url(f.lock)) == baseline)
+    #expect(await f.downloads.count() == 1)
   }
   @Test func importUpdatesRejectOldExpansionSelectors() async throws {
     let f = try Fixture()
