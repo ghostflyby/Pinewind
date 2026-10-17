@@ -82,7 +82,9 @@ enum SafePath {
     #endif
     let fm = FileManager.default
     let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
-    let values = try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
+    let values = try FileIO.perform(.inspect, paths: [root]) {
+      try root.foundationURL.resourceValues(forKeys: [.isDirectoryKey])
+    }
     guard values.isDirectory == true else {
       throw FileSystemFailure.notADirectory(root)
     }
@@ -102,7 +104,9 @@ enum SafePath {
     let base = try NativePath.from(root.foundationURL.standardizedFileURL)
     for case let file as URL in iterator {
       try Cancellation.check()
-      let values = try file.resourceValues(forKeys: Set(keys))
+      let values = try FileIO.perform(.inspect, paths: [NativePath.from(file)]) {
+        try file.resourceValues(forKeys: Set(keys))
+      }
       if values.isSymbolicLink == true {
         throw FileSystemFailure.symbolicLinkNotAllowed(FilePath(file.path))
       }
@@ -116,7 +120,10 @@ enum SafePath {
         result.append(try RelativePath(path))
       }
     }
-    if let enumerationError { throw enumerationError }
+    if let enumerationError {
+      throw FileSystemFailure.operationFailed(
+        FileOperationFailure(operation: .enumerate, paths: [root], error: enumerationError))
+    }
     return result.sorted()
   }
 }

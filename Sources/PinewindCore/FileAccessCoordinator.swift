@@ -74,7 +74,11 @@ enum FileAccessCoordinator {
               return
             }
             if let error {
-              continuation.resume(throwing: PinewindError.wrap(error))
+              continuation.resume(
+                throwing: FileSystemFailure.operationFailed(
+                  FileOperationFailure(
+                    operation: .coordinate,
+                    paths: requests.compactMap { try? NativePath.from($0.url) }, error: error)))
               return
             }
             do {
@@ -83,7 +87,7 @@ enum FileAccessCoordinator {
                 return try accessor(intents.map(\.url))
               }
               continuation.resume(returning: value)
-            } catch { continuation.resume(throwing: PinewindError.wrap(error)) }
+            } catch { continuation.resume(throwing: error) }
           }
         }
       } onCancel: {

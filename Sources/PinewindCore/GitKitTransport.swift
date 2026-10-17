@@ -274,7 +274,7 @@ struct GitKitTransport: GitTransport {
     }
   }
 
-  private func check(_ status: Int32, repository: URL) throws {
+  private func check(_ status: Int32, repository: URL, operation: String = #function) throws {
     try Cancellation.check()
     guard status >= 0 else {
       let message =
@@ -284,7 +284,9 @@ struct GitKitTransport: GitTransport {
         throw PinewindError.runtime(.git(.authenticationRequired(repository)))
       }
       throw PinewindError.runtime(
-        .git(.operationFailed(repository: repository, status: status, detail: message)))
+        .git(
+          .operationFailed(
+            repository: repository, operation: operation, status: status, detail: message)))
     }
   }
 }

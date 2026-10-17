@@ -54,17 +54,19 @@ struct ResourceStore: Sendable {
   }
   func ensure(_ pin: PinnedResource, network: Bool) async throws {
     let cached = path(pin)
-    if FileManager.default.fileExists(atPath: cached.string),
-      try await BlockingIO.run({ try SnapshotFiles.sha256(cached) }) == pin.sha256
-    {
-      return
-    }
-    guard network else {
-      throw PinewindError.runtime(.cache(.contentMissing(pin.url)))
+    if FileManager.default.fileExists(atPath: cached.string) {
+      let actual = try await BlockingIO.run { try SnapshotFiles.sha256(cached) }
+      if actual == pin.sha256 { return }
+      if !network {
+        throw CacheFailure.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual)
+      }
+    } else if !network {
+      throw CacheFailure.contentMissing(pin.url)
     }
     let actual = try await self.pin(pin.url, target: pin.path)
     guard actual.sha256 == pin.sha256 else {
-      throw PinewindError.runtime(.cache(.checksumMismatch(pin.url)))
+      throw PinewindError.runtime(
+        .cache(.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual.sha256)))
     }
   }
 }

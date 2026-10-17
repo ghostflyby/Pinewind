@@ -158,7 +158,8 @@ struct CompositionPlanner: Sendable {
           let file = try snapshot.capture(SafePath.file(download.path, in: prepared.directory))
           let hash = try SnapshotFiles.sha256(file)
           guard hash == pinned.sha256 else {
-            throw CacheFailure.checksumMismatch(download.url)
+            throw CacheFailure.checksumMismatch(
+              url: download.url, expected: pinned.sha256, actual: hash)
           }
         }
         var selected: [(RelativePath, FilePath)] = []

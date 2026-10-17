@@ -75,8 +75,8 @@ public actor Workspace {
   /// Guarantees that everything surfacing from the pipeline is a `PinewindError`
   /// while cancellation keeps its own type.
   private func pipeline<T>(_ body: () async throws -> T) async throws -> T {
-    do { return try await body() } catch let error as CancellationError { throw error } catch {
-      throw PinewindError.embed(error)
+    do { return try await body() } catch {
+      throw ErrorBoundary.normalize(error)
     }
   }
   public func configuration() async throws -> ConfigurationSession {
@@ -176,7 +176,8 @@ public actor Workspace {
       } else if case .commit(let commit) = repository.revision {
         identity = try SourceIdentity(url: repository.url, commit: commit)
       } else {
-        identity = try await services.repositories.resolve(repository)
+        identity = try await resolveRepository(
+          repository, snapshot: snapshot, attribution: .configuration)
       }
       try validate(identity, against: repository)
       identities[repository.key] = identity
@@ -322,7 +323,8 @@ public actor Workspace {
             } else if case .commit(let pin) = repository.revision {
               identity = try SourceIdentity(url: repository.url, commit: pin)
             } else {
-              identity = try await services.repositories.resolve(repository)
+              identity = try await resolveRepository(
+                repository, snapshot: resolution.snapshot, attribution: .incident)
             }
           }
           try validate(identity, against: repository)
@@ -400,8 +402,10 @@ public actor Workspace {
         try FileManager.default.copyItem(at: package.directory, to: destination)
         for pin in package.resources {
           let resource = cache.appending("resources/" + pin.sha256)
-          guard try SnapshotFiles.sha256(resource) == pin.sha256 else {
-            throw PinewindError.runtime(.cache(.checksumMismatch(pin.url)))
+          let actual = try SnapshotFiles.sha256(resource)
+          guard actual == pin.sha256 else {
+            throw PinewindError.runtime(
+              .cache(.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual)))
           }
           let file = try SafePath.file(pin.path, in: destination)
           try FileManager.default.createDirectory(
@@ -549,6 +553,17 @@ public actor Workspace {
     }
     return try SourceSnapshot(identity: identity, directory: target)
   }
+  private func resolveRepository(
+    _ request: RepositoryRequest, snapshot: ConfigurationSnapshot, attribution: DocumentAttribution
+  ) async throws -> SourceIdentity {
+    do { return try await services.repositories.resolve(request) } catch {
+      guard snapshot.baseline.shared != nil,
+        let context = try? DocumentContext(path: snapshot.locations.configuration.manifest.filePath)
+      else { throw ErrorBoundary.normalize(error) }
+      throw ErrorBoundary.attribute(error, to: context, as: attribution)
+    }
+  }
+
   private func readRecipe(_ request: PackageRequest, directory: FilePath) async throws -> Recipe? {
     try await store.coordinator.coordinate([
       FileAccessRequest(url: directory.foundationURL, intent: .read)
@@ -618,7 +633,7 @@ public actor Workspace {
         packages: descriptors.map(PlumImporter.package),
         resources: pins)
     } catch {
-      throw PinewindError.wrap(error)
+      throw ErrorBoundary.normalize(error)
     }
   }
   private func selected(_ id: PackageID, in selection: UpdateSelection?) -> Bool {

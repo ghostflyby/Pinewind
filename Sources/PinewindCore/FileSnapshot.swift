@@ -28,22 +28,25 @@ enum SnapshotFiles {
   static func byteCount(_ file: FilePath) throws(FileSystemFailure) -> UInt64 {
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
-      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+      throw FileSystemFailure.operationFailed(
+        FileOperationFailure(operation: .open, paths: [file], error: error))
     }
     do {
       return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
     } catch {
-      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+      throw FileSystemFailure.operationFailed(
+        FileOperationFailure(operation: .inspect, paths: [file], error: error))
     }
   }
 
-  static func sha256(_ file: FilePath) throws(FileSystemFailure) -> String {
+  static func sha256(_ file: FilePath) throws -> String {
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
-      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
+      throw FileSystemFailure.operationFailed(
+        FileOperationFailure(operation: .open, paths: [file], error: error))
     }
-    do {
-      return try descriptor.closeAfter {
+    return try FileIO.perform(.read, paths: [file]) {
+      try descriptor.closeAfter {
         var hash = SHA256()
         var buffer = Data(count: chunkSize)
         while true {
@@ -55,30 +58,34 @@ enum SnapshotFiles {
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
       }
-    } catch {
-      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
     }
   }
 
   static func sameContents(_ first: FilePath, _ second: FilePath) throws -> Bool {
-    let left = try FileDescriptor.open(first, .readOnly)
-    return try left.closeAfter {
-      let right = try FileDescriptor.open(second, .readOnly)
-      return try right.closeAfter {
-        guard try left.seek(offset: 0, from: .end) == right.seek(offset: 0, from: .end) else {
-          return false
+    let left = try FileIO.perform(.open, paths: [first]) {
+      try FileDescriptor.open(first, .readOnly)
+    }
+    return try FileIO.perform(.read, paths: [first, second]) {
+      try left.closeAfter {
+        let right = try FileIO.perform(.open, paths: [second]) {
+          try FileDescriptor.open(second, .readOnly)
         }
-        _ = try left.seek(offset: 0, from: .start)
-        _ = try right.seek(offset: 0, from: .start)
-        var a = Data(count: chunkSize)
-        var b = Data(count: chunkSize)
-        while true {
-          let leftCount = try readChunk(left, into: &a)
-          let rightCount = try readChunk(right, into: &b)
-          guard leftCount == rightCount, a.prefix(leftCount) == b.prefix(rightCount) else {
+        return try right.closeAfter {
+          guard try left.seek(offset: 0, from: .end) == right.seek(offset: 0, from: .end) else {
             return false
           }
-          if leftCount == 0 { return true }
+          _ = try left.seek(offset: 0, from: .start)
+          _ = try right.seek(offset: 0, from: .start)
+          var a = Data(count: chunkSize)
+          var b = Data(count: chunkSize)
+          while true {
+            let leftCount = try readChunk(left, into: &a)
+            let rightCount = try readChunk(right, into: &b)
+            guard leftCount == rightCount, a.prefix(leftCount) == b.prefix(rightCount) else {
+              return false
+            }
+            if leftCount == 0 { return true }
+          }
         }
       }
     }

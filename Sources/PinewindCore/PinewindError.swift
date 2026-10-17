@@ -28,73 +28,59 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
     }
   }
 
-  /// Attributes an unanchored fact to a document. Facts already carrying a
-  /// document verdict or an incident anchor pass through unchanged.
-  public func promoted(_ context: DocumentContext) -> PinewindError {
-    if case .runtime(let failure) = self {
-      return .configuration(DocumentError(context: context, failure: failure))
+  /// Attaches a document without changing an existing primary attribution.
+  /// Machine failures can be observed in a document, but cannot indict it.
+  public func attributed(to context: DocumentContext, as attribution: DocumentAttribution)
+    -> PinewindError
+  {
+    guard case .runtime(let failure) = self else { return self }
+    if case .defect = failure { return self }
+    let document = DocumentError(context: context, failure: failure)
+    if attribution == .configuration, failure.allowsConfiguration {
+      return .configuration(document)
     }
-    return self
+    return .incident(document)
   }
 
-  /// Converts anything surfacing from the pipeline into a `PinewindError`.
-  /// Cancellation is not embeddable and must be rethrown before this call.
-  static func embed(_ error: any Error) -> PinewindError {
-    switch error {
-    case let pinned as PinewindError: return pinned
-    case let failure as Failure: return .runtime(failure)
-    default:
-      return .runtime(.defect(.wrapped(detail: String(describing: error), origin: Origin())))
+  /// Adds an enclosing import/include frame; the primary location stays intact.
+  public func addingDerivation(_ frame: DocumentContext) -> PinewindError {
+    func adding(to error: DocumentError) -> DocumentError {
+      var context = error.context
+      var anchor = frame
+      anchor.derivation = []
+      context.derivation = frame.derivation + [anchor] + context.derivation
+      return DocumentError(context: context, failure: error.failure)
+    }
+    switch self {
+    case .configuration(let error): return .configuration(adding(to: error))
+    case .incident(let error): return .incident(adding(to: error))
+    case .runtime: return self
     }
   }
+}
 
-  /// Preserves cancellation and already-typed failures; wraps everything else
-  /// as a boundary defect. The origin captures the wrapping site.
-  static func wrap(_ error: any Error, origin: Origin = Origin()) -> any Error {
-    if error is CancellationError || error is PinewindError { return error }
-    if let failure = error as? Failure { return PinewindError.runtime(failure) }
-    switch error {
-    case is GitFailure: return PinewindError.runtime(.git(error as! GitFailure))
-    case is FileSystemFailure: return PinewindError.runtime(.file(error as! FileSystemFailure))
-    case is NetworkFailure: return PinewindError.runtime(.network(error as! NetworkFailure))
-    case is InterpreterFailure:
-      return PinewindError.runtime(.interpreter(error as! InterpreterFailure))
-    case is DeclarationFailure:
-      return PinewindError.runtime(.declaration(error as! DeclarationFailure))
-    case is LockFailure: return PinewindError.runtime(.lock(error as! LockFailure))
-    case is StateFailure: return PinewindError.runtime(.state(error as! StateFailure))
-    case is CacheFailure: return PinewindError.runtime(.cache(error as! CacheFailure))
-    case is Defect: return PinewindError.runtime(.defect(error as! Defect))
-    default: break
-    }
+public enum DocumentAttribution: Sendable { case configuration, incident }
+
+/// Mechanical boxing only. Foreign errors must be translated where the operation is known.
+enum ErrorBoundary {
+  static func normalize(
+    _ error: any Error, fileID: String = #fileID, line: UInt = #line
+  ) -> any Error {
+    if error is CancellationError { return error }
+    if let error = error as? PinewindError { return error }
+    if let failure = Failure.recognizing(error) { return PinewindError.runtime(failure) }
     return PinewindError.runtime(
-      .defect(.wrapped(detail: String(describing: error), origin: origin)))
+      .defect(.wrapped(detail: String(describing: error), origin: Origin(file: fileID, line: line)))
+    )
   }
 
-  /// Relays mixed-surface work to an attributed caller: typed failures pass
-  /// through unchanged, facts become runtime failures, anything foreign becomes
-  /// a boundary defect. Synchronous parse and encode work only — no cancellation.
-  static func relay<T>(_ body: () throws -> T) throws(PinewindError) -> T {
-    do { return try body() } catch let pinned as PinewindError { throw pinned } catch let failure
-      as Failure
-    { throw PinewindError.runtime(failure) } catch let failure as GitFailure {
-      throw PinewindError.runtime(.git(failure))
-    } catch let failure as FileSystemFailure {
-      throw PinewindError.runtime(.file(failure))
-    } catch let failure as NetworkFailure {
-      throw PinewindError.runtime(.network(failure))
-    } catch let failure as InterpreterFailure {
-      throw PinewindError.runtime(.interpreter(failure))
-    } catch let failure as DeclarationFailure {
-      throw PinewindError.runtime(.declaration(failure))
-    } catch let failure as LockFailure { throw PinewindError.runtime(.lock(failure)) } catch let
-      failure as StateFailure
-    { throw PinewindError.runtime(.state(failure)) } catch let failure as CacheFailure {
-      throw PinewindError.runtime(.cache(failure))
-    } catch let failure as Defect { throw PinewindError.runtime(.defect(failure)) } catch {
-      throw PinewindError.runtime(
-        .defect(.wrapped(detail: String(describing: error), origin: Origin())))
-    }
+  static func attribute(
+    _ error: any Error, to context: DocumentContext, as attribution: DocumentAttribution,
+    fileID: String = #fileID, line: UInt = #line
+  ) -> any Error {
+    let normalized = normalize(error, fileID: fileID, line: line)
+    guard let failure = normalized as? PinewindError else { return normalized }
+    return failure.attributed(to: context, as: attribution)
   }
 }
 
@@ -139,7 +125,7 @@ public struct DocumentContext: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-/// A position inside a document, in editor convention.
+/// A position inside a document: one-based lines and UTF-16 columns.
 public struct Placement: Sendable, Hashable, CustomStringConvertible {
   public var line: Int
   public var column: Int
@@ -208,7 +194,7 @@ public enum GitFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case defaultBranchIndeterminate(URL)
   case authenticationRequired(URL)
   case commitUnavailable(commit: String, repository: URL)
-  case operationFailed(repository: URL, status: Int32, detail: String)
+  case operationFailed(repository: URL, operation: String, status: Int32, detail: String)
   case unsupportedSourceURL(URL)
   case malformedRepositoryURL(URL)
   case treeEntryInvalid(TreeEntry)
@@ -223,8 +209,8 @@ public enum GitFailure: Error, Sendable, Hashable, CustomStringConvertible {
     case .authenticationRequired(let url): return "authentication required: \(url.absoluteString)"
     case .commitUnavailable(let commit, let repository):
       return "locked commit \(commit) is unavailable: \(repository.absoluteString)"
-    case .operationFailed(let repository, let status, let detail):
-      return "Git operation failed (\(status)) on \(repository.absoluteString): \(detail)"
+    case .operationFailed(let repository, let operation, let status, let detail):
+      return "Git \(operation) failed (\(status)) on \(repository.absoluteString): \(detail)"
     case .unsupportedSourceURL(let url):
       return "Git sources require an HTTPS repository URL: \(url.absoluteString)"
     case .malformedRepositoryURL(let url): return "malformed repository URL: \(url.absoluteString)"
@@ -255,6 +241,7 @@ public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertibl
   case notRegularFile(FilePath)
   case notADirectory(FilePath)
   case symbolicLinkNotAllowed(FilePath)
+  case operationFailed(FileOperationFailure)
   case unreadable(path: FilePath, detail: String)
   case unwritable(path: FilePath, detail: String)
   case unresolvable(FilePath)
@@ -281,6 +268,7 @@ public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertibl
     case .notADirectory(let path): return "not a directory: \(path.string)"
     case .symbolicLinkNotAllowed(let path):
       return "symbolic links are not supported: \(path.string)"
+    case .operationFailed(let failure): return failure.description
     case .unreadable(let path, let detail): return "cannot read \(path.string): \(detail)"
     case .unwritable(let path, let detail): return "cannot write \(path.string): \(detail)"
     case .unresolvable(let path): return "cannot resolve filesystem path: \(path.string)"
@@ -314,7 +302,7 @@ public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertibl
 
 public enum NetworkFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case rejected(status: Int, url: URL)
-  case transportFailed(url: URL, detail: String)
+  case transportFailed(url: URL, reason: TransportFailureReason, detail: String)
   case insecureScheme(URL)
   case sizeLimitExceeded(url: URL, maximumBytes: Int)
 
@@ -322,12 +310,33 @@ public enum NetworkFailure: Error, Sendable, Hashable, CustomStringConvertible {
     switch self {
     case .rejected(let status, let url):
       return "download returned HTTP \(status): \(url.absoluteString)"
-    case .transportFailed(let url, let detail):
+    case .transportFailed(let url, _, let detail):
       return "download transport failed: \(url.absoluteString): \(detail)"
     case .insecureScheme(let url): return "download did not return HTTPS: \(url.absoluteString)"
     case .sizeLimitExceeded(let url, let maximumBytes):
       return
         "download exceeds the resource size limit (\(maximumBytes) bytes): \(url.absoluteString)"
+    }
+  }
+}
+
+public enum TransportFailureReason: Sendable, Hashable {
+  case timedOut
+  case connection
+  case nameResolution
+  case tls
+  case other(SystemErrorCode)
+
+  init(_ error: any Error) {
+    switch (error as? URLError)?.code {
+    case .timedOut: self = .timedOut
+    case .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet: self = .connection
+    case .cannotFindHost, .dnsLookupFailed: self = .nameResolution
+    case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+      .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+      .clientCertificateRejected, .clientCertificateRequired:
+      self = .tls
+    default: self = .other(SystemErrorCode(error))
     }
   }
 }
@@ -398,7 +407,6 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
   case orderIndexOutOfBounds
   case undeclaredOption(String)
   case optionValueMissing(String)
-  case invalidTemplateRange
   case invalidChecksum(String)
   case preparedCommitMissing
   case preparedCommitMismatch(requested: String, prepared: String)
@@ -444,7 +452,6 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
     case .undeclaredOption(let name):
       return "recipe option '\(name)' is not declared in recipe args"
     case .optionValueMissing(let name): return "recipe option '\(name)' has no value"
-    case .invalidTemplateRange: return "invalid template replacement range"
     case .invalidChecksum(let value): return "checksum must be a complete SHA-256 digest: \(value)"
     case .preparedCommitMissing: return "remote prepared source requires a commit"
     case .preparedCommitMismatch(let requested, let prepared):
@@ -498,14 +505,15 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
 public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
   case contentMissing(URL)
-  case checksumMismatch(URL)
+  case checksumMismatch(url: URL, expected: String, actual: String)
 
   public var description: String {
     switch self {
     case .contentMissing(let url):
       return "locked resource is absent from cache: \(url.absoluteString)"
-    case .checksumMismatch(let url):
-      return "cached resource checksum mismatch: \(url.absoluteString)"
+    case .checksumMismatch(let url, let expected, let actual):
+      return
+        "resource checksum mismatch: \(url.absoluteString) (expected \(expected), actual \(actual))"
     }
   }
 }
@@ -522,6 +530,62 @@ public enum Defect: Error, Sendable, Hashable, CustomStringConvertible {
       return "internal invariant violated at \(origin.description): \(detail)"
     case .wrapped(let detail, let origin):
       return "unhandled failure at \(origin.description): \(detail)"
+    }
+  }
+}
+
+extension Failure {
+  static func recognizing(_ error: any Error) -> Failure? {
+    switch error {
+    case let error as Failure: return error
+    case let error as GitFailure: return .git(error)
+    case let error as FileSystemFailure: return .file(error)
+    case let error as NetworkFailure: return .network(error)
+    case let error as InterpreterFailure: return .interpreter(error)
+    case let error as DeclarationFailure: return .declaration(error)
+    case let error as LockFailure: return .lock(error)
+    case let error as StateFailure: return .state(error)
+    case let error as CacheFailure: return .cache(error)
+    case let error as Defect: return .defect(error)
+    default: return nil
+    }
+  }
+
+  /// Eligibility for a verdict, never an instruction to assign one automatically.
+  var allowsConfiguration: Bool {
+    switch self {
+    case .declaration: return true
+    case .git(let failure):
+      switch failure {
+      case .authenticationRequired, .operationFailed: return false
+      case .referenceNotFound, .ambiguousReference, .defaultBranchIndeterminate,
+        .commitUnavailable, .unsupportedSourceURL, .malformedRepositoryURL, .treeEntryInvalid:
+        return true
+      }
+    case .file(let failure):
+      switch failure {
+      case .notFound, .notRegularFile, .notADirectory, .symbolicLinkNotAllowed,
+        .escapesRoot, .undecodableText, .notPortable, .unsafeRelative, .notAbsoluteFileURL,
+        .unrepresentableFileURL, .nonLocalFileURL, .ambiguousForm, .isFilesystemRoot,
+        .overlappingPaths, .duplicatePath:
+        return true
+      case .unreadable, .unwritable, .unresolvable, .enumerationFailed, .exchangeFailed,
+        .publicationFailed, .lockFailed, .operationFailed:
+        return false
+      }
+    case .interpreter(let failure):
+      switch failure {
+      case .timedOut: return false
+      case .evaluationFailed, .budgetExceeded, .forbiddenOperation,
+        .enumerationUnsupported, .unknownBuiltIn:
+        return true
+      }
+    case .lock(let failure):
+      switch failure {
+      case .malformed, .incompatible, .declarationChanged, .importUnresolved: return true
+      case .resolveRequired: return false
+      }
+    case .network, .state, .cache, .defect: return false
     }
   }
 }

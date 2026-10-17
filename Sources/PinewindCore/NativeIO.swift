@@ -40,7 +40,7 @@ enum BlockingIO {
               return try operation()
             }
             continuation.resume(returning: value)
-          } catch { continuation.resume(throwing: PinewindError.wrap(error)) }
+          } catch { continuation.resume(throwing: error) }
         }
       }
     } onCancel: {
@@ -56,22 +56,15 @@ enum NativeLock {
   ) throws -> T {
     try FileManager.default.createDirectory(
       at: file.removingLastComponent(), withIntermediateDirectories: true)
-    let descriptor: FileDescriptor
-    do { descriptor = try FileDescriptor.openLockFile(file) } catch {
-      throw FileSystemFailure.unreadable(path: file, detail: String(describing: error))
-    }
+    let descriptor = try FileDescriptor.openLockFile(file)
     // A close error must not turn a completed publication into a reported failure.
     defer { try? descriptor.close() }
-    do {
-      while true {
-        try Cancellation.check()
-        if try descriptor.tryLockExclusively() { break }
-        onContention?()
-        try Cancellation.check()
-        Thread.sleep(forTimeInterval: 0.02)
-      }
-    } catch {
-      throw PinewindError.wrap(error)
+    while true {
+      try Cancellation.check()
+      if try descriptor.tryLockExclusively() { break }
+      onContention?()
+      try Cancellation.check()
+      Thread.sleep(forTimeInterval: 0.02)
     }
     try Cancellation.check()
     return try body()

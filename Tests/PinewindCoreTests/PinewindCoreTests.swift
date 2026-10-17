@@ -302,7 +302,7 @@ struct CompositionTests {
         try Template.expand("${value:-default}", options: options, declared: ["value"]) == "default"
       )
     }
-    #expect(throws: DeclarationFailure.self) {
+    #expect(throws: Failure.declaration(.optionValueMissing("value"))) {
       try Template.expand("${value}", options: [:], declared: ["value"])
     }
   }
@@ -613,7 +613,7 @@ struct CompositionTests {
     defer { f.remove() }
     try f.write("default.yaml", "value: true", in: f.input)
     let plan = try f.plan([.userFiles(FileFilter())])
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: FileSystemFailure.self) {
       try await Composer().compose(
         plan, inputRoot: f.input, outputRoot: f.input.appendingPathComponent("out"))
     }

@@ -184,34 +184,50 @@ extension FileManager {
     at path: FilePath, withIntermediateDirectories intermediates: Bool,
     attributes: [FileAttributeKey: Any]? = nil
   ) throws {
-    try createDirectory(
-      at: path.foundationURL, withIntermediateDirectories: intermediates, attributes: attributes)
+    try FileIO.perform(.createDirectory, paths: [path]) {
+      try createDirectory(
+        at: path.foundationURL, withIntermediateDirectories: intermediates, attributes: attributes)
+    }
   }
   func copyItem(at source: FilePath, to destination: FilePath) throws {
     try Cancellation.check()
-    try copyItem(at: source.foundationURL, to: destination.foundationURL)
+    try FileIO.perform(.copy, paths: [source, destination]) {
+      try copyItem(at: source.foundationURL, to: destination.foundationURL)
+    }
     try Cancellation.check()
   }
   func moveItem(at source: FilePath, to destination: FilePath) throws {
-    try moveItem(at: source.foundationURL, to: destination.foundationURL)
+    try FileIO.perform(.move, paths: [source, destination]) {
+      try moveItem(at: source.foundationURL, to: destination.foundationURL)
+    }
   }
-  func removeItem(at path: FilePath) throws { try removeItem(at: path.foundationURL) }
+  func removeItem(at path: FilePath) throws {
+    try FileIO.perform(.remove, paths: [path]) { try removeItem(at: path.foundationURL) }
+  }
   func contentsOfDirectory(at path: FilePath, includingPropertiesForKeys keys: [URLResourceKey]?)
     throws -> [FilePath]
   {
-    try contentsOfDirectory(at: path.foundationURL, includingPropertiesForKeys: keys).map {
-      try NativePath.from($0)
+    try FileIO.perform(.enumerate, paths: [path]) {
+      try contentsOfDirectory(at: path.foundationURL, includingPropertiesForKeys: keys).map {
+        try NativePath.from($0)
+      }
     }
   }
 }
 extension Data {
-  init(contentsOf path: FilePath) throws { try self.init(contentsOf: path.foundationURL) }
+  init(contentsOf path: FilePath) throws {
+    self = try FileIO.perform(.read, paths: [path]) { try Data(contentsOf: path.foundationURL) }
+  }
   func write(to path: FilePath, options: WritingOptions = []) throws {
-    try write(to: path.foundationURL, options: options)
+    try FileIO.perform(.write, paths: [path]) {
+      try write(to: path.foundationURL, options: options)
+    }
   }
 }
 extension String {
   init(contentsOf path: FilePath, encoding: Encoding) throws {
-    try self.init(contentsOf: path.foundationURL, encoding: encoding)
+    self = try FileIO.perform(.read, paths: [path]) {
+      try String(contentsOf: path.foundationURL, encoding: encoding)
+    }
   }
 }

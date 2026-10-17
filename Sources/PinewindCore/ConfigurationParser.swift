@@ -12,11 +12,29 @@ import Yams
 /// duplicate fields, null clears, and source positions are part of the contract.
 struct YAMLReader {
   let source: String
+  var text: String? = nil
+
+  private func placement(_ mark: Mark, in text: String?) -> Placement {
+    // Yams columns count Unicode scalars. Editor columns here count UTF-16 code units, from 1.
+    let lines = text?.split(separator: "\n", omittingEmptySubsequences: false)
+    if let lines, !lines.isEmpty, mark.line > lines.count {
+      // libYAML may report a synthetic newline at EOF when the source has no final newline.
+      return Placement(line: lines.count, column: lines[lines.count - 1].utf16.count + 1)
+    }
+    let column: Int
+    if let lines, lines.indices.contains(mark.line - 1) {
+      column =
+        String(String(lines[mark.line - 1]).unicodeScalars.prefix(mark.column - 1)).utf16.count + 1
+    } else {
+      column = mark.column
+    }
+    return Placement(line: mark.line, column: column)
+  }
 
   /// The decoded document's identity, positioned at the node when one is available.
   func context(at node: Node? = nil) -> DocumentContext {
     let path = FilePath(source)
-    let placement = node?.mark.map { Placement(line: $0.line, column: $0.column) }
+    let placement = node?.mark.map { placement($0, in: text) }
     let url = (try? path.foundationURL) ?? URL(fileURLWithPath: source)
     return DocumentContext(path: path, url: url, placement: placement)
   }
@@ -31,17 +49,30 @@ struct YAMLReader {
     fail(.declaration(.syntaxError(detail: detail)), at: node)
   }
 
-  func document(_ yaml: String) throws(PinewindError) -> Node {
+  func document(_ yaml: String) throws -> Node {
     do {
-      let documents = Array(try compose_all(yaml: yaml))
-      guard documents.count == 1 else { throw error("expected exactly one YAML document") }
-      return documents[0]
-    } catch let error as PinewindError { throw error } catch {
-      throw self.error(String(describing: error))
+      guard let document = try compose(yaml: yaml) else {
+        throw error("expected exactly one YAML document")
+      }
+      return document
+    } catch let error as YamlError {
+      let mark: Mark?
+      switch error {
+      case .scanner(_, _, let value, _), .parser(_, _, let value, _), .composer(_, _, let value, _):
+        mark = value
+      case .duplicatedKeysInMapping(_, let context): mark = context.mark
+      case .reader: mark = nil
+      default: throw ErrorBoundary.normalize(error)
+      }
+      var context = context()
+      context.placement = mark.map { placement($0, in: yaml) }
+      throw PinewindError.configuration(
+        DocumentError(
+          context: context, failure: .declaration(.syntaxError(detail: String(describing: error)))))
     }
   }
 
-  func mapping(_ node: Node, allowed: Set<String>? = nil) throws(PinewindError) -> [String: Node] {
+  func mapping(_ node: Node, allowed: Set<String>? = nil) throws -> [String: Node] {
     guard let mapping = node.mapping else { throw error("expected a mapping", at: node) }
     var fields: [String: Node] = [:]
     for (keyNode, value) in mapping {
@@ -53,44 +84,42 @@ struct YAMLReader {
     return fields
   }
 
-  func string(_ node: Node) throws(PinewindError) -> String {
+  func string(_ node: Node) throws -> String {
     guard node.tag == Tag(.str), let string = node.scalar?.string else {
       throw error("expected a string; quote numeric or boolean-looking values", at: node)
     }
     return string
   }
 
-  func strings(_ node: Node) throws(PinewindError) -> [String] {
+  func strings(_ node: Node) throws -> [String] {
     guard let sequence = node.sequence else { throw error("expected a sequence", at: node) }
     return try sequence.map(string)
   }
 
-  func stringMap(_ node: Node) throws(PinewindError) -> [String: String] {
+  func stringMap(_ node: Node) throws -> [String: String] {
     try mapping(node).mapValues(string)
   }
 
-  func relativePath(_ text: String) throws(PinewindError) -> RelativePath {
+  func relativePath(_ text: String) throws -> RelativePath {
     guard !text.contains("\0"), !text.contains("\\") else {
       throw fail(.file(.notPortable(FilePath(text))))
     }
-    return try PinewindError.relay { try RelativePath(FilePath(text)) }
+    do { return try RelativePath(FilePath(text)) } catch { throw fail(.file(error)) }
   }
 
-  func version(_ fields: [String: Node]) throws(PinewindError) {
+  func version(_ fields: [String: Node]) throws {
     guard let node = fields["version"], node.tag == Tag(.int), node.int == 1 else {
       throw error("version is required and must be integer 1", at: fields["version"])
     }
   }
 
-  func filter(_ fields: [String: Node]) throws(PinewindError) -> FileFilter {
-    let include = try PinewindError.relay {
-      try fields["include"].flatMap { $0.tag == Tag(.null) ? nil : try strings($0) }
-    }
-    let exclude = try PinewindError.relay {
-      try fields["exclude"].map { $0.tag == Tag(.null) ? [] : try strings($0) } ?? []
-    }
+  func filter(_ fields: [String: Node]) throws -> FileFilter {
+    let include = try fields["include"].flatMap { $0.tag == Tag(.null) ? nil : try strings($0) }
+    let exclude = try fields["exclude"].map { $0.tag == Tag(.null) ? [] : try strings($0) } ?? []
     let filter = FileFilter(include: include, exclude: exclude)
-    try PinewindError.relay { try filter.validate() }
+    do { try filter.validate() } catch {
+      throw fail(.declaration(error), at: fields["include"] ?? fields["exclude"])
+    }
     return filter
   }
 }
@@ -107,7 +136,7 @@ enum ConfigurationParser {
   }
 
   // Both editable documents and effective manifests use the same authored selector grammar.
-  static func decodeOrderEntry(_ node: Node, reader: YAMLReader) throws(PinewindError)
+  static func decodeOrderEntry(_ node: Node, reader: YAMLReader) throws
     -> DecodedOrderEntry
   {
     if node.tag == Tag(.str) {
@@ -134,11 +163,9 @@ enum ConfigurationParser {
         throw reader.error("conf imports only accept import and variables", at: node)
       }
       return .importConf(
-        try PinewindError.relay {
-          try ConfImport(
-            source: reader.string(value),
-            variables: fields["variables"].map(reader.stringMap) ?? [:])
-        })
+        try ConfImport(
+          source: reader.string(value),
+          variables: fields["variables"].map(reader.stringMap) ?? [:]))
     default:
       guard fields["variables"] == nil else {
         throw reader.error("variables is only valid on imports", at: node)
@@ -168,45 +195,38 @@ enum ConfigurationEvaluator {
     result.exclude = choose(updates.exclude, result.exclude)
     return result
   }
-  static func request(_ fields: PackageFields) throws(PinewindError) -> PackageRequest {
-    guard let url = fields.url.value else {
-      throw PinewindError.runtime(.declaration(.inlineURLRequired))
-    }
-    return try PinewindError.relay {
-      try PackageRequest(
-        url: url, revision: fields.revision.value, recipe: fields.recipe.value,
-        options: fields.options.value ?? [:],
-        filter: FileFilter(include: fields.include.value, exclude: fields.exclude.value ?? []))
-    }
+  static func request(_ fields: PackageFields) throws(Failure) -> PackageRequest {
+    guard let url = fields.url.value else { throw .declaration(.inlineURLRequired) }
+    return try PackageRequest(
+      url: url, revision: fields.revision.value, recipe: fields.recipe.value,
+      options: fields.options.value ?? [:],
+      filter: FileFilter(include: fields.include.value, exclude: fields.exclude.value ?? []))
   }
+
+  private static func validate(_ name: String, fields: PackageFields) throws(DeclarationFailure) {
+    guard name != "self" else { throw .reservedName("self") }
+    try fields.validate()
+  }
+
   static func diagnostics(
     _ document: ManifestDocument, local: LocalOverridesDocument?,
     sharedContext: DocumentContext? = nil, localContext: DocumentContext? = nil
   ) -> [PinewindError] {
     var result: [PinewindError] = []
     var names = document.names
-    func append(_ error: Error, anchoredBy context: DocumentContext?) {
-      let typed =
-        error as? PinewindError
-        ?? PinewindError.runtime(
-          .defect(.wrapped(detail: String(describing: error), origin: Origin())))
-      result.append(context.map { typed.promoted($0) } ?? typed)
+    func append(_ failure: Failure, anchoredBy context: DocumentContext?) {
+      let error = PinewindError.runtime(failure)
+      result.append(context.map { error.attributed(to: $0, as: .configuration) } ?? error)
     }
     for (name, fields) in document.names.sorted(by: { $0.key < $1.key }) {
-      do {
-        guard name != "self" else {
-          throw PinewindError.runtime(.declaration(.reservedName("self")))
-        }
-        try PinewindError.relay { try fields.validate() }
-      } catch { append(error, anchoredBy: sharedContext) }
+      do { try validate(name, fields: fields) } catch {
+        append(.declaration(error), anchoredBy: sharedContext)
+      }
     }
     for (name, fields) in (local?.names ?? [:]).sorted(by: { $0.key < $1.key }) {
-      do {
-        guard name != "self" else {
-          throw PinewindError.runtime(.declaration(.reservedName("self")))
-        }
-        try PinewindError.relay { try fields.validate() }
-      } catch { append(error, anchoredBy: localContext ?? sharedContext) }
+      do { try validate(name, fields: fields) } catch {
+        append(.declaration(error), anchoredBy: localContext ?? sharedContext)
+      }
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
     for entry in document.order {
@@ -217,34 +237,29 @@ enum ConfigurationEvaluator {
     }
     return result
   }
-  static func evaluate(_ document: ManifestDocument, local: LocalOverridesDocument?)
-    throws(PinewindError)
+
+  static func evaluate(_ document: ManifestDocument, local: LocalOverridesDocument?) throws(Failure)
     -> Manifest
   {
     var names = document.names
     for (name, fields) in names {
-      guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
-      try PinewindError.relay { try fields.validate() }
+      do { try validate(name, fields: fields) } catch { throw .declaration(error) }
     }
     for (name, fields) in local?.names ?? [:] {
-      guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
-      try PinewindError.relay { try fields.validate() }
+      do { try validate(name, fields: fields) } catch { throw .declaration(error) }
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
-    let entries = try PinewindError.relay {
-      try document.order.enumerated().map { index, entry -> ManifestEntry in
-        switch entry {
-        case .userFiles(let filter):
-          try PinewindError.relay { try filter.validate() }
-          return .userFiles(filter)
-        case .importConf(let request): return .importConf(request)
-        case .package(let fields): return .package(try request(fields))
-        case .named(let name, let fields):
-          guard let definition = names[name] else {
-            throw PinewindError.runtime(.declaration(.unknownName(name)))
-          }
-          return .package(try request(merge(fields, into: definition)))
-        }
+    var entries: [ManifestEntry] = []
+    for entry in document.order {
+      switch entry {
+      case .userFiles(let filter):
+        do { try filter.validate() } catch { throw .declaration(error) }
+        entries.append(.userFiles(filter))
+      case .importConf(let request): entries.append(.importConf(request))
+      case .package(let fields): entries.append(.package(try request(fields)))
+      case .named(let name, let fields):
+        guard let definition = names[name] else { throw .declaration(.unknownName(name)) }
+        entries.append(.package(try request(merge(fields, into: definition))))
       }
     }
     return Manifest(entries: entries)

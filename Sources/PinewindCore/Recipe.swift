@@ -36,8 +36,9 @@ struct Recipe {
       }
       return nil
     }
-    let reader = YAMLReader(source: file.string)
-    guard let text = String(data: try read(file), encoding: .utf8) else {
+    let bytes = try read(file)
+    let reader = YAMLReader(source: file.string, text: String(data: bytes, encoding: .utf8))
+    guard let text = reader.text else {
       throw reader.fail(.file(.undecodableText(file)))
     }
     let root = try reader.mapping(
@@ -97,34 +98,54 @@ struct Recipe {
     var patchTargets = Set<RelativePath>()
     let patches: [Patch] =
       try root["patch_files"].map { node in
-        try reader.mapping(node).sorted { $0.key < $1.key }.map { target, body in
-          let expanded: String
-          do {
-            expanded = try Template.expand(target, options: request.options, declared: declared)
-          } catch let error as PinewindError {
-            throw error.promoted(reader.context(at: body))
-          }
-          let target = try reader.relativePath(expanded)
-          guard patchTargets.insert(target).inserted else {
-            throw reader.fail(.declaration(.duplicateTarget(target.string)), at: body)
-          }
-          guard body.sequence != nil else {
-            throw reader.error("patch body must be a YAML sequence", at: body)
-          }
-          let text = try serialize(node: body)
-            .replacingOccurrences(of: "---\n", with: "")
-            .trimmingCharacters(in: .newlines)
-          let substituted: String
-          do {
-            substituted = try Template.expand(text, options: request.options, declared: declared)
-          } catch let error as PinewindError {
-            throw error.promoted(reader.context(at: body))
-          }
-          guard let parsed = try compose(yaml: substituted), parsed.sequence != nil else {
-            throw reader.error("expanded patch body must be a YAML sequence", at: body)
-          }
-          return Patch(target: target, rx: rx, body: substituted)
+        _ = try reader.mapping(node)
+        guard let mapping = node.mapping else {
+          throw reader.error("patch_files must be a mapping", at: node)
         }
+        return try mapping.sorted { ($0.key.scalar?.string ?? "") < ($1.key.scalar?.string ?? "") }
+          .map { key, body in
+            let targetTemplate = try reader.string(key)
+            let expanded: String
+            do {
+              expanded = try Template.expand(
+                targetTemplate, options: request.options, declared: declared)
+            } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: key), as: .configuration)
+            }
+            let target: RelativePath
+            do { target = try reader.relativePath(expanded) } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: key), as: .configuration)
+            }
+            guard patchTargets.insert(target).inserted else {
+              throw reader.fail(.declaration(.duplicateTarget(target.string)), at: body)
+            }
+            guard body.sequence != nil else {
+              throw reader.error("patch body must be a YAML sequence", at: body)
+            }
+            let text = try serialize(node: body)
+              .replacingOccurrences(of: "---\n", with: "")
+              .trimmingCharacters(in: .newlines)
+            let substituted: String
+            do {
+              substituted = try Template.expand(text, options: request.options, declared: declared)
+            } catch {
+              throw ErrorBoundary.attribute(error, to: reader.context(at: body), as: .configuration)
+            }
+            let parsed: Node
+            do {
+              parsed = try YAMLReader(source: file.string, text: substituted).document(substituted)
+            } catch {
+              // Expanded YAML has generated positions; point at the authored template instead.
+              if let error = error as? PinewindError, case .configuration(let document) = error {
+                throw reader.fail(document.failure, at: body)
+              }
+              throw error
+            }
+            guard parsed.sequence != nil else {
+              throw reader.error("expanded patch body must be a YAML sequence", at: body)
+            }
+            return Patch(target: target, rx: rx, body: substituted)
+          }
       } ?? []
     return Recipe(patterns: patterns, patches: patches, downloads: resources)
   }
@@ -132,7 +153,7 @@ struct Recipe {
 
 enum Template {
   static func expand(_ text: String, options: [String: String], declared: Set<String>)
-    throws(DeclarationFailure)
+    throws(Failure)
     -> String
   {
     let expression: NSRegularExpression
@@ -140,7 +161,8 @@ enum Template {
       expression = try NSRegularExpression(
         pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
     } catch {
-      throw DeclarationFailure.invalidTemplateRange
+      throw Failure.defect(
+        .invariant(detail: "invalid template replacement range", origin: Origin()))
     }
     var result = text
     for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
@@ -151,7 +173,7 @@ enum Template {
       }
       let key = capture(1) ?? capture(3) ?? ""
       guard declared.contains(key) else {
-        throw DeclarationFailure.undeclaredOption(key)
+        throw Failure.declaration(.undeclaredOption(key))
       }
       let fallback = capture(2)
       let value: String
@@ -160,10 +182,11 @@ enum Template {
       } else if let fallback {
         value = fallback
       } else {
-        throw DeclarationFailure.optionValueMissing(key)
+        throw Failure.declaration(.optionValueMissing(key))
       }
       guard let range = Range(match.range, in: result) else {
-        throw DeclarationFailure.invalidTemplateRange
+        throw Failure.defect(
+          .invariant(detail: "invalid template replacement range", origin: Origin()))
       }
       // Literal replacement: substituted values are never reparsed as shell code.
       result.replaceSubrange(range, with: value)

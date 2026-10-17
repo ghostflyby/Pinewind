@@ -1,0 +1,5 @@
+recipe:
+  args: [schema]
+patch_files:
+  default.custom.yaml:
+    - schema: $schema

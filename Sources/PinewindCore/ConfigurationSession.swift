@@ -22,7 +22,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     self.manifest = manifest
     self.localOverrides = localOverrides
   }
-  public mutating func addPackage(_ name: String, request: PackageRequest) throws(PinewindError) {
+  public mutating func addPackage(_ name: String, request: PackageRequest) throws {
     guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
     guard manifest.names[name] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(name)))
@@ -36,7 +36,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     manifest.names[name] = fields
     manifest.order.append(.named(name))
   }
-  public mutating func renamePackage(_ old: String, to new: String) throws(PinewindError) {
+  public mutating func renamePackage(_ old: String, to new: String) throws {
     guard old == new || localOverrides?.names[new] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(new)))
     }
@@ -45,12 +45,12 @@ public struct ConfigurationDraft: Hashable, Sendable {
       localOverrides?.names[new] = fields
     }
   }
-  public mutating func removePackage(_ name: String) throws(PinewindError) {
+  public mutating func removePackage(_ name: String) throws {
     try manifest.removePackage(name)
     localOverrides?.names.removeValue(forKey: name)
   }
   public mutating func redirectPackage(_ name: String, to location: FileLocation)
-    throws(PinewindError)
+    throws
   {
     guard manifest.names[name] != nil else {
       throw PinewindError.runtime(.declaration(.unknownName(name)))
@@ -61,7 +61,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
-  public mutating func moveEntry(from: Int, to: Int) throws(PinewindError) {
+  public mutating func moveEntry(from: Int, to: Int) throws {
     try manifest.moveEntry(from: from, to: to)
   }
 }
@@ -74,7 +74,7 @@ public struct ConfigurationSnapshot: Sendable {
   public let localIsDirty: Bool
   let locations: WorkspaceLocations
   let baseline: DocumentBaseline
-  public func evaluate(_ scope: ConfigurationScope = .effective) throws(PinewindError)
+  public func evaluate(_ scope: ConfigurationScope = .effective) throws
     -> EvaluatedManifest
   {
     try manifest.evaluate(localOverrides: scope == .shared ? nil : localOverrides)
@@ -147,8 +147,9 @@ struct ConfigurationStore: Sendable {
         throw PinewindError.runtime(.cache(.contentMissing(url)))
       }
     #endif
-    do { return try Data(contentsOf: NativePath.from(url)) } catch CocoaError.fileReadNoSuchFile {
-      return nil
+    let path = try NativePath.from(url)
+    return try FileIO.perform(.read, paths: [path]) {
+      do { return try Data(contentsOf: url) } catch CocoaError.fileReadNoSuchFile { return nil }
     }
   }
   static func replace(_ bytes: Data?, at url: URL, expected: Data?) throws {
@@ -215,72 +216,81 @@ public actor ConfigurationSession {
     snapshot().validate(scope: scope)
   }
   public func save(_ layer: ConfigurationLayer) async throws -> SaveReceipt {
-    await acquire()
-    defer { release() }
-    try Task.checkCancellation()
-    let captured = draft
-    let location: FileLocation
-    let bytes: Data?
-    let expected: Data?
-    let revision: UInt64
-    switch layer {
-    case .shared:
-      _ = try captured.manifest.evaluate()
-      location = store.locations.configuration.manifest
-      bytes = Data(try captured.manifest.yaml().utf8)
-      expected = baseline.shared
-      revision = sharedRevision
-    case .local:
-      guard let configured = store.locations.configuration.localOverrides else {
-        throw PinewindError.runtime(.state(.overridesDisabled))
+    do {
+      await acquire()
+      defer { release() }
+      try Task.checkCancellation()
+      let captured = draft
+      let location: FileLocation
+      let bytes: Data?
+      let expected: Data?
+      let revision: UInt64
+      switch layer {
+      case .shared:
+        _ = try captured.manifest.evaluate()
+        location = store.locations.configuration.manifest
+        bytes = Data(try captured.manifest.yaml().utf8)
+        expected = baseline.shared
+        revision = sharedRevision
+      case .local:
+        guard let configured = store.locations.configuration.localOverrides else {
+          throw PinewindError.runtime(.state(.overridesDisabled))
+        }
+        if captured.localOverrides != nil {
+          _ = try captured.manifest.evaluate(localOverrides: captured.localOverrides)
+        }
+        location = configured
+        bytes = try captured.localOverrides.map { Data(try $0.yaml().utf8) }
+        expected = baseline.local
+        revision = localRevision
       }
-      if captured.localOverrides != nil {
-        _ = try captured.manifest.evaluate(localOverrides: captured.localOverrides)
+      try await store.coordinator.coordinate([
+        FileAccessRequest(url: try location.url, intent: bytes == nil ? .delete : .write)
+      ]) { urls in
+        try ConfigurationStore.replace(bytes, at: urls[0], expected: expected)
       }
-      location = configured
-      bytes = try captured.localOverrides.map { Data(try $0.yaml().utf8) }
-      expected = baseline.local
-      revision = localRevision
-    }
-    try await store.coordinator.coordinate([
-      FileAccessRequest(url: try location.url, intent: bytes == nil ? .delete : .write)
-    ]) { urls in
-      try ConfigurationStore.replace(bytes, at: urls[0], expected: expected)
-    }
-    switch layer {
-    case .shared:
-      baseline.shared = bytes
-      saved.manifest = captured.manifest
-    case .local:
-      baseline.local = bytes
-      saved.localOverrides = captured.localOverrides
-    }
-    return SaveReceipt(layer: layer, revision: revision)
+      switch layer {
+      case .shared:
+        baseline.shared = bytes
+        saved.manifest = captured.manifest
+      case .local:
+        baseline.local = bytes
+        saved.localOverrides = captured.localOverrides
+      }
+      return SaveReceipt(layer: layer, revision: revision)
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
   public func reload() async throws {
-    await acquire()
-    defer { release() }
-    guard draft == saved else {
-      throw PinewindError.runtime(.state(.staleSnapshot))
-    }
-    let capturedShared = sharedRevision
-    let capturedLocal = localRevision
-    let loaded = try await store.load()
-    guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-      throw PinewindError.runtime(.state(.staleSnapshot))
-    }
-    apply(loaded)
+    do {
+      await acquire()
+      defer { release() }
+      guard draft == saved else {
+        throw PinewindError.runtime(.state(.staleSnapshot))
+      }
+      let capturedShared = sharedRevision
+      let capturedLocal = localRevision
+      let loaded = try await store.load()
+      guard sharedRevision == capturedShared, localRevision == capturedLocal else {
+        throw PinewindError.runtime(.state(.staleSnapshot))
+      }
+      apply(loaded)
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
   public func discardChangesAndReload() async throws {
-    await acquire()
-    defer { release() }
-    let capturedShared = sharedRevision
-    let capturedLocal = localRevision
-    let loaded = try await store.load()
-    guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-      throw PinewindError.runtime(.state(.staleSnapshot))
-    }
-    apply(loaded)
+    do {
+      await acquire()
+      defer { release() }
+      let capturedShared = sharedRevision
+      let capturedLocal = localRevision
+      let loaded = try await store.load()
+      guard sharedRevision == capturedShared, localRevision == capturedLocal else {
+        throw PinewindError.runtime(.state(.staleSnapshot))
+      }
+      apply(loaded)
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
   private func apply(_ loaded: ConfigurationSnapshot) {
     draft = ConfigurationDraft(manifest: loaded.manifest, localOverrides: loaded.localOverrides)

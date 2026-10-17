@@ -82,7 +82,7 @@ extension FileDescriptor {
     #if os(Windows)
       let native = ucrt._get_osfhandle(rawValue)
       guard native != -1, let handle = UnsafeMutableRawPointer(bitPattern: native) else {
-        throw Errno.badFileDescriptor
+        throw FileSystemFailure.lockFailed(detail: String(describing: Errno.badFileDescriptor))
       }
       var overlapped = OVERLAPPED()
       if LockFileEx(

@@ -131,7 +131,7 @@ let refreshed = try await workspace.update(.resources(resources))
 
 `WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现为 `GitKitRepositoryProvider`、`HTTPSResourceDownloader`。认证通过 `GitKitRepositoryProvider(credentials:)` 注入。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。
 
-各操作可传入独立的 `progress` 回调。错误通过 `PinewindError.code` 区分需要解析、缺失缓存、开发准备、冲突、过期输入、校验和不兼容格式;取消保留 `CancellationError`。提交前检查取消,提交后返回成功。进度回调的界面线程切换由调用方负责。
+各操作可传入独立的 `progress` 回调。错误通过 `PinewindError.configuration`、`.incident`、`.runtime` 区分文档裁决、处理事件和无文档锚点的失败,再匹配其 `Failure` 领域事实。文件操作携带路径与系统错误码,网络传输携带原因分类,校验失败携带预期与实际哈希;取消保留 `CancellationError`。提交前检查取消,提交后返回成功。进度回调的界面线程切换由调用方负责。
 
 完整语义与文件系统边界见 [设计契约](Docs/Package-Management-Design.md);验证方式见 [贡献指南](CONTRIBUTING.md)。
 

@@ -53,7 +53,12 @@
           throw FileSystemFailure.publicationFailed(
             detail: "Windows composition output must be a directory")
         }
-        guard try FileManager.default.contentsOfDirectory(atPath: output.string).isEmpty else {
+        let entries: [String]
+        do { entries = try FileManager.default.contentsOfDirectory(atPath: output.string) } catch {
+          throw FileSystemFailure.operationFailed(
+            FileOperationFailure(operation: .enumerate, paths: [output], error: error))
+        }
+        guard entries.isEmpty else {
           throw FileSystemFailure.publicationFailed(
             detail: "Windows composition output must be empty or managed by Pinewind")
         }
@@ -98,8 +103,9 @@
     }
 
     private static func withHandle<T>(
-      _ url: FilePath, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
-    ) throws -> T {
+      _ url: FilePath, access: DWORD, following: Bool = false,
+      _ body: (HANDLE) throws(FileSystemFailure) -> T
+    ) throws(FileSystemFailure) -> T {
       let handle = try windowsNativePath(url).withPlatformString {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,

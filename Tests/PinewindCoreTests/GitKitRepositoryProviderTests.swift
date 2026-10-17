@@ -344,7 +344,7 @@ struct GitKitRepositoryProviderTests {
         using: downloader, from: URL(string: "https://resource.test/offline")!)
       Issue.record("expected a transport failure")
     } catch let error as PinewindError {
-      guard case .runtime(.network(.transportFailed(let url, _))) = error,
+      guard case .runtime(.network(.transportFailed(let url, .connection, _))) = error,
         url == URL(string: "https://resource.test/offline")
       else {
         Issue.record("\(error)")
@@ -354,6 +354,33 @@ struct GitKitRepositoryProviderTests {
     await #expect(throws: CancellationError.self) {
       try await downloadedData(
         using: downloader, from: URL(string: "https://resource.test/cancelled")!)
+    }
+  }
+
+  @Test(arguments: [nil, 8] as [Int?])
+  func destinationFailuresKeepTheirFileDomain(_ maximumBytes: Int?) async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [ResourceProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    let root = native(
+      FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let blocker = root.appending("not-a-directory")
+    try Data().write(to: blocker)
+    do {
+      try await HTTPSResourceDownloader(session: session).download(
+        URL(string: "https://resource.test/ok")!, to: blocker.appending("resource"),
+        maximumBytes: maximumBytes)
+      Issue.record("expected a destination failure")
+    } catch let error as PinewindError {
+      guard case .runtime(.file(.operationFailed(let failure))) = error else {
+        Issue.record("destination failure left the file domain: \(error)")
+        return
+      }
+      #expect(failure.operation == .createDirectory)
+      #expect(failure.paths == [blocker])
     }
   }
 
@@ -431,7 +458,7 @@ private struct LocalGitTransport: GitTransport {
       throw PinewindError.runtime(
         .git(
           .operationFailed(
-            repository: url, status: -1,
+            repository: url, operation: "validate", status: -1,
             detail: "unexpected Git transport URL; expected \(expectedURL)")))
     }
   }

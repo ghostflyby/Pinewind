@@ -38,63 +38,69 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
   init(transport: any GitTransport) { self.transport = transport }
 
   public func resolve(_ request: RepositoryRequest) async throws -> SourceIdentity {
-    let transport = transport
-    return try await BlockingIO.run {
-      let url = try Self.sourceURL(request.url)
-      if case .commit(let commit) = request.revision {
-        return try SourceIdentity(url: url, commit: commit)
+    do {
+      let transport = transport
+      return try await BlockingIO.run {
+        let url = try Self.sourceURL(request.url)
+        if case .commit(let commit) = request.revision {
+          return try SourceIdentity(url: url, commit: commit)
+        }
+        let refs = RemoteReferences(try transport.advertise(url: Self.remoteURL(url)), url: url)
+        let reference = try request.revision.reference ?? refs.defaultBranch()
+        return try SourceIdentity(url: url, commit: refs.commit(for: reference))
       }
-      let refs = RemoteReferences(try transport.advertise(url: Self.remoteURL(url)), url: url)
-      let reference = try request.revision.reference ?? refs.defaultBranch()
-      return try SourceIdentity(url: url, commit: refs.commit(for: reference))
-    }
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
 
   public func prepareSource(_ identity: SourceIdentity, cacheRoot: FilePath) async throws
     -> SourceSnapshot
   {
-    let cacheRoot = try NativePath.absolute(cacheRoot)
-    let transport = transport
-    return try await BlockingIO.run {
-      let key = Self.cacheKey(identity.url)
-      return try NativeLock.withLock(cacheRoot.appending("locks/" + key + ".lock")) {
-        if let cached = try Self.cached(identity, cacheRoot: cacheRoot) { return cached }
-        let repository = cacheRoot.appending("repositories/" + key + ".git")
-        let directory = Self.directory(identity, cacheRoot: cacheRoot)
-        let marker = directory.removingLastComponent().appending(
-          identity.commit.string + ".complete")
-        let fm = FileManager.default
-        try fm.createDirectory(
-          at: repository.removingLastComponent(), withIntermediateDirectories: true)
-        if try !transport.containsCommit(identity.commit.string, repository: repository) {
-          let url = try Self.sourceURL(identity.url)
-          try transport.fetch(
-            url: Self.remoteURL(url), repository: repository, commit: identity.commit.string)
+    do {
+      let cacheRoot = try NativePath.absolute(cacheRoot)
+      let transport = transport
+      return try await BlockingIO.run {
+        let key = Self.cacheKey(identity.url)
+        return try NativeLock.withLock(cacheRoot.appending("locks/" + key + ".lock")) {
+          if let cached = try Self.cached(identity, cacheRoot: cacheRoot) { return cached }
+          let repository = cacheRoot.appending("repositories/" + key + ".git")
+          let directory = Self.directory(identity, cacheRoot: cacheRoot)
+          let marker = directory.removingLastComponent().appending(
+            identity.commit.string + ".complete")
+          let fm = FileManager.default
+          try fm.createDirectory(
+            at: repository.removingLastComponent(), withIntermediateDirectories: true)
+          if try !transport.containsCommit(identity.commit.string, repository: repository) {
+            let url = try Self.sourceURL(identity.url)
+            try transport.fetch(
+              url: Self.remoteURL(url), repository: repository, commit: identity.commit.string)
+          }
+          guard try transport.containsCommit(identity.commit.string, repository: repository) else {
+            throw PinewindError.runtime(
+              .git(.commitUnavailable(commit: identity.commit.string, repository: identity.url)))
+          }
+          try fm.createDirectory(
+            at: directory.removingLastComponent(), withIntermediateDirectories: true)
+          let candidate = directory.removingLastComponent().appending(
+            ".candidate-" + UUID().uuidString)
+          try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
+          defer { try? fm.removeItem(at: candidate) }
+          try transport.export(
+            commit: identity.commit.string, repository: repository, destination: candidate)
+          try Cancellation.check()
+          if fm.fileExists(atPath: marker.string) { try fm.removeItem(at: marker) }
+          if fm.fileExists(atPath: directory.string) { try fm.removeItem(at: directory) }
+          try fm.moveItem(at: candidate, to: directory)
+          try PropertyListEncoder().encode(
+            Completion(
+              version: 1, url: try SourceIdentity.normalize(identity.url).absoluteString,
+              commit: identity.commit.string)
+          ).write(to: marker, options: .atomic)
+          return try SourceSnapshot(identity: identity, directory: directory)
         }
-        guard try transport.containsCommit(identity.commit.string, repository: repository) else {
-          throw PinewindError.runtime(
-            .git(.commitUnavailable(commit: identity.commit.string, repository: identity.url)))
-        }
-        try fm.createDirectory(
-          at: directory.removingLastComponent(), withIntermediateDirectories: true)
-        let candidate = directory.removingLastComponent().appending(
-          ".candidate-" + UUID().uuidString)
-        try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
-        defer { try? fm.removeItem(at: candidate) }
-        try transport.export(
-          commit: identity.commit.string, repository: repository, destination: candidate)
-        try Cancellation.check()
-        if fm.fileExists(atPath: marker.string) { try fm.removeItem(at: marker) }
-        if fm.fileExists(atPath: directory.string) { try fm.removeItem(at: directory) }
-        try fm.moveItem(at: candidate, to: directory)
-        try PropertyListEncoder().encode(
-          Completion(
-            version: 1, url: try SourceIdentity.normalize(identity.url).absoluteString,
-            commit: identity.commit.string)
-        ).write(to: marker, options: .atomic)
-        return try SourceSnapshot(identity: identity, directory: directory)
       }
-    }
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
 
   static func directory(_ identity: SourceIdentity, cacheRoot: FilePath) -> FilePath {
@@ -148,17 +154,20 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
   private let session: URLSession
   public init(session: URLSession = .shared) { self.session = session }
   public func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws {
-    guard url.scheme?.lowercased() == "https", url.host != nil else {
-      throw PinewindError.runtime(.network(.insecureScheme(url)))
-    }
-    let destination = try NativePath.absolute(destination)
-    try Task.checkCancellation()
-    let request = URLRequest(url: url)
-    if let maximumBytes {
-      try await downloadBounded(request, to: destination, maximumBytes: maximumBytes, url: url)
-    } else {
-      try await downloadUnbounded(request, to: destination, url: url)
-    }
+    do {
+      guard url.scheme?.lowercased() == "https", url.host != nil else {
+        throw PinewindError.runtime(.network(.insecureScheme(url)))
+      }
+      let destination = try NativePath.absolute(destination)
+      try Task.checkCancellation()
+      let request = URLRequest(url: url)
+      if let maximumBytes {
+        try await downloadBounded(request, to: destination, maximumBytes: maximumBytes, url: url)
+      } else {
+        try await downloadUnbounded(request, to: destination, url: url)
+      }
+
+    } catch { throw ErrorBoundary.normalize(error) }
   }
 
   /// Uncapped downloads use the fast download-to-file path.
@@ -213,15 +222,17 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
         try FileManager.default.createDirectory(
           at: destination.removingLastComponent(), withIntermediateDirectories: true)
       }
-      let handle = try FileDescriptor.open(
-        destination, .writeOnly, options: [.create, .truncate],
-        permissions: [.ownerReadWrite, .groupRead, .otherRead])
+      let handle = try FileIO.perform(.open, paths: [destination]) {
+        try FileDescriptor.open(
+          destination, .writeOnly, options: [.create, .truncate],
+          permissions: [.ownerReadWrite, .groupRead, .otherRead])
+      }
       defer { try? handle.close() }
       do {
         var pending: [UInt8] = []
         pending.reserveCapacity(65536)
         func flush() throws {
-          _ = try handle.writeAll(pending)
+          _ = try FileIO.perform(.write, paths: [destination]) { try handle.writeAll(pending) }
           pending.removeAll(keepingCapacity: true)
         }
         var received = 0
@@ -260,9 +271,14 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
   }
 
   private func transportFailure(_ error: any Error, url: URL) -> any Error {
-    if Task.isCancelled || (error as? URLError)?.code == .cancelled { return CancellationError() }
+    if error is CancellationError { return error }
+    if let error = error as? PinewindError { return error }
+    if let failure = Failure.recognizing(error) { return PinewindError.runtime(failure) }
+    if (error as? URLError)?.code == .cancelled { return CancellationError() }
     return PinewindError.runtime(
-      .network(.transportFailed(url: url, detail: String(describing: error))))
+      .network(
+        .transportFailed(
+          url: url, reason: TransportFailureReason(error), detail: String(describing: error))))
   }
 }
 private final class HTTPSRedirectGuard: NSObject, URLSessionTaskDelegate {

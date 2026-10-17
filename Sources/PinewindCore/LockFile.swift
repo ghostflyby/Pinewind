@@ -327,17 +327,17 @@ enum ResolutionCodec {
     let packages: [Package]
     let imports: [Import]
   }
-  static func signature(_ manifest: Manifest) throws(LockFailure) -> Data {
+  static func signature(_ manifest: Manifest) throws(Failure) -> Data {
+    try signature(manifest.entries.enumerated().map { Entry($0.element, index: $0.offset) })
+  }
+  private static func signature(_ entries: [Entry]) throws(Failure) -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = .sortedKeys
-    do {
-      return try encoder.encode(
-        manifest.entries.enumerated().map { Entry($0.element, index: $0.offset) })
-    } catch {
-      throw LockFailure.malformed(detail: String(describing: error))
+    do { return try encoder.encode(entries) } catch {
+      throw .defect(.wrapped(detail: String(describing: error), origin: Origin()))
     }
   }
-  static func encode(_ resolution: Resolution) throws(LockFailure) -> Data {
+  static func encode(_ resolution: Resolution) throws(Failure) -> Data {
     let entries = resolution.expanded.entries.enumerated().map { index, entry -> Entry in
       var record = Entry(entry, index: index)
       if case .package(let request) = entry, request.url.isFileURL {
@@ -363,7 +363,7 @@ enum ResolutionCodec {
           }, packages: $0.packages.map(Request.init), resources: $0.resources.map(Resource.init))
       })
     do { return magic + (try PropertyListEncoder().encode(payload)) } catch {
-      throw LockFailure.malformed(detail: String(describing: error))
+      throw Failure.defect(.wrapped(detail: String(describing: error), origin: Origin()))
     }
   }
   static func reusable(_ bytes: Data) throws(LockFailure) -> (
@@ -420,18 +420,13 @@ enum ResolutionCodec {
     }
     return (packages, imports)
   }
-  static func decode(_ bytes: Data, snapshot: ConfigurationSnapshot) throws(PinewindError)
+  static func decode(_ bytes: Data, snapshot: ConfigurationSnapshot) throws
     -> Resolution
   {
     let lock: DocumentContext
     do {
       lock = try DocumentContext(path: snapshot.locations.configuration.lock.filePath)
-    } catch let failure as FileSystemFailure {
-      throw PinewindError.runtime(.file(failure))
-    } catch {
-      throw PinewindError.runtime(
-        .defect(.wrapped(detail: String(describing: error), origin: Origin())))
-    }
+    } catch { throw ErrorBoundary.normalize(error) }
     guard bytes.starts(with: magic) else {
       throw PinewindError.configuration(
         DocumentError(
@@ -446,9 +441,7 @@ enum ResolutionCodec {
         throw LockFailure.incompatible(detail: "unsupported lock version")
       }
       let declarations = try snapshot.evaluate(.shared)
-      let encoder = JSONEncoder()
-      encoder.outputFormatting = .sortedKeys
-      guard try encoder.encode(payload.declarations) == signature(declarations) else {
+      guard try signature(payload.declarations) == signature(declarations) else {
         throw LockFailure.declarationChanged
       }
       let packages = try payload.packages.map {
@@ -485,13 +478,15 @@ enum ResolutionCodec {
     } catch let pinned as PinewindError {
       throw pinned
     } catch let failure as Failure {
-      // Declaration failures from the evaluated manifest keep their own
-      // (unanchored) attribution.
-      throw PinewindError.runtime(failure)
-    } catch {
+      if case .defect = failure { throw PinewindError.runtime(failure) }
       throw PinewindError.configuration(
-        DocumentError(
-          context: lock, failure: .lock(.malformed(detail: String(describing: error)))))
-    }
+        DocumentError(context: lock, failure: .lock(.malformed(detail: failure.description))))
+    } catch let failure as DeclarationFailure {
+      throw PinewindError.configuration(
+        DocumentError(context: lock, failure: .lock(.malformed(detail: failure.description))))
+    } catch let error as DecodingError {
+      throw PinewindError.configuration(
+        DocumentError(context: lock, failure: .lock(.malformed(detail: String(describing: error)))))
+    } catch { throw ErrorBoundary.normalize(error) }
   }
 }

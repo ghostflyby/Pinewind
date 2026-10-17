@@ -145,7 +145,7 @@ glob 以根相对路径求值,*、? 和字符类不跨 `/`,** 可跨目录,中�
 
 取消检查覆盖等待、下载、文件枚举、哈希和渲染,提交前执行最后检查。提交已经完成则返回成功,不在成功提交后再报告取消。失败或取消保留旧锁和完整已发布输出,候选和临时视图清理。
 
-PinewindError 提供稳定 Code、说明、来源、行、字段和条目上下文,实现 LocalizedError。CancellationError 单独保留。每次操作可独立接收进度回调,界面线程切换由调用方处理。
+PinewindError 按 configuration/incident/runtime 区分归因,事实由 Failure 的领域载荷承载,说明由 description 推导。文档上下文含路径、URL、可选行列及推导链,不含字段路径;归一化与载荷约定以《Error-System-Design》为准。CancellationError 单独保留。每次操作可独立接收进度回调,界面线程切换由调用方处理。
 
 ## 9. 验证边界
 
