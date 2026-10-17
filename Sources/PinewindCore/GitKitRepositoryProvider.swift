@@ -152,6 +152,8 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
 
 public struct HTTPSResourceDownloader: ResourceDownloader {
   private let session: URLSession
+  /// Downloads preserve the injected session delegate's authentication policy.
+  /// Bounded Corelibs transfers use its configuration in a dedicated session.
   public init(session: URLSession = .shared) { self.session = session }
   public func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     do {
@@ -178,7 +180,7 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
     let response: URLResponse
     do {
       (temporary, response) = try await session.download(
-        for: request, delegate: HTTPSRedirectGuard())
+        for: request, delegate: HTTPSResourceDelegate(session: session))
     } catch {
       throw transportFailure(error, url: url)
     }
@@ -248,8 +250,9 @@ public struct HTTPSResourceDownloader: ResourceDownloader {
 // Corelibs routes native transport callbacks through the session delegate, so
 // use a session with the caller's configuration and a dedicated streaming sink.
 // The lock protects delegate callbacks and concurrent task cancellation.
-private final class BoundedResourceTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-  private let originalSession: URLSession
+private final class BoundedResourceTransfer: HTTPSResourceDelegate, URLSessionDataDelegate,
+  @unchecked Sendable
+{
   private let destination: FilePath
   private let handle: FileDescriptor
   private let url: URL
@@ -264,11 +267,11 @@ private final class BoundedResourceTransfer: NSObject, URLSessionDataDelegate, @
   init(
     session: URLSession, destination: FilePath, handle: FileDescriptor, url: URL, maximumBytes: Int
   ) {
-    self.originalSession = session
     self.destination = destination
     self.handle = handle
     self.url = url
     self.maximumBytes = maximumBytes
+    super.init(session: session)
   }
 
   func run(request: URLRequest) async throws {
@@ -303,43 +306,6 @@ private final class BoundedResourceTransfer: NSObject, URLSessionDataDelegate, @
       }
       task?.cancel()
     }
-  }
-
-  #if canImport(FoundationNetworking)
-    // Preserve authentication policy when Corelibs needs a dedicated session.
-    func urlSession(
-      _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-      completionHandler:
-        @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-      if let delegate = originalSession.delegate {
-        delegate.urlSession(
-          originalSession, didReceive: challenge, completionHandler: completionHandler)
-      } else {
-        completionHandler(.performDefaultHandling, nil)
-      }
-    }
-
-    func urlSession(
-      _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-      completionHandler:
-        @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-      if let delegate = originalSession.delegate as? any URLSessionTaskDelegate {
-        delegate.urlSession(
-          originalSession, task: task, didReceive: challenge, completionHandler: completionHandler)
-      } else {
-        completionHandler(.performDefaultHandling, nil)
-      }
-    }
-  #endif
-
-  func urlSession(
-    _ session: URLSession, task: URLSessionTask,
-    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-    completionHandler: @escaping @Sendable (URLRequest?) -> Void
-  ) {
-    completionHandler(request.url?.scheme?.lowercased() == "https" ? request : nil)
   }
 
   func urlSession(
@@ -397,7 +363,50 @@ private final class BoundedResourceTransfer: NSObject, URLSessionDataDelegate, @
     completion.0?.resume(with: completion.1)
   }
 }
-private final class HTTPSRedirectGuard: NSObject, URLSessionTaskDelegate {
+/// Shared authentication and redirect policy for both resource transfer modes.
+class HTTPSResourceDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  let originalSession: URLSession
+
+  init(session: URLSession) { originalSession = session }
+
+  func urlSession(
+    _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+    completionHandler:
+      @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    guard let delegate = originalSession.delegate else {
+      completionHandler(.performDefaultHandling, nil)
+      return
+    }
+    #if canImport(FoundationNetworking)
+      delegate.urlSession(
+        originalSession, didReceive: challenge, completionHandler: completionHandler)
+    #else
+      delegate.urlSession?(
+        originalSession, didReceive: challenge, completionHandler: completionHandler)
+        ?? completionHandler(.performDefaultHandling, nil)
+    #endif
+  }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+    completionHandler:
+      @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    guard let delegate = originalSession.delegate as? any URLSessionTaskDelegate else {
+      completionHandler(.performDefaultHandling, nil)
+      return
+    }
+    #if canImport(FoundationNetworking)
+      delegate.urlSession(
+        originalSession, task: task, didReceive: challenge, completionHandler: completionHandler)
+    #else
+      delegate.urlSession?(
+        originalSession, task: task, didReceive: challenge, completionHandler: completionHandler)
+        ?? completionHandler(.performDefaultHandling, nil)
+    #endif
+  }
+
   func urlSession(
     _ session: URLSession, task: URLSessionTask,
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
