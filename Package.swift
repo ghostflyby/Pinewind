@@ -47,7 +47,10 @@ let package = Package(
       ]),
     .testTarget(
       name: "PinewindCLITests",
-      dependencies: ["PinewindCLI", "PinewindCore", .product(name: "SystemPackage", package: "swift-system")],
+      dependencies: [
+        .target(name: "PinewindCLI", condition: .when(platforms: [.macOS, .linux, .windows])),
+        "PinewindCore", .product(name: "SystemPackage", package: "swift-system"),
+      ],
       resources: [.copy("Fixtures")]),
     .testTarget(
       name: "PinewindAPITests",
