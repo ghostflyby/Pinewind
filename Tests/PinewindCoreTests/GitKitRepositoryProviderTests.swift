@@ -357,7 +357,13 @@ struct GitKitRepositoryProviderTests {
     }
   }
 
-  @Test(arguments: [nil, 8] as [Int?])
+  #if canImport(FoundationNetworking)
+    @Test(
+      .disabled("Corelibs Foundation does not create download files for custom URLProtocol"),
+      arguments: [nil, 8] as [Int?])
+  #else
+    @Test(arguments: [nil, 8] as [Int?])
+  #endif
   func destinationFailuresKeepTheirFileDomain(_ maximumBytes: Int?) async throws {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ResourceProtocol.self]
