@@ -440,14 +440,14 @@ struct RemoteReferences {
     if let target = values.first(where: { $0.name == "HEAD" })?.symbolicTarget,
       target.hasPrefix("refs/heads/")
     {
-      return String(target.dropFirst("refs/heads/".count))
+      return target
     }
     let head = values.first { $0.name == "HEAD" }
     let candidates = values.filter { $0.name.hasPrefix("refs/heads/") && $0.commit == head?.commit }
     guard candidates.count == 1, let branch = candidates.first else {
       throw PinewindError.runtime(.git(.defaultBranchIndeterminate(url)))
     }
-    return String(branch.name.dropFirst("refs/heads/".count))
+    return branch.name
   }
 
   func commit(for ref: String) throws -> CommitID {

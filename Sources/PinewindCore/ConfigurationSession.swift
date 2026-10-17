@@ -13,19 +13,64 @@ public struct SaveReceipt: Sendable {
   public let layer: ConfigurationLayer
   public let revision: UInt64
 }
+public enum PackageInsertion: Sendable {
+  /// Insert before the first user-files entry, or append if there is none.
+  case beforeUserFiles
+  /// Named anchors (including "self") must identify exactly one order entry.
+  case before(String)
+  case after(String)
+  case end
+}
 public struct ConfigurationDraft: Hashable, Sendable {
   public var manifest: ManifestDocument
   public var localOverrides: LocalOverridesDocument?
+  private let relativeTo: FilePath
   public init(
     manifest: ManifestDocument = ManifestDocument(), localOverrides: LocalOverridesDocument? = nil
   ) {
+    self.init(
+      manifest: manifest, localOverrides: localOverrides,
+      relativeTo: FilePath(FileManager.default.currentDirectoryPath))
+  }
+  init(
+    manifest: ManifestDocument, localOverrides: LocalOverridesDocument?, relativeTo: FilePath
+  ) {
     self.manifest = manifest
     self.localOverrides = localOverrides
+    self.relativeTo = relativeTo
   }
-  public mutating func addPackage(_ name: String, request: PackageRequest) throws {
+  public mutating func addPackage(
+    _ name: String, request: PackageRequest, insertion: PackageInsertion = .beforeUserFiles
+  ) throws {
     guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
     guard manifest.names[name] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(name)))
+    }
+    let index: Int
+    switch insertion {
+    case .beforeUserFiles:
+      index =
+        manifest.order.firstIndex {
+          if case .userFiles = $0 { return true }
+          return false
+        }
+        ?? manifest.order.endIndex
+    case .end: index = manifest.order.endIndex
+    case .before(let anchor), .after(let anchor):
+      let matches = manifest.order.indices.filter { index in
+        switch manifest.order[index] {
+        case .userFiles: return anchor == "self"
+        case .named(let name, _): return name == anchor
+        default: return false
+        }
+      }
+      guard let match = matches.first else {
+        throw PinewindError.runtime(.declaration(.orderAnchorNotFound(anchor)))
+      }
+      guard matches.count == 1 else {
+        throw PinewindError.runtime(.declaration(.ambiguousOrderAnchor(anchor)))
+      }
+      if case .after = insertion { index = match + 1 } else { index = match }
     }
     var fields = PackageFields(
       url: .value(request.url), recipe: request.recipe.map { .value($0) } ?? .reset,
@@ -34,7 +79,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
       exclude: .value(request.filter.exclude))
     if let revision = request.revision { fields.revision = .value(revision) }
     manifest.names[name] = fields
-    manifest.order.append(.named(name))
+    manifest.order.insert(.named(name), at: index)
   }
   public mutating func renamePackage(_ old: String, to new: String) throws {
     guard old == new || localOverrides?.names[new] == nil else {
@@ -46,6 +91,13 @@ public struct ConfigurationDraft: Hashable, Sendable {
     }
   }
   public mutating func removePackage(_ name: String) throws {
+    guard manifest.names[name] != nil else {
+      throw PinewindError.runtime(.declaration(.unknownName(name)))
+    }
+    manifest.order.removeAll {
+      if case .named(let reference, _) = $0 { return reference == name }
+      return false
+    }
     try manifest.removePackage(name)
     localOverrides?.names.removeValue(forKey: name)
   }
@@ -57,7 +109,9 @@ public struct ConfigurationDraft: Hashable, Sendable {
     }
     if localOverrides == nil { localOverrides = LocalOverridesDocument() }
     var fields = localOverrides?.names[name] ?? PackageFields()
-    do { fields.url = .value(try location.url) } catch { throw PinewindError.runtime(.file(error)) }
+    do {
+      fields.url = .value(try location.resolved(relativeTo: relativeTo).url)
+    } catch { throw PinewindError.runtime(.file(error)) }
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
@@ -152,13 +206,20 @@ struct ConfigurationStore: Sendable {
       do { return try Data(contentsOf: url) } catch CocoaError.fileReadNoSuchFile { return nil }
     }
   }
-  static func replace(_ bytes: Data?, at url: URL, expected: Data?) throws {
-    guard try read(url) == expected else {
+  static func replace(
+    _ bytes: Data?, at url: URL, expected: Data?, checkCancellation: Bool = true,
+    allowIdenticalReplacement: Bool = false
+  )
+    throws
+  {
+    let current = try read(url)
+    if allowIdenticalReplacement && current == bytes { return }
+    guard current == expected else {
       throw PinewindError.runtime(.state(.externallyModified))
     }
     if bytes == expected { return }
     let path = try NativePath.from(url)
-    try Cancellation.check()
+    if checkCancellation { try Cancellation.check() }
     if let bytes {
       try FileManager.default.createDirectory(
         at: path.removingLastComponent(), withIntermediateDirectories: true)
@@ -177,8 +238,56 @@ struct ConfigurationStore: Sendable {
       else {
         throw PinewindError.runtime(.state(.staleInputs))
       }
-      try Self.replace(bytes, at: urls[1], expected: expected.lock)
+      try Self.replace(
+        bytes, at: urls[1], expected: expected.lock, allowIdenticalReplacement: true)
     }
+  }
+
+  /// Preflight all baselines before writing. Each file is atomic; the lock is
+  /// written last so an interrupted commit is detected as a stale lock.
+  func commitConfiguration(_ snapshot: ConfigurationSnapshot, lock: Data) async throws
+    -> ConfigurationSnapshot
+  {
+    let shared =
+      snapshot.sharedIsDirty
+      ? Data(try snapshot.manifest.yaml().utf8) : snapshot.baseline.shared
+    let local =
+      snapshot.localIsDirty
+      ? try snapshot.localOverrides.map { Data(try $0.yaml().utf8) } : snapshot.baseline.local
+    let before =
+      [snapshot.baseline.shared, snapshot.baseline.lock]
+      + (locations.configuration.localOverrides == nil ? [] : [snapshot.baseline.local])
+    let after =
+      [shared, Optional(lock)]
+      + (locations.configuration.localOverrides == nil ? [] : [local])
+    let requests = try documentLocations.enumerated().map { index, location in
+      FileAccessRequest(
+        url: try location.url,
+        intent: before[index] == after[index] ? .read : (after[index] == nil ? .delete : .write))
+    }
+    try await coordinator.coordinate(requests) { urls in
+      guard try urls.map(Self.read) == before else {
+        throw PinewindError.runtime(.state(.externallyModified))
+      }
+      try Cancellation.check()
+      // Once writing begins, finish the coordinated commit without cancellation gaps.
+      for index in urls.indices where index != 1 {
+        try Self.replace(
+          after[index], at: urls[index], expected: before[index], checkCancellation: false)
+      }
+      guard try Self.read(urls[0]) == shared,
+        try urls.count < 3 || Self.read(urls[2]) == local
+      else {
+        throw PinewindError.runtime(.state(.staleInputs))
+      }
+      try Self.replace(
+        lock, at: urls[1], expected: snapshot.baseline.lock, checkCancellation: false)
+    }
+    return ConfigurationSnapshot(
+      manifest: snapshot.manifest, localOverrides: snapshot.localOverrides,
+      sharedRevision: snapshot.sharedRevision, localRevision: snapshot.localRevision,
+      sharedIsDirty: false, localIsDirty: false, locations: locations,
+      baseline: DocumentBaseline(shared: shared, local: local, lock: lock))
   }
 }
 
@@ -194,7 +303,9 @@ public actor ConfigurationSession {
   init(snapshot: ConfigurationSnapshot, store: ConfigurationStore) {
     self.store = store
     baseline = snapshot.baseline
-    draft = ConfigurationDraft(manifest: snapshot.manifest, localOverrides: snapshot.localOverrides)
+    draft = ConfigurationDraft(
+      manifest: snapshot.manifest, localOverrides: snapshot.localOverrides,
+      relativeTo: store.locations.relativeTo)
     saved = draft
   }
   public func snapshot() -> ConfigurationSnapshot {
@@ -293,7 +404,9 @@ public actor ConfigurationSession {
     } catch { throw ErrorBoundary.normalize(error) }
   }
   private func apply(_ loaded: ConfigurationSnapshot) {
-    draft = ConfigurationDraft(manifest: loaded.manifest, localOverrides: loaded.localOverrides)
+    draft = ConfigurationDraft(
+      manifest: loaded.manifest, localOverrides: loaded.localOverrides,
+      relativeTo: store.locations.relativeTo)
     saved = draft
     baseline = loaded.baseline
     sharedRevision += 1

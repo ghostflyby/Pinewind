@@ -238,7 +238,7 @@ struct ConfigurationDocumentTests {
     #expect(renamed.manifest.order[0] == .named("new"))
     #expect(renamed.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .reset)))
     await #expect(throws: PinewindError.self) {
-      try await configuration.edit { try $0.removePackage("new") }
+      try await configuration.edit { try $0.manifest.removePackage("new") }
     }
     try await configuration.edit { draft in try draft.manifest.moveEntry(from: 2, to: 0) }
     let moved = await configuration.snapshot()

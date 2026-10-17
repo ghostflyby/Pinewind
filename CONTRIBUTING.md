@@ -10,7 +10,7 @@ swift test --no-parallel
 git diff --check
 ```
 
-公开 API 消费测试位于 PinewindAPITests,不使用 @testable。两个测试 target 各自通过 Bundle.module 读取 Fixtures;完整 YAML、recipe、conf 和多文件场景放入资源,短非法输入、动态 Git 提交与大文件在测试中生成。测试助手只负责夹具装配和 I/O 桥接,解析与校验直接调用库实现。
+公开 API 消费测试位于 PinewindAPITests,不使用 @testable。CLI 仅通过普通 import 消费 PinewindCore,不使用 package、SPI 或 @testable 访问库。PinewindCLITests 通过子进程验证命令与持久化行为,可用 @testable PinewindCLI 检查平台路径。各测试 target 通过 Bundle.module 读取 Fixtures;完整 YAML、recipe、conf 和多文件场景放入资源,短非法输入、动态 Git 提交与大文件在测试中生成。测试助手只负责夹具装配和 I/O 桥接,解析与校验直接调用库实现。
 
 默认测试不联网。需要验证真实 GitHub HTTPS 取包时,显式启用联网用例:
 
