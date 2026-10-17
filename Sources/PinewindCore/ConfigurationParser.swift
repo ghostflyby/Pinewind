@@ -34,9 +34,9 @@ struct YAMLReader {
   /// The decoded document's identity, positioned at the node when one is available.
   func context(at node: Node? = nil) -> DocumentContext {
     let path = FilePath(source)
-    let placement = node?.mark.map { placement($0, in: text) }
+    let position = node?.mark.map { placement($0, in: text) }
     let url = (try? path.foundationURL) ?? URL(fileURLWithPath: source)
-    return DocumentContext(path: path, url: url, placement: placement)
+    return DocumentContext(path: path, url: url, placement: position)
   }
 
   /// An anchored verdict carrying a typed fact.

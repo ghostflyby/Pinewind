@@ -138,7 +138,9 @@
         missing.append(component)
         ancestor = parent
       }
-      var resolved = try withHandle(ancestor, access: 0, following: true) { handle in
+      var resolved = try withHandle(ancestor, access: 0, following: true) {
+        (handle: HANDLE)
+          throws(FileSystemFailure) -> FilePath in
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
@@ -167,7 +169,8 @@
           detail: "cannot inspect composition output (Windows error \(error))")
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
-      return try withHandle(output, access: 0) { handle in
+      return try withHandle(output, access: 0) {
+        (handle: HANDLE) throws(FileSystemFailure) -> FilePath in
         var buffer = Data(count: 16_384)
         var count: DWORD = 0
         let ok = buffer.withUnsafeMutableBytes {
@@ -220,7 +223,9 @@
       data.appendInteger(UInt16((substitute.count + 1) * 2))
       data.appendInteger(UInt16(printable.count * 2))
       for word in substitute + [0] + printable + [0] { data.appendInteger(word) }
-      try withHandle(output, access: DWORD(GENERIC_WRITE)) { handle in
+      try withHandle(output, access: DWORD(GENERIC_WRITE)) {
+        (handle: HANDLE)
+          throws(FileSystemFailure) -> Void in
         var count: DWORD = 0
         let ok = data.withUnsafeMutableBytes {
           DeviceIoControl(
