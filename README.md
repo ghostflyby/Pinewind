@@ -169,7 +169,7 @@ let applied = try await workspace.apply(valid)
 
 `workspace.status()` 只读返回配置、可用的解析结果和输入准备状态,不自动解析或下载;损坏或缺失的 lock/cache 通过类型化状态原因展示。配置读取会恢复此前已提交的事务。构建使用 `build(to:)`,在 Core 内统一执行离线构建和 Rime 运行时文件保护;底层 `compose` 仍提供通用发布能力。
 
-`PlatformDirectories` 提供平台配置、状态和缓存位置。`discoverRimeDirectories()` 返回已存在的前端与目录候选,GUI 可展示选择器;`output(frontend:)` 共用 CLI 的自动选择规则。显式 WorkspaceLocations 仍支持任意平台位置。
+`PlatformDirectories` 提供平台配置、状态和缓存位置,`workspaceLocations()` 直接生成 CLI/GUI 共用的默认文件布局,各目录可独立覆盖。`discoverRimeDirectories()` 返回已存在的前端与目录候选,GUI 可展示选择器;`output(frontend:)` 共用 CLI 的自动选择规则。显式 WorkspaceLocations 仍支持任意平台位置。
 
 正常发布前检查配置与 lock 基线,拒绝过期计划。预览不提交配置或 lock,但可下载和缓存输入。本地文件内容在规划时捕获,规划完成后的编辑只影响下一次规划。
 

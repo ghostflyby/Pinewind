@@ -34,17 +34,11 @@ struct LocationOptions: ParsableArguments {
   }
 
   func locations() throws -> WorkspaceLocations {
-    let defaults = PlatformDirectories()
-    let config = FilePath(configDirectory ?? defaults.configuration.string)
-    let state = FilePath(stateDirectory ?? defaults.state.string)
-    return try WorkspaceLocations(
-      userFilesRoot: .path(FilePath(userFiles ?? config.appending("user").string)),
-      configuration: ConfigurationFiles(
-        manifest: .path(config.appending("pinewind.yaml")),
-        localOverrides: .path(state.appending("pinewind.local.yaml")),
-        lock: .path(config.appending("pinewind.lock"))),
-      stateRoot: state.appending("managed"),
-      cacheRoot: FilePath(cacheDirectory ?? defaults.cache.string))
+    try PlatformDirectories().workspaceLocations(
+      configurationDirectory: configDirectory.map { FilePath($0) },
+      stateDirectory: stateDirectory.map { FilePath($0) },
+      cacheDirectory: cacheDirectory.map { FilePath($0) },
+      userFilesRoot: userFiles.map { .path(FilePath($0)) })
   }
 
   func open() async throws -> Workspace {

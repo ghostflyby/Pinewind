@@ -416,6 +416,15 @@ struct WorkspaceTests {
       #expect(
         try directories.output(frontend: frontends[0]) == directories.rimeDirectory(frontends[0]))
     }
+    let locations = try directories.workspaceLocations(
+      configurationDirectory: "custom/config", stateDirectory: "custom/state",
+      cacheDirectory: "custom/cache", relativeTo: f.root)
+    #expect(locations.stateRoot == f.root.appending("custom/state/managed"))
+    #expect(
+      locations.configuration.localOverrides
+        == .path(f.root.appending("custom/state/pinewind.local.yaml")))
+    #expect(locations.userFilesRoot == .path(f.root.appending("custom/config/user")))
+    #expect(!exists(f.root.appending("custom")))
     _ = WorkspaceServices.live(credentials: { _ in nil })
   }
 

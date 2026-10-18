@@ -53,6 +53,25 @@ public struct PlatformDirectories: Sendable {
     #endif
   }
 
+  /// The shared on-disk layout used by both frontends. Explicit document/file
+  /// URLs remain available through WorkspaceLocations for cloud or custom layouts.
+  public func workspaceLocations(
+    configurationDirectory: FilePath? = nil, stateDirectory: FilePath? = nil,
+    cacheDirectory: FilePath? = nil, userFilesRoot: FileLocation? = nil,
+    relativeTo: FilePath? = nil
+  ) throws -> WorkspaceLocations {
+    let configuration = configurationDirectory ?? self.configuration
+    let state = stateDirectory ?? self.state
+    return try WorkspaceLocations(
+      userFilesRoot: userFilesRoot ?? .path(configuration.appending("user")),
+      configuration: ConfigurationFiles(
+        manifest: .path(configuration.appending("pinewind.yaml")),
+        localOverrides: .path(state.appending("pinewind.local.yaml")),
+        lock: .path(configuration.appending("pinewind.lock"))),
+      stateRoot: state.appending("managed"), cacheRoot: cacheDirectory ?? cache,
+      relativeTo: relativeTo)
+  }
+
   public func rimeDirectory(_ frontend: RimeFrontend) -> FilePath {
     func base(_ key: String, fallback: String) -> FilePath {
       if let text = environment[key], !text.isEmpty, FilePath(text).isAbsolute {
