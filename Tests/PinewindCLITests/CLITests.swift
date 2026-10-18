@@ -67,6 +67,22 @@
 
   @Suite("Command-line consumer", .timeLimit(.minutes(1)))
   struct CLITests {
+    @Test func addReportsInvalidCommitSourceAndFilterTogether() throws {
+      let f = try CommandFixture()
+      defer { f.remove() }
+      let result = try f.run(
+        [
+          "add", "http://example.com/repo", "--name", "bad", "--commit", "invalid",
+          "--include", "../escape",
+        ] + f.options)
+      #expect(result.status != 0)
+      for field in ["revision", "url", "include"] {
+        #expect(result.output.contains("bad." + field))
+      }
+      #expect(!FileManager.default.fileExists(atPath: f.manifest.path))
+      #expect(!FileManager.default.fileExists(atPath: f.lock.path))
+    }
+
     @Test func buildProtectsUnmanagedFilesAndReportsForcedReplacementAndRecordRecovery() throws {
       let f = try CommandFixture()
       defer { f.remove() }
@@ -143,7 +159,10 @@
       let result = try f.run(["add", package.path, "--name", "broken"] + f.options)
       #expect(result.status != 0)
       #expect(result.output.contains("retained"))
-      #expect(result.output.contains("pinewind install"))
+      #expect(
+        result.output.components(separatedBy: "Run 'pinewind install' to retry preparation.").count
+          == 2)
+      #expect(!result.output.contains("Retry installation to prepare files."))
       #expect(
         try ManifestDocument.parse(String(contentsOf: f.manifest, encoding: .utf8)).names["broken"]
           != nil)

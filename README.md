@@ -92,7 +92,7 @@ let plan = try await workspace.plan(prepared)
 let result = try await workspace.compose(plan, to: outputPath)
 ```
 
-`resolve` 保留仍匹配的版本,为变化声明补全解析;`update()` 重新选择浮动版本和资源。两者完整成功后才原子提交共享锁,检测到配置或旧锁改变时失败。
+`resolve` 保留仍匹配的版本,为变化声明补全解析;`resolve(refreshing:)` 重新选择浮动版本和资源。两者完整成功后才原子提交共享锁,检测到配置或旧锁改变时失败。
 
 日常使用匹配锁和完整缓存离线组合:
 
@@ -100,7 +100,7 @@ let result = try await workspace.compose(plan, to: outputPath)
 let result = try await workspace.compose(to: outputPath)
 ```
 
-需要补齐缓存时使用 `fetchAndCompose(to:)`;它仅下载锁定内容,不自动 resolve/update 或修改锁。也可用 `cachedInputs()`、`plan(_:)`、`compose(_:to:)` 分阶段执行。纯用户文件与本地包无需先生成锁。缺少清单时默认只包含用户文件,显式空 `order` 则产生空组合。
+需要补齐缓存时使用 `fetchAndCompose(to:)`;它仅下载锁定内容,不自动解析或刷新版本,不修改锁。也可用 `cachedInputs()`、`plan(_:)`、`compose(_:to:)` 分阶段执行。纯用户文件与本地包无需先生成锁。缺少清单时默认只包含用户文件,显式空 `order` 则产生空组合。
 
 `CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:只接受 `FilePath` 初始化,通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。这些路径从文件枚举到发布一直保留类型,不会在阶段间转回字符串重复校验。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
@@ -127,51 +127,65 @@ order:
 
 后面的文件覆盖前面的同名文件;每个包安装文件后立即应用自己的补丁。`self` 没有特殊优先级。相对 conf import 以清单所在目录为基准,不是用户文件树。远程 conf 的相对 include 限制在根 conf 所在 HTTPS 资源目录内;普通组合使用固定的展开结果,不会重新求值清单。
 
-## 配置编辑与预览
+## 包管理、编辑与预览
+
+日常包管理直接操作 Workspace,单次与批量共用一个非抛出编辑闭包:
 
 ```swift
-let session = try await workspace.configuration()
-let request = try PackageRequest(
-  source: .git(RepositoryRequest(
-    url: URL(string: "https://github.com/rime/rime-emoji")!,
-    revision: .branch("master"))))
-try await session.edit { draft in
-  try draft.addPackage("emoji", request: request)
+let application = try await workspace.update { configuration in
+  configuration.addPackage(source: "emoji")
+  configuration.addPackage("local", source: "./my-package")
+  configuration.renamePackage("local", to: "personal")
 }
-let snapshot = await session.snapshot()
-let diagnostics = snapshot.validate(scope: .effective)
-let receipt = try await session.save(.shared)
+let prepared = application.inputs
+let installed = try await workspace.install()
+let refreshed = try await workspace.refresh(packagesNamed: ["emoji"])
+let built = try await workspace.build(to: rimeDirectory)
 ```
 
-`edit` 是同步闭包,抛错则整份草稿回滚。`snapshot` 返回独立值,包含共享和本地层各自的修订及 `isDirty`。`save(.shared)` / `save(.local)` 分别保存并返回实际持久化修订,保存等待期间的后续编辑仍保持未保存状态。将本地草稿设为 nil 后保存本地层会删除覆写文件。
+编辑器方法只修改临时候选,失败的修改不覆盖已有值并保留诊断。`addPackage` 可直接接受来源简写,或接受允许不完整的 `PackageFields`;无需先构造可能抛错的 PackageRequest。表单中的原始 commit 文本可通过 `commit: String` 添加重载提交,无效 commit 与其他字段问题一起收集。名称推导、来源简写和相对路径解析由 Core 负责,本地来源以工作区固定基准定位。此用户输入入口展开 `~`,底层路径类型不展开。
 
-`reload()` 拒绝丢弃未保存编辑;明确放弃使用 `discardChangesAndReload()`。保存保持 YAML 语义,不保留注释、引号和排版。两个文件分别保存,不构成跨文件同步事务。
+`validate(editing:)` 返回 `[ConfigurationDiagnostic]`,不联网、不提交本次变更。每条诊断包含原有 `PinewindError`、可选操作序号(从 0 开始)、包名和字段。字段用于表单定位,不伪造 YAML 行号。独立字段错误一次收集,前置错误导致无法判断的派生问题跳过。`update` 在联网解析前执行同一校验,有错误时整体抛出 `ConfigurationValidationError`。
 
-`workspace.resolve(editing:)` 在内存中编辑草稿,完整解析成功后才保存配置及 lock。它预检所有文件基线,逐个原子写入,最后提交 lock;中途 I/O 失败或进程中断可能留下需重新 resolve 的声明。返回结果可直接用于 `fetch`;准备失败不回滚声明。`ConfigurationDraft.addPackage` 默认插入第一个 `self` 前,支持 `PackageInsertion` 指定位置。草稿层的 `removePackage` 同时删除 order 引用和本地覆写;直接调用 `ManifestDocument.removePackage` 仍拒绝删除被引用的名称。
-
-工作区创建的草稿在 `redirectPackage` 中按工作区的 `relativeTo` 解析相对路径,保存、重载和 resolve 编辑使用同一基准;独立创建的 `ConfigurationDraft` 在初始化时捕获当前目录。
-
-工作区默认忽略未保存草稿。显式预览:
+GUI 可以持有不可变候选,检查、预览并应用同一快照,无需 Session:
 
 ```swift
-let snapshot = await session.snapshot()
-let resolution = try await workspace.resolve(preview: snapshot)
-let prepared = try await workspace.fetch(resolution)
-let plan = try await workspace.plan(prepared)
-let result = try await workspace.compose(plan, to: previewOutputPath)
+let candidate = try await workspace.configuration { configuration in
+  configuration.addPackage("unfinished", fields: PackageFields())
+}
+let diagnostics = candidate.validate()
+// 修正后的候选通过同一个编辑入口重新生成。
+let valid = try await workspace.configuration { $0.addPackage(source: "emoji") }
+let preview = try await workspace.resolve(preview: valid)
+let inputs = try await workspace.fetch(preview)
+let plan = try await workspace.plan(inputs)
+let previewResult = try await workspace.compose(plan, to: previewOutputPath)
+let applied = try await workspace.apply(valid)
 ```
 
-预览不写共享配置或共享锁。正常发布前检查已保存配置及锁的基线,拒绝过期计划。本地树的文件内容在每次规划时捕获,规划完成后的编辑只影响下一次规划。
+候选不改变工作区的已保存状态。`apply` 检查整个配置与 lock 的基线,不自动重放编辑闭包;发生外部修改则整批拒绝。校验或解析失败不提交。本次批量的声明、本地覆写和 lock 由持久化重做日志协调提交,Core 读者先恢复未完成事务再读取;日志持久化后即进入提交阶段,不再响应取消。I/O 故障可能返回错误并留下待恢复日志,下一次访问完成同一事务。它不保证其他程序或云同步逐个读取这些文件时的跨文件原子可见性。
+
+Core 自定义的公共错误统一遵循 `PinewindErrorProtocol` (`Error`、`Sendable`、`CustomStringConvertible`),CLI/GUI 可统一捕获后按具体类型处理;取消仍是标准库的 `CancellationError`。
+
+默认应用后准备依赖。提交后的准备失败抛出 `PreparationFailure`,提供已提交的 `resolution` 和原始 `cause: PinewindError`;声明与 lock 保留,可用 `install(locked: true)` 重试。取消始终保持 `CancellationError`,取消后可重新查询状态。只提交并解析、不准备文件时使用 `preparation: .deferred`,例如移除包。
+
+`workspace.status()` 只读返回配置、可用的解析结果和输入准备状态,不自动解析或下载;损坏或缺失的 lock/cache 通过类型化状态原因展示。配置读取会恢复此前已提交的事务。构建使用 `build(to:)`,在 Core 内统一执行离线构建和 Rime 运行时文件保护;底层 `compose` 仍提供通用发布能力。
+
+`PlatformDirectories` 提供平台配置、状态和缓存位置,`workspaceLocations()` 直接生成 CLI/GUI 共用的默认文件布局,各目录可独立覆盖。`discoverRimeDirectories()` 返回已存在的前端与目录候选,GUI 可展示选择器;`output(frontend:)` 共用 CLI 的自动选择规则。显式 WorkspaceLocations 仍支持任意平台位置。
+
+正常发布前检查配置与 lock 基线,拒绝过期计划。预览不提交配置或 lock,但可下载和缓存输入。本地文件内容在规划时捕获,规划完成后的编辑只影响下一次规划。
+
+公开面只保留调用参数、只读产物、编辑和预览能力、后端协议与错误载荷。Session、内部草稿、保存回执、具体 Git/HTTP 后端、Glob 和归因辅助方法不再公开;PinnedResource 的构造器与文档上重复的修改方法也收回内部。
 
 ## 版本更新、开发模式与后端
 
 解析结果提供包、import 和资源标识,可选择更新:
 
 ```swift
-let updated = try await workspace.update(.packages(Set(resolution.packages.map(\.id))))
+let updated = try await workspace.resolve(refreshing: .packages(Set(resolution.packages.map(\.id))))
 let resources = Set(updated.packages.flatMap(\.resourceIDs))
-let refreshed = try await workspace.update(.resources(resources))
-let named = try await workspace.update(packagesNamed: ["emoji"])
+let refreshed = try await workspace.resolve(refreshing: .resources(resources))
+let named = try await workspace.refresh(packagesNamed: ["emoji"])
 ```
 
 过期或不属于当前锁的标识会被拒绝。明确 commit 不随 update 前进。recipe 下载资源以 URL、相对路径和实际字节的 SHA-256 固定;缓存丢失后的下载若与固定校验值不同会失败,不会接受新内容或自动改锁。
@@ -182,11 +196,11 @@ let named = try await workspace.update(packagesNamed: ["emoji"])
 
 默认 `.locked` 准备模式允许共享锁定版本和本地目录改向。覆写引入其他远程选择或尚未固定的资源时,显式使用 `fetch(mode: .development)` 或 `fetchAndCompose(to:mode: .development)`。开发结果只用于本次准备,不写共享锁或本地锁。
 
-`WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现为 `GitKitRepositoryProvider`、`HTTPSResourceDownloader`。认证通过 `GitKitRepositoryProvider(credentials:)` 注入。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。
+`WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现使用内部 GitKit 和 HTTPS 后端。认证和 HTTP session 通过 `WorkspaceServices.live(credentials:session:)` 配置。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。
 
-`HTTPSResourceDownloader(session:)` 在有界和无上限下载中都将认证质询转发给注入 session 的 delegate,回调接收注入的 session 和实际传输的 task;未实现对应回调时使用默认认证处理。Corelibs 的有界下载使用相同配置的专用 session 承载传输。
+通过服务工厂注入的 session 在有界和无上限下载中都将认证质询转发给注入 session 的 delegate,回调接收注入的 session 和实际传输的 task;未实现对应回调时使用默认认证处理。Corelibs 的有界下载使用相同配置的专用 session 承载传输。
 
-各操作可传入独立的 `progress` 回调。错误通过 `PinewindError.configuration`、`.incident`、`.runtime` 区分文档裁决、处理事件和无文档锚点的失败,再匹配其 `Failure` 领域事实。文件操作携带路径与系统错误码,网络传输携带原因分类,校验失败携带预期与实际哈希;取消保留 `CancellationError`。提交前检查取消,提交后返回成功。进度回调的界面线程切换由调用方负责。
+各操作可传入独立的 `progress` 回调。错误通过 `PinewindError.configuration`、`.incident`、`.runtime` 区分文档裁决、处理事件和无文档锚点的失败,再匹配其 `Failure` 领域事实。文件操作携带路径与系统错误码,网络传输携带原因分类,校验失败携带预期与实际哈希;取消保留 `CancellationError`。提交阶段不响应取消;后续准备阶段仍可取消,已提交状态保留。进度回调的界面线程切换由调用方负责。
 
 完整语义与文件系统边界见 [设计契约](Docs/Package-Management-Design.md);验证方式见 [贡献指南](CONTRIBUTING.md)。
 

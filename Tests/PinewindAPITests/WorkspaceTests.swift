@@ -124,7 +124,11 @@ private struct Fixture {
     try FileManager.default.createDirectory(at: url(input), withIntermediateDirectories: true)
   }
   func remove() { try? FileManager.default.removeItem(at: url(root)) }
-  func workspace(options: WorkspaceOptions = WorkspaceOptions()) async throws -> Workspace {
+  // Functional tests share CI CPU and disk with the rest of the parallel suite.
+  // Interpreter timeout behavior is tested separately with an explicit short budget.
+  func workspace(
+    options: WorkspaceOptions = WorkspaceOptions(imports: ImportLimits(timeout: .seconds(60)))
+  ) async throws -> Workspace {
     try await Workspace.open(
       locations: locations,
       services: WorkspaceServices(repositories: repositories, resources: downloads),
@@ -139,8 +143,297 @@ private struct Fixture {
   }
 }
 
-@Suite("Public Workspace API", .timeLimit(.minutes(1)))
+@Suite("Public Workspace API", .timeLimit(.minutes(3)))
 struct WorkspaceTests {
+  @Test func validationCollectsFailedEditsAndAllIndependentFieldsWithoutSideEffects() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let badFields = PackageFields(
+      url: .value(URL(string: "http://example.com/package")!), revision: .value(.branch("")),
+      recipe: .value("../escape"), include: .value(["../first", "../second"]))
+    let candidate = try await workspace.configuration { configuration in
+      configuration.addPackage("bad", fields: badFields)
+      configuration.addPackage("bad", fields: PackageFields())
+      configuration.removePackage("absent")
+      configuration.moveEntry(from: -1, to: 0)
+    }
+    let diagnostics = candidate.validate()
+    #expect(diagnostics.count == 8)
+    #expect(diagnostics.filter { $0.packageName == "bad" && $0.field == "include" }.count == 2)
+    #expect(diagnostics.filter { $0.operationIndex == 0 }.count == 5)
+    #expect(diagnostics.filter { $0.operationIndex == 1 }.count == 1)
+    #expect(candidate.manifest.names["bad"] == badFields)
+    await #expect { _ = try await workspace.apply(candidate) } throws: {
+      guard let error = $0 as? any PinewindErrorProtocol else { return false }
+      return (error as? ConfigurationValidationError)?.diagnostics == diagnostics
+    }
+    #expect(!exists(f.manifest) && !exists(f.lock) && !exists(f.overrides))
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+    let again = try await workspace.validate { $0.removePackage("absent") }
+    #expect(again.count == 1)
+    #expect(try await workspace.configuration().manifest.names.isEmpty)
+  }
+
+  @Test func failedEditDoesNotPreventIndependentEditsBeingDiagnosed() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let diagnostics = try await workspace.validate {
+      $0.addPackage("self", fields: PackageFields())
+      $0.addPackage("", fields: PackageFields())
+      $0.addPackage("incomplete", fields: PackageFields())
+      $0.addPackage("anchored", fields: PackageFields(), insertion: .before("absent"))
+    }
+    #expect(diagnostics.count == 4)
+    #expect(Set(diagnostics.compactMap(\.operationIndex)) == [0, 1, 2, 3])
+    #expect(diagnostics.allSatisfy { $0.error.description.isEmpty == false })
+  }
+
+  @Test func missingSourcesAndInvalidFiltersAreCollectedAlongsideOtherFieldProblems() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let diagnostics = try await workspace.validate {
+      $0.addPackage(
+        "incomplete",
+        fields: PackageFields(
+          revision: .value(.branch("")), recipe: .value("../bad")))
+      $0.manifest.order.append(.userFiles(FileFilter(include: ["../one", "../two"])))
+    }
+    #expect(diagnostics.count == 5)
+    #expect(
+      Set(diagnostics.filter { $0.packageName == "incomplete" }.compactMap(\.field)) == [
+        "url", "revision", "recipe",
+      ])
+  }
+
+  @Test func rawCommitInputIsValidatedAlongsideTheOtherFormFields() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "pinned"])
+    let workspace = try await f.workspace()
+    let candidate = try await workspace.configuration {
+      $0.addPackage(
+        "bad", source: "http://example.com/repo", commit: "invalid",
+        recipe: "../recipe", filter: FileFilter(include: ["../escape"]))
+    }
+    let diagnostics = candidate.validate()
+    #expect(diagnostics.count == 4)
+    #expect(Set(diagnostics.compactMap(\.field)) == ["url", "revision", "recipe", "include"])
+    #expect(diagnostics.allSatisfy { $0.operationIndex == 0 && $0.packageName == "bad" })
+    await #expect(throws: ConfigurationValidationError.self) {
+      _ = try await workspace.apply(candidate)
+    }
+    #expect(!exists(f.lock) && !exists(f.manifest))
+    let valid = try await workspace.configuration {
+      $0.addPackage(source: "team/repo", commit: firstID)
+    }
+    #expect(valid.validate().isEmpty)
+    #expect(valid.manifest.names["repo"]?.revision == .value(.commit(try CommitID(firstID))))
+    let applied = try await workspace.update {
+      $0.addPackage("pinned", source: endpoint.absoluteString, commit: firstID)
+    }
+    #expect(applied.inputs != nil)
+    #expect(applied.resolution.packages[0].commit.string == firstID)
+  }
+
+  @Test func singleAndBatchUpdatesPrepareInputsWithoutPublishing() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "remote"])
+    let workspace = try await f.workspace()
+    let fields = PackageFields(url: .value(endpoint))
+    let applied = try await workspace.update { $0.addPackage("first", fields: fields) }
+    #expect(applied.inputs != nil && applied.resolution.packages.count == 1)
+    let batch = try await workspace.update {
+      $0.renamePackage("first", to: "renamed")
+      $0.addPackage("second", fields: fields, insertion: .after("self"))
+      $0.moveEntry(from: 2, to: 0)
+    }
+    #expect(batch.inputs != nil)
+    let saved = try await workspace.configuration()
+    #expect(
+      saved.manifest.order == [.named("second"), .named("renamed"), .userFiles(FileFilter())])
+    #expect(saved.manifest.names["first"] == nil)
+    #expect(!exists(f.output))
+    _ = try await workspace.build(to: f.output)
+    #expect(try read(f.output.appending("default.yaml")) == "remote")
+  }
+
+  @Test func preparationFailureExposesCommittedResolutionAndInstallRetriesIt() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "remote"])
+    try f.remote()
+    let workspace = try await f.workspace()
+    _ = try await workspace.resolve()
+    await f.repositories.rejecting(preparation: true)
+    let fields = PackageFields(url: .value(endpoint), revision: .value(.branch("main")))
+    let progress: OperationProgress = { event in
+      if case .completed(.resolving) = event {
+        try? FileManager.default.removeItem(at: url(f.locations.cacheRoot))
+      }
+    }
+    do {
+      _ = try await workspace.update(progress: progress) { $0.addPackage("alias", fields: fields) }
+      Issue.record("expected preparation failure")
+    } catch let error as any PinewindErrorProtocol {
+      let failure = try #require(error as? PreparationFailure)
+      #expect(failure.resolution.packages.count == 1)
+      #expect(failure.cause.description.contains("503"))
+    }
+    #expect(try await workspace.configuration().manifest.names["alias"] == fields)
+    let lock = try Data(contentsOf: url(f.lock))
+    await f.repositories.rejecting()
+    _ = try await workspace.install(locked: true)
+    #expect(try Data(contentsOf: url(f.lock)) == lock)
+  }
+
+  @Test func cancellationAfterCommitKeepsTheBatchAndItsLock() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let task = Task {
+      try await workspace.update(progress: { event in
+        if case .completed(.resolving) = event { withUnsafeCurrentTask { $0?.cancel() } }
+      }) { $0.manifest.order = [] }
+    }
+    await #expect(throws: CancellationError.self) { _ = try await task.value }
+    #expect(try await workspace.configuration().manifest.order.isEmpty)
+    _ = try await workspace.install(locked: true)
+  }
+
+  @Test func competingCandidatesCommitOneCompleteBatchAndNeverReplayEdits() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let first = try await workspace.configuration {
+      $0.manifest.order = []
+      $0.localOverrides = LocalOverridesDocument()
+    }
+    let second = try await workspace.configuration {
+      $0.manifest.order = [.userFiles(FileFilter(include: ["*.yaml"]))]
+    }
+    let successes = await withTaskGroup(of: Bool.self) { group in
+      for candidate in [first, second] {
+        group.addTask {
+          do {
+            _ = try await workspace.apply(candidate)
+            return true
+          } catch {
+            #expect(error as? PinewindError == .runtime(.state(.externallyModified)))
+            return false
+          }
+        }
+      }
+      var successes = 0
+      for await success in group { if success { successes += 1 } }
+      return successes
+    }
+    #expect(successes == 1)
+    let saved = try await workspace.configuration()
+    if saved.manifest.order.isEmpty {
+      #expect(saved.localOverrides != nil)
+    } else {
+      #expect(saved.localOverrides == nil)
+    }
+    _ = try await workspace.install(locked: true)
+  }
+
+  @Test func buildRuntimeProtectionAppliesToEveryCoreConsumerEvenWhenForced() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("words.userdb/data"), "database")
+    let workspace = try await f.workspace()
+    await #expect(
+      throws: PinewindError.runtime(
+        .state(.runtimeOutputPath(try RelativePath("words.userdb/data"))))
+    ) {
+      _ = try await workspace.build(to: f.output, overwriteUnmanaged: true)
+    }
+    #expect(!exists(f.output))
+  }
+
+  @Test func sourceConveniencesAndReadOnlyStatusWorkWithoutCLITypes() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let locations = try WorkspaceLocations(
+      userFilesRoot: f.locations.userFilesRoot, configuration: f.locations.configuration,
+      stateRoot: f.locations.stateRoot, cacheRoot: f.locations.cacheRoot, relativeTo: f.root)
+    let workspace = try await Workspace.open(locations: locations)
+    let candidate = try await workspace.configuration {
+      $0.addPackage(source: "emoji")
+      $0.addPackage(source: "team/rime-custom.git")
+      $0.addPackage(source: "./local")
+      $0.addPackage("explicit", source: "https://example.com/pkg.git")
+    }
+    #expect(candidate.validate().isEmpty)
+    #expect(
+      candidate.manifest.names["emoji"]?.url
+        == .value(URL(string: "https://github.com/rime/rime-emoji")!))
+    #expect(candidate.manifest.names["custom"] != nil)
+    guard case .value(let localURL)? = candidate.manifest.names["local"]?.url else {
+      Issue.record("expected an absolute local source")
+      return
+    }
+    #expect(localURL.standardizedFileURL == url(f.root.appending("local")).standardizedFileURL)
+    #expect(candidate.manifest.names["explicit"] != nil)
+    let invalid = try await workspace.validate {
+      $0.addPackage("bad", source: "owner/repo/extra")
+      $0.addPackage("http", source: "http://example.com/repo")
+    }
+    #expect(invalid.count == 2)
+    #expect(!exists(f.manifest) && !exists(f.lock))
+    // Reading an unresolved remote declaration must not create a lock or make network calls.
+    try f.remote()
+    let status = try await workspace.status()
+    #expect(status.resolution == nil)
+    guard case .unavailable(let error) = status.inputs else {
+      Issue.record("expected unresolved status")
+      return
+    }
+    #expect(error == .runtime(.lock(.resolveRequired)))
+    #expect(!exists(f.lock))
+    #expect(await f.repositories.counts().0 == 0)
+  }
+
+  @Test func platformDiscoveryReturnsCandidatesForGUISelection() throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let directories = PlatformDirectories(environment: [:], home: f.root)
+    #if os(macOS)
+      let frontends: [RimeFrontend] = [.squirrel, .fcitx5]
+    #elseif os(Windows)
+      // Weasel may have an explicit registry override on a developer machine.
+      let frontends: [RimeFrontend] = []
+    #else
+      let frontends: [RimeFrontend] = [.fcitx5, .ibus]
+    #endif
+    for frontend in frontends {
+      try FileManager.default.createDirectory(
+        at: url(directories.rimeDirectory(frontend)), withIntermediateDirectories: true)
+    }
+    if !frontends.isEmpty {
+      let discovered = directories.discoverRimeDirectories()
+      #expect(Set(discovered.map(\.frontend)) == Set(frontends))
+      #expect(throws: PinewindError.self) { _ = try directories.output(frontend: nil) }
+      #expect(
+        try directories.output(frontend: frontends[0]) == directories.rimeDirectory(frontends[0]))
+    }
+    let locations = try directories.workspaceLocations(
+      configurationDirectory: "custom/config", stateDirectory: "custom/state",
+      cacheDirectory: "custom/cache", relativeTo: f.root)
+    #expect(locations.stateRoot == f.root.appending("custom/state/managed"))
+    #expect(
+      locations.configuration.localOverrides
+        == .path(f.root.appending("custom/state/pinewind.local.yaml")))
+    #expect(locations.userFilesRoot == .path(f.root.appending("custom/config/user")))
+    #expect(!exists(f.root.appending("custom")))
+    _ = WorkspaceServices.live(credentials: { _ in nil })
+  }
+
   @Test func concurrentIdenticalResolutionsCommitIdempotently() async throws {
     let f = try Fixture()
     defer { f.remove() }
@@ -156,37 +449,30 @@ struct WorkspaceTests {
     #expect(try await a.value.packages[0].commit == b.value.packages[0].commit)
     _ = try await first.fetch()
   }
-  @Test func redirectsUseTheWorkspaceBaseDuringEditingSavingAndReload() async throws {
+  @Test func redirectsUseTheWorkspaceBaseDuringEditingAndApplication() async throws {
     let f = try Fixture()
     defer { f.remove() }
     let locations = try WorkspaceLocations(
       userFilesRoot: f.locations.userFilesRoot, configuration: f.locations.configuration,
       stateRoot: f.locations.stateRoot, cacheRoot: f.locations.cacheRoot, relativeTo: f.root)
     let workspace = try await Workspace.open(locations: locations)
-    let session = try await workspace.configuration()
     let request = try PackageRequest(source: .directory(.path(f.input)))
-    try await session.edit {
-      try $0.addPackage("local", request: request)
-      try $0.redirectPackage("local", to: .path("relative package"))
+    _ = try await workspace.update(preparation: .deferred) {
+      $0.addPackage("local", request: request)
+      $0.redirectPackage("local", to: .path("relative package"))
     }
-    _ = try await session.save(.shared)
-    _ = try await session.save(.local)
     func redirectedPath(_ snapshot: ConfigurationSnapshot) throws -> FilePath {
       let field = try #require(snapshot.localOverrides?.names["local"]?.url)
       guard case .value(let value) = field else { throw StateFailure.staleInputs }
       return FilePath(value.path)
     }
-    #expect(try redirectedPath(await session.snapshot()) == f.root.appending("relative package"))
-    try await session.discardChangesAndReload()
-    try await session.edit { try $0.redirectPackage("local", to: .path("after reload")) }
-    _ = try await session.save(.local)
-    #expect(try redirectedPath(await session.snapshot()) == f.root.appending("after reload"))
-    _ = try await workspace.resolve(editing: {
-      try $0.redirectPackage("local", to: .path("during resolution"))
-    })
     #expect(
-      try redirectedPath(await workspace.configuration().snapshot())
-        == f.root.appending("during resolution"))
+      try redirectedPath(await workspace.configuration()) == f.root.appending("relative package"))
+    let candidate = try await workspace.configuration {
+      $0.redirectPackage("local", to: .path("after reload"))
+    }
+    _ = try await workspace.apply(candidate, preparation: .deferred)
+    #expect(try redirectedPath(await workspace.configuration()) == f.root.appending("after reload"))
   }
 
   @Test func managedPublicationRejectsUnmanagedCollisionsBeforeAnyWriteAndForceReportsThem()
@@ -316,16 +602,15 @@ struct WorkspaceTests {
     let initial = try await workspace.resolve()
     let manifest = try read(f.manifest)
     let lock = try Data(contentsOf: url(f.lock))
-    let session = try await workspace.configuration()
-    await session.edit {
+    let candidate = try await workspace.configuration {
       $0.manifest.order.removeAll {
         if case .userFiles = $0 { return true }
         return false
       }
     }
     try await f.repositories.install(secondID, files: ["default.yaml": "preview"])
-    let preview = try await workspace.update(
-      .packages(Set(initial.packages.map(\.id))), preview: session.snapshot())
+    let preview = try await workspace.resolve(
+      refreshing: .packages(Set(initial.packages.map(\.id))), preview: candidate)
     #expect(preview.packages[0].commit.string == secondID)
     let inputs = try await workspace.fetch(preview)
     let plan = try await workspace.plan(inputs)
@@ -333,7 +618,7 @@ struct WorkspaceTests {
     #expect(try read(f.output.appending("default.yaml")) == "preview")
     #expect(try read(f.manifest) == manifest)
     #expect(try Data(contentsOf: url(f.lock)) == lock)
-    #expect(await session.snapshot().sharedIsDirty)
+    #expect(candidate.validate().isEmpty)
     #expect(try await workspace.resolve().packages[0].commit.string == firstID)
   }
 
@@ -350,7 +635,7 @@ struct WorkspaceTests {
     let b = try await other.workspace()
     let resolution: Resolution
     if preview {
-      let snapshot = try await a.configuration().snapshot()
+      let snapshot = try await a.configuration()
       resolution = try await a.resolve(preview: snapshot)
     } else {
       resolution = try await a.resolve()
@@ -397,16 +682,19 @@ struct WorkspaceTests {
     let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
     await f.repositories.rejecting(resolution: true)
     await #expect(throws: PinewindError.self) {
-      _ = try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+      _ = try await workspace.update(
+        preparation: .deferred, { $0.addPackage("new", request: request) }
+      ).resolution
     }
     #expect(!exists(f.manifest) && !exists(f.overrides) && !exists(f.lock))
-    let session = try await workspace.configuration()
-    _ = try await session.save(.shared)
+    try write(f.manifest, ManifestDocument().yaml())
     _ = try await workspace.resolve()
     let originalManifest = try read(f.manifest)
     let originalLock = try Data(contentsOf: url(f.lock))
     await #expect(throws: PinewindError.self) {
-      _ = try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+      _ = try await workspace.update(
+        preparation: .deferred, { $0.addPackage("new", request: request) }
+      ).resolution
     }
     #expect(try read(f.manifest) == originalManifest)
     #expect(try Data(contentsOf: url(f.lock)) == originalLock)
@@ -418,9 +706,12 @@ struct WorkspaceTests {
     try await f.repositories.install(firstID, files: ["default.yaml": "remote"])
     let workspace = try await f.workspace()
     let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
-    let resolution = try await workspace.resolve(editing: {
-      try $0.addPackage("new", request: request)
-    })
+    let resolution = try await workspace.update(
+      preparation: .deferred,
+      {
+        $0.addPackage("new", request: request)
+      }
+    ).resolution
     let manifest = try read(f.manifest)
     let lock = try Data(contentsOf: url(f.lock))
     try FileManager.default.removeItem(at: url(f.locations.cacheRoot))
@@ -445,7 +736,8 @@ struct WorkspaceTests {
     let lock = try Data(contentsOf: url(f.lock))
     await f.repositories.pauseNext()
     let task = Task {
-      try await workspace.resolve(editing: { try $0.addPackage("new", request: request) })
+      try await workspace.update(preparation: .deferred, { $0.addPackage("new", request: request) })
+        .resolution
     }
     while !(await f.repositories.didStart()) { try await Task.sleep(for: .milliseconds(5)) }
     let external = try ManifestDocument(order: []).yaml()
@@ -456,32 +748,31 @@ struct WorkspaceTests {
     #expect(try Data(contentsOf: url(f.lock)) == lock)
   }
 
-  @Test func draftInsertionAndRemovalCoordinateOrderAndOverrides() throws {
-    let request = try PackageRequest(
-      source: .directory(.path(FilePath(FileManager.default.temporaryDirectory.path))))
-    var draft = ConfigurationDraft()
-    try draft.addPackage("first", request: request)
-    try draft.addPackage("last", request: request, insertion: .after("self"))
-    try draft.addPackage("middle", request: request, insertion: .before("self"))
+  @Test func candidateInsertionAndRemovalCoordinateOrderAndOverrides() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let workspace = try await f.workspace()
+    let request = try PackageRequest(source: .directory(.path(f.input)))
+    let candidate = try await workspace.configuration { draft in
+      draft.addPackage("first", request: request)
+      draft.addPackage("last", request: request, insertion: .after("self"))
+      draft.addPackage("middle", request: request, insertion: .before("self"))
+      draft.manifest.order.append(.named("first"))
+      draft.redirectPackage("first", to: .path(f.input))
+      draft.removePackage("first")
+    }
     #expect(
-      draft.manifest.order == [
-        .named("first"), .named("middle"), .userFiles(FileFilter()), .named("last"),
-      ])
-    draft.manifest.order.append(.named("first"))
-    try draft.redirectPackage(
-      "first", to: .path(FilePath(FileManager.default.temporaryDirectory.path)))
-    try draft.removePackage("first")
-    #expect(draft.manifest.order == [.named("middle"), .userFiles(FileFilter()), .named("last")])
-    #expect(draft.localOverrides?.names["first"] == nil)
-    let before = draft
-    #expect(throws: PinewindError.self) {
-      try draft.addPackage("new", request: request, insertion: .before("absent"))
+      candidate.manifest.order == [.named("middle"), .userFiles(FileFilter()), .named("last")])
+    #expect(candidate.localOverrides?.names["first"] == nil)
+    #expect(candidate.validate().isEmpty)
+    let diagnostics = try await workspace.validate { draft in
+      draft.addPackage("middle", request: request)
+      draft.manifest.order.append(.named("middle"))
+      draft.addPackage("new", request: request, insertion: .after("middle"))
+      draft.addPackage("other", request: request, insertion: .before("absent"))
     }
-    #expect(draft == before)
-    draft.manifest.order.append(.named("middle"))
-    #expect(throws: PinewindError.self) {
-      try draft.addPackage("new", request: request, insertion: .after("middle"))
-    }
+    #expect(diagnostics.count == 2)
+    #expect(!exists(f.manifest))
   }
 
   @Test func editedRemovalSavesSharedReferencesAndLocalOverridesTogether() async throws {
@@ -489,14 +780,17 @@ struct WorkspaceTests {
     defer { f.remove() }
     let workspace = try await f.workspace()
     let request = try PackageRequest(source: .directory(.path(f.input)))
-    _ = try await workspace.resolve(editing: {
-      try $0.addPackage("local", request: request)
-      $0.manifest.order.append(.named("local"))
-      try $0.redirectPackage("local", to: .path(f.input))
-    })
+    _ = try await workspace.update(
+      preparation: .deferred,
+      {
+        $0.addPackage("local", request: request)
+        $0.manifest.order.append(.named("local"))
+        $0.redirectPackage("local", to: .path(f.input))
+      }
+    ).resolution
     #expect(exists(f.overrides))
-    _ = try await workspace.resolve(editing: { try $0.removePackage("local") })
-    let snapshot = try await workspace.configuration().snapshot()
+    _ = try await workspace.update(preparation: .deferred, { $0.removePackage("local") }).resolution
+    let snapshot = try await workspace.configuration()
     #expect(snapshot.manifest.names.isEmpty)
     #expect(snapshot.manifest.order == [.userFiles(FileFilter())])
     #expect(snapshot.localOverrides?.names.isEmpty == true)
@@ -513,11 +807,11 @@ struct WorkspaceTests {
     try f.remote()
     let workspace = try await f.workspace()
     let first = try await workspace.resolve()
-    let session = try await workspace.configuration()
-    await session.edit { $0.manifest.names["package"]?.exclude = .value(["unused.txt"]) }
-    _ = try await session.save(.shared)
+    _ = try await workspace.update(preparation: .deferred) {
+      $0.manifest.names["package"]?.exclude = .value(["unused.txt"])
+    }
     await f.downloads.set(resource, "second")
-    let updated = try await workspace.update(packagesNamed: ["package"])
+    let updated = try await workspace.resolve(refreshingPackagesNamed: ["package"])
     #expect(updated.packages[0].commit == first.packages[0].commit)
     #expect(updated.packages[0].resources != first.packages[0].resources)
   }
@@ -533,20 +827,21 @@ struct WorkspaceTests {
       source: .git(
         RepositoryRequest(
           url: URL(string: "https://example.com/other.git")!, revision: .branch("main"))))
-    _ = try await workspace.resolve(editing: {
-      try $0.addPackage("first", request: first)
-      try $0.addPackage("other", request: other)
-    })
-    let session = try await workspace.configuration()
-    try await session.edit { try $0.moveEntry(from: 0, to: 2) }
-    _ = try await session.save(.shared)
+    _ = try await workspace.update(
+      preparation: .deferred,
+      {
+        $0.addPackage("first", request: first)
+        $0.addPackage("other", request: other)
+      }
+    ).resolution
+    _ = try await workspace.update(preparation: .deferred) { $0.moveEntry(from: 0, to: 2) }
     try await f.repositories.install(secondID, files: ["default.yaml": "second"])
-    let updated = try await workspace.update(packagesNamed: ["first"])
+    let updated = try await workspace.resolve(refreshingPackagesNamed: ["first"])
     #expect(updated.packages.first(where: { $0.request == first })?.commit.string == secondID)
     #expect(updated.packages.first(where: { $0.request == other })?.commit.string == firstID)
     let lock = try Data(contentsOf: url(f.lock))
     await #expect(throws: PinewindError.self) {
-      _ = try await workspace.update(packagesNamed: ["absent"])
+      _ = try await workspace.resolve(refreshingPackagesNamed: ["absent"])
     }
     #expect(try Data(contentsOf: url(f.lock)) == lock)
   }
@@ -712,65 +1007,56 @@ struct WorkspaceTests {
       cacheRoot: "cache", relativeTo: f.root)
     try write(f.root.appending("input/schema.yaml"), "test")
     let workspace = try await Workspace.open(locations: locations)
-    let session = try await workspace.configuration()
-    await session.edit { $0.localOverrides = LocalOverridesDocument() }
-    await #expect(throws: PinewindError.self) { _ = try await session.save(.local) }
+    await #expect(throws: ConfigurationValidationError.self) {
+      _ = try await workspace.update { $0.localOverrides = LocalOverridesDocument() }
+    }
     let result = try await workspace.compose(to: "relative-output")
     #expect(exists(result.directory))
     #expect(exists(f.root.appending("relative-output")))
   }
-  @Test func snapshotEditingSavingAndReloadAreExplicit() async throws {
+  @Test func candidatesAreDetachedAndOnlyAppliedExplicitly() async throws {
     let f = try Fixture()
     defer { f.remove() }
     let workspace = try await f.workspace()
-    let session = try await workspace.configuration()
-    await session.edit { $0.manifest.order = [] }
-    #expect(await session.snapshot().sharedIsDirty)
-    await #expect(throws: PinewindError.self) { try await session.reload() }
-    let receipt = try await session.save(.shared)
-    #expect(receipt.revision == 1)
-    #expect(await session.snapshot().sharedIsDirty == false)
-    await session.edit { $0.localOverrides = LocalOverridesDocument() }
-    #expect(await session.snapshot().localIsDirty)
-    _ = try await session.save(.local)
+    let candidate = try await workspace.configuration { $0.manifest.order = [] }
+    #expect(candidate.manifest.order.isEmpty)
+    #expect(try await workspace.configuration().manifest.order == [.userFiles(FileFilter())])
+    #expect(!exists(f.manifest) && !exists(f.lock))
+    _ = try await workspace.apply(candidate)
+    #expect(try await workspace.configuration().manifest.order.isEmpty)
+    _ = try await workspace.update { $0.localOverrides = LocalOverridesDocument() }
     #expect(exists(f.overrides))
-    await session.edit { $0.localOverrides = nil }
-    _ = try await session.save(.local)
+    _ = try await workspace.update { $0.localOverrides = nil }
     #expect(!exists(f.overrides))
-    await session.edit { $0.manifest.order = [.userFiles(FileFilter())] }
-    try await session.discardChangesAndReload()
-    #expect(await session.snapshot().manifest.order.isEmpty)
+    #expect(candidate.manifest.order.isEmpty)
   }
   @Test func previewDoesNotWriteSharedDocumentsOrLock() async throws {
     let f = try Fixture()
     defer { f.remove() }
     try await f.repositories.install(firstID, files: ["default.yaml": "value: preview"])
     let workspace = try await f.workspace()
-    let session = try await workspace.configuration()
     let request = try PackageRequest(
       source: .git(RepositoryRequest(url: endpoint, revision: .branch("main"))))
-    try await session.edit { try $0.addPackage("package", request: request) }
-    let snapshot = await session.snapshot()
+    let snapshot = try await workspace.configuration { $0.addPackage("package", request: request) }
     let resolution = try await workspace.resolve(preview: snapshot)
     let inputs = try await workspace.fetch(resolution)
     let plan = try await workspace.plan(inputs)
     #expect(try await workspace.compose(plan, to: f.output).paths.map(\.string) == ["default.yaml"])
     #expect(!exists(f.manifest))
     #expect(!exists(f.lock))
-    #expect(await session.snapshot().sharedIsDirty)
+    #expect(snapshot.validate().isEmpty)
   }
   @Test func savedOperationsIgnoreUnsavedDraftsAndDetectStalePublication() async throws {
     let f = try Fixture()
     defer { f.remove() }
     try write(f.input.appending("schema.yaml"), "value: saved")
     let workspace = try await f.workspace()
-    let session = try await workspace.configuration()
-    _ = try await session.save(.shared)
+    _ = try await workspace.update(preparation: .deferred) { _ in }
     let inputs = try await workspace.cachedInputs()
     let plan = try await workspace.plan(inputs)
-    await session.edit { $0.manifest.order = [] }
+    let candidate = try await workspace.configuration { $0.manifest.order = [] }
     #expect(try await workspace.compose(to: f.output).paths.count == 1)
-    _ = try await session.save(.shared)
+    _ = try await workspace.apply(candidate)
     await #expect(throws: PinewindError.self) {
       _ = try await workspace.compose(plan, to: f.output)
     }
@@ -807,11 +1093,11 @@ struct WorkspaceTests {
     _ = try await workspace.resolve()
     try await f.repositories.install(secondID, files: ["default.yaml": "second"])
     #expect(try await workspace.resolve().packages.first?.commit.string == firstID)
-    let session = try await workspace.configuration()
-    await session.edit { $0.manifest.order.insert(.userFiles(FileFilter()), at: 0) }
-    _ = try await session.save(.shared)
+    _ = try await workspace.update(preparation: .deferred) {
+      $0.manifest.order.insert(.userFiles(FileFilter()), at: 0)
+    }
     #expect(try await workspace.resolve().packages.first?.commit.string == firstID)
-    #expect(try await workspace.update().packages.first?.commit.string == secondID)
+    #expect(try await workspace.resolve(refreshing: .all).packages.first?.commit.string == secondID)
   }
   @Test func resourcesArePreparedPinnedAndUpdatedIndependently() async throws {
     let f = try Fixture()
@@ -832,7 +1118,8 @@ struct WorkspaceTests {
     #expect(try read(f.output.appending("extra.txt")) == "first")
     await f.downloads.set(resource, "second")
     #expect(try await workspace.resolve().packages[0].resources == resolution.packages[0].resources)
-    let updated = try await workspace.update(.resources(Set(resolution.packages[0].resourceIDs)))
+    let updated = try await workspace.resolve(
+      refreshing: .resources(Set(resolution.packages[0].resourceIDs)))
     #expect(updated.packages[0].commit.string == firstID)
     #expect(updated.packages[0].resources != resolution.packages[0].resources)
     _ = try await workspace.compose(to: f.output)
@@ -864,9 +1151,9 @@ struct WorkspaceTests {
       baseline = try Data(contentsOf: url(f.lock))
       let local = f.root.appending("development")
       try write(local.appending("recipe.yaml"), recipe)
-      let session = try await workspace.configuration()
-      try await session.edit { try $0.redirectPackage("package", to: .path(local)) }
-      _ = try await session.save(.local)
+      _ = try await workspace.update(preparation: .deferred) {
+        $0.redirectPackage("package", to: .path(local))
+      }
     }
     // This injected downloader ignores its limit, so this also tests the store's final check.
     await f.downloads.set(resource, String(repeating: "x", count: 9))
@@ -875,8 +1162,8 @@ struct WorkspaceTests {
     ) {
       switch operation {
       case "update":
-        _ = try await workspace.update(
-          .resources(Set(try #require(resolution).packages[0].resourceIDs)))
+        _ = try await workspace.resolve(
+          refreshing: .resources(Set(try #require(resolution).packages[0].resourceIDs)))
       case "recovery": _ = try await workspace.fetchAndCompose(to: f.output)
       case "development": _ = try await workspace.fetch(mode: .development)
       default: _ = try await workspace.resolve()
@@ -908,7 +1195,8 @@ struct WorkspaceTests {
     try write(f.manifest, "version: 1\norder: [{import: \(remote.absoluteString)}]\n")
     let workspace = try await f.workspace(
       options: WorkspaceOptions(
-        imports: ImportLimits(maximumFileBytes: 64), maximumResourceBytes: hostLimit))
+        imports: ImportLimits(timeout: .seconds(60), maximumFileBytes: 64),
+        maximumResourceBytes: hostLimit))
     _ = try await workspace.resolve()
     _ = try await workspace.fetchAndCompose(to: f.output)
     let baseline = try Data(contentsOf: url(f.lock))
@@ -966,9 +1254,9 @@ struct WorkspaceTests {
     let originalLock = try Data(contentsOf: url(f.lock))
     let local = f.root.appending("development")
     try write(local.appending("default.yaml"), "local first")
-    let session = try await workspace.configuration()
-    try await session.edit { try $0.redirectPackage("package", to: .path(local)) }
-    _ = try await session.save(.local)
+    _ = try await workspace.update(preparation: .deferred) {
+      $0.redirectPackage("package", to: .path(local))
+    }
     let prepared = try await workspace.cachedInputs()
     _ = try await workspace.compose(workspace.plan(prepared), to: f.output)
     try write(local.appending("default.yaml"), "local edited")
@@ -1100,11 +1388,10 @@ struct WorkspaceTests {
     }
     let a = try await first.workspace()
     let b = try await second.workspace()
-    let session = try await a.configuration()
-    let snapshot = await session.snapshot()
+    let snapshot = try await a.configuration()
     await #expect(throws: PinewindError.self) { _ = try await b.resolve(preview: snapshot) }
     await #expect(throws: PinewindError.runtime(.state(.foreignSnapshot))) {
-      _ = try await b.update(preview: snapshot)
+      _ = try await b.resolve(refreshing: .all, preview: snapshot)
     }
   }
   @Test func canonicalRepositoryAliasesResolveOnceAcrossDifferentApplications() async throws {
@@ -1131,9 +1418,9 @@ struct WorkspaceTests {
     let workspace = try await f.workspace()
     let first = try await workspace.resolve()
     try await f.repositories.install(secondID, files: ["default.yaml": "second"])
-    _ = try await workspace.update(.packages(Set(first.packages.map(\.id))))
+    _ = try await workspace.resolve(refreshing: .packages(Set(first.packages.map(\.id))))
     await #expect(throws: PinewindError.self) {
-      _ = try await workspace.update(.packages(Set(first.packages.map(\.id))))
+      _ = try await workspace.resolve(refreshing: .packages(Set(first.packages.map(\.id))))
     }
   }
   @Test func fixedCommitDoesNotResolveReferencesDuringUpdate() async throws {
@@ -1145,7 +1432,7 @@ struct WorkspaceTests {
       "version: 1\norder: [{url: \(endpoint.absoluteString), revision: {commit: \(firstID)}}]\n")
     let workspace = try await f.workspace()
     _ = try await workspace.resolve()
-    _ = try await workspace.update()
+    _ = try await workspace.resolve(refreshing: .all)
     #expect(await f.repositories.counts().0 == 0)
     #expect(try await workspace.compose(to: f.output).paths.map(\.string) == ["default.yaml"])
   }
@@ -1167,7 +1454,7 @@ struct WorkspaceTests {
     let suffix = duplicate ? ", {import: \(selected)}" : ""
     try write(f.manifest, "version: 1\norder: [\(prefix), {import: \(selected)}\(suffix)]\n")
     await f.downloads.set(selected, "package_list=(rime/first rime/second)\n")
-    let updated = try await workspace.update(.imports([id]))
+    let updated = try await workspace.resolve(refreshing: .imports([id]))
     let refreshed = updated.imports.filter { $0.id.request == id.request }
     #expect(refreshed.count == (duplicate ? 2 : 1))
     #expect(refreshed.allSatisfy { $0.packages.count == 2 && $0.id.index >= 2 })
@@ -1175,7 +1462,7 @@ struct WorkspaceTests {
     #expect(await f.downloads.requestedLimits(other).count == 1)
     #expect(await f.downloads.requestedLimits(selected).count > 1)
     await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
-      _ = try await workspace.update(.imports([id]))
+      _ = try await workspace.resolve(refreshing: .imports([id]))
     }
   }
   @Test func removedImportSelectionFailsWithoutChangingTheLock() async throws {
@@ -1190,7 +1477,7 @@ struct WorkspaceTests {
     let baseline = try Data(contentsOf: url(f.lock))
     try write(f.manifest, "version: 1\norder: []\n")
     await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
-      _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+      _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
     #expect(await f.downloads.count() == 1)
@@ -1205,10 +1492,10 @@ struct WorkspaceTests {
     let workspace = try await f.workspace()
     let initial = try await workspace.resolve()
     await f.downloads.set(remote, "package_list=(rime/first rime/second)\n")
-    let updated = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+    let updated = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     #expect(updated.imports[0].packages.count == 2)
     await #expect(throws: PinewindError.self) {
-      _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+      _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     }
   }
   @Test func unsafeRemoteIncludeAndImportLimitsPreserveTheLock() async throws {
@@ -1223,7 +1510,7 @@ struct WorkspaceTests {
     let baseline = try Data(contentsOf: url(f.lock))
     await f.downloads.set(remote, "source \"${root_dir}/../outside.conf\"\n")
     await #expect {
-      _ = try await workspace.update(.imports(Set(initial.imports.map(\.id))))
+      _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     } throws: { error in
       guard case .runtime(.defect(.wrapped(let detail, _))) = error as? PinewindError else {
         return false
@@ -1235,9 +1522,9 @@ struct WorkspaceTests {
     let bounded = try await Workspace.open(
       locations: f.locations,
       services: WorkspaceServices(repositories: f.repositories, resources: f.downloads),
-      options: WorkspaceOptions(imports: ImportLimits(maximumFileBytes: 64)))
+      options: WorkspaceOptions(imports: ImportLimits(timeout: .seconds(60), maximumFileBytes: 64)))
     await #expect {
-      _ = try await bounded.update()
+      _ = try await bounded.resolve(refreshing: .all)
     } throws: {
       if case .runtime(.network(.sizeLimitExceeded)) = $0 as? PinewindError {
         return true
@@ -1251,13 +1538,13 @@ struct WorkspaceTests {
     let f = try Fixture()
     defer { f.remove() }
     let workspace = try await f.workspace()
-    let session = try await workspace.configuration()
-    await session.edit { $0.manifest.order = [.named("missing-a"), .named("missing-b")] }
-    let diagnostics = await session.validate()
+    let diagnostics = try await workspace.validate {
+      $0.manifest.order = [.named("missing-a"), .named("missing-b")]
+    }
     #expect(diagnostics.count == 2)
     #expect(
       diagnostics.allSatisfy { diagnostic in
-        if case .configuration(let document) = diagnostic,
+        if case .configuration(let document) = diagnostic.error,
           case .declaration(.unknownName) = document.failure
         {
           return true

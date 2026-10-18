@@ -7,11 +7,16 @@
 import Foundation
 import SystemPackage
 
+/// Common interface for all throwable errors defined by PinewindCore.
+/// Concrete types retain their structured facts, diagnostics, and recovery state.
+/// Cancellation continues to use Swift's CancellationError.
+public protocol PinewindErrorProtocol: Error, Sendable, CustomStringConvertible {}
+
 // MARK: - Top level
 
 /// The pipeline error: a verdict about a document, an incident observed while
 /// processing one, or an unanchored machine failure.
-public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
+public enum PinewindError: PinewindErrorProtocol, Hashable {
   /// The document is at fault; the location is part of the fact.
   case configuration(DocumentError)
   /// Something happened while processing a declaration; the location witnesses
@@ -30,7 +35,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
 
   /// Attaches a document without changing an existing primary attribution.
   /// Machine failures can be observed in a document, but cannot indict it.
-  public func attributed(to context: DocumentContext, as attribution: DocumentAttribution)
+  func attributed(to context: DocumentContext, as attribution: DocumentAttribution)
     -> PinewindError
   {
     guard case .runtime(let failure) = self else { return self }
@@ -43,7 +48,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
   }
 
   /// Adds an enclosing import/include frame; the primary location stays intact.
-  public func addingDerivation(_ frame: DocumentContext) -> PinewindError {
+  func addingDerivation(_ frame: DocumentContext) -> PinewindError {
     func adding(to error: DocumentError) -> DocumentError {
       var context = error.context
       var anchor = frame
@@ -59,7 +64,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum DocumentAttribution: Sendable { case configuration, incident }
+enum DocumentAttribution: Sendable { case configuration, incident }
 
 /// Mechanical boxing only. Foreign errors must be translated where the operation is known.
 enum ErrorBoundary {
@@ -68,6 +73,7 @@ enum ErrorBoundary {
   ) -> any Error {
     if error is CancellationError { return error }
     if let error = error as? PinewindError { return error }
+    if let error = error as? ConfigurationValidationError { return error }
     if let failure = Failure.recognizing(error) { return PinewindError.runtime(failure) }
     return PinewindError.runtime(
       .defect(.wrapped(detail: String(describing: error), origin: Origin(file: fileID, line: line)))
@@ -162,7 +168,7 @@ public struct Origin: Sendable, Hashable, CustomStringConvertible {
 // MARK: - Fact vocabulary
 
 /// The single fact vocabulary, grouped by pipeline subject matter.
-public enum Failure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum Failure: PinewindErrorProtocol, Hashable {
   case git(GitFailure)
   case file(FileSystemFailure)
   case network(NetworkFailure)
@@ -188,7 +194,7 @@ public enum Failure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum GitFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum GitFailure: PinewindErrorProtocol, Hashable {
   case referenceNotFound(String)
   case ambiguousReference(String)
   case defaultBranchIndeterminate(URL)
@@ -236,7 +242,7 @@ public enum TreeEntry: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum FileSystemFailure: PinewindErrorProtocol, Hashable {
   case notFound(FilePath)
   case notRegularFile(FilePath)
   case notADirectory(FilePath)
@@ -300,7 +306,7 @@ public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertibl
   }
 }
 
-public enum NetworkFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum NetworkFailure: PinewindErrorProtocol, Hashable {
   case rejected(status: Int, url: URL)
   case transportFailed(url: URL, reason: TransportFailureReason, detail: String)
   case insecureScheme(URL)
@@ -341,7 +347,7 @@ public enum TransportFailureReason: Sendable, Hashable {
   }
 }
 
-public enum InterpreterFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum InterpreterFailure: PinewindErrorProtocol, Hashable {
   case evaluationFailed(detail: String)
   case timedOut
   case budgetExceeded(Budget)
@@ -375,7 +381,9 @@ public enum Budget: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum DeclarationFailure: PinewindErrorProtocol, Hashable {
+  case invalidPackageSource(String)
+  case emptyName
   case reservedName(String)
   case unknownName(String)
   case nameStillReferenced(String)
@@ -417,6 +425,8 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
 
   public var description: String {
     switch self {
+    case .invalidPackageSource(let source): return "invalid package source: \(source)"
+    case .emptyName: return "dependency name must not be empty"
     case .reservedName(let name): return "'\(name)' is a reserved name"
     case .unknownName(let name): return "unknown package name '\(name)'"
     case .nameStillReferenced(let name): return "package name '\(name)' is still referenced"
@@ -467,7 +477,7 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
   }
 }
 
-public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum LockFailure: PinewindErrorProtocol, Hashable {
   case incompatible(detail: String)
   case malformed(detail: String)
   case declarationChanged
@@ -485,7 +495,12 @@ public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum StateFailure: PinewindErrorProtocol, Hashable {
+  case unsupportedFrontend(String)
+  case ambiguousOutputDirectories([FilePath])
+  case frontendRequired
+  case runtimeOutputPath(RelativePath)
+  case invalidConfigurationTransaction(FilePath)
   case publicationModeConflict(FilePath)
   case unmanagedOutputFiles(directory: FilePath, paths: [RelativePath])
   case invalidPublicationRecord(FilePath)
@@ -499,6 +514,16 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
   public var description: String {
     switch self {
+    case .unsupportedFrontend(let name):
+      return "frontend \(name) is unsupported on this platform; select a custom output directory"
+    case .ambiguousOutputDirectories(let paths):
+      return
+        "multiple Rime directories found: \(paths.map(\.string).joined(separator: ", ")); select a destination"
+    case .frontendRequired: return "cannot identify a Rime frontend; select a destination"
+    case .runtimeOutputPath(let path): return "build contains Rime runtime data at \(path.string)"
+    case .invalidConfigurationTransaction(let path):
+      return
+        "invalid configuration transaction: \(path.string). Restore the transaction from backup before accessing configuration."
     case .publicationModeConflict(let path):
       return
         "managed-file publication cannot target a Windows junction: \(path.string). Use a real directory rather than a replaceable generation."
@@ -519,7 +544,7 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum CacheFailure: PinewindErrorProtocol, Hashable {
   case contentMissing(URL)
   case checksumMismatch(url: URL, expected: String, actual: String)
 
@@ -536,7 +561,7 @@ public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
 /// Failures of the library's own reasoning or of its foreign-error boundaries.
 /// The audience is the library developer; the origin is the payload.
-public enum Defect: Error, Sendable, Hashable, CustomStringConvertible {
+public enum Defect: PinewindErrorProtocol, Hashable {
   case invariant(detail: String, origin: Origin)
   case wrapped(detail: String, origin: Origin)
 

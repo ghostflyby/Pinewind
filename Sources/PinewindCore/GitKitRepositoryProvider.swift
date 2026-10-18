@@ -30,7 +30,7 @@ public struct GitCredentials: Sendable {
 public typealias GitCredentialProvider = @Sendable (URL) -> GitCredentials?
 
 /// Prepares immutable commit snapshots under a FilePath-only cache boundary.
-public struct GitKitRepositoryProvider: RepositoryProvider {
+struct GitKitRepositoryProvider: RepositoryProvider {
   let transport: any GitTransport
   public init(credentials: GitCredentialProvider? = nil) {
     transport = GitKitTransport(credentials: credentials)
@@ -150,7 +150,7 @@ public struct GitKitRepositoryProvider: RepositoryProvider {
 
 }
 
-public struct HTTPSResourceDownloader: ResourceDownloader {
+struct HTTPSResourceDownloader: ResourceDownloader {
   private let session: URLSession
   /// Downloads preserve the injected session delegate's authentication policy.
   /// Bounded Corelibs transfers use its configuration in a dedicated session.

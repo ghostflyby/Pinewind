@@ -9,130 +9,7 @@ import Foundation
 import PinewindCore
 import SystemPackage
 
-#if os(Windows)
-  import WinSDK
-#endif
-
-enum RimeFrontend: String, CaseIterable, ExpressibleByArgument {
-  case squirrel, weasel, fcitx5, fcitx, ibus
-}
-
-struct PlatformDirectories {
-  let configuration: FilePath
-  let state: FilePath
-  let cache: FilePath
-  let home: FilePath
-  let environment: [String: String]
-
-  init(
-    environment: [String: String] = ProcessInfo.processInfo.environment,
-    home: FilePath = FilePath(NSHomeDirectory())
-  ) {
-    self.home = home
-    self.environment = environment
-    func base(_ key: String, fallback: FilePath) -> FilePath {
-      guard let text = environment[key], !text.isEmpty, FilePath(text).isAbsolute else {
-        return fallback
-      }
-      return FilePath(text)
-    }
-    #if os(Windows)
-      configuration = base("APPDATA", fallback: home.appending("AppData/Roaming")).appending(
-        "Pinewind")
-      state = base("LOCALAPPDATA", fallback: home.appending("AppData/Local")).appending(
-        "Pinewind/State")
-      cache = base("LOCALAPPDATA", fallback: home.appending("AppData/Local")).appending(
-        "Pinewind/Cache")
-    #elseif os(macOS) || os(iOS)
-      configuration = home.appending("Library/Application Support/Pinewind")
-      state = configuration.appending("State")
-      cache = home.appending("Library/Caches/Pinewind")
-    #else
-      configuration = base("XDG_CONFIG_HOME", fallback: home.appending(".config")).appending(
-        "pinewind")
-      state = base("XDG_STATE_HOME", fallback: home.appending(".local/state")).appending("pinewind")
-      cache = base("XDG_CACHE_HOME", fallback: home.appending(".cache")).appending("pinewind")
-    #endif
-  }
-
-  func rimeDirectory(_ frontend: RimeFrontend) -> FilePath {
-    func base(_ key: String, fallback: String) -> FilePath {
-      if let text = environment[key], !text.isEmpty, FilePath(text).isAbsolute {
-        return FilePath(text)
-      }
-      return home.appending(fallback)
-    }
-    switch frontend {
-    case .squirrel: return home.appending("Library/Rime")
-    case .weasel:
-      #if os(Windows)
-        if let configured = Self.weaselUserDirectory() { return configured }
-      #endif
-      return base("APPDATA", fallback: "AppData/Roaming").appending("Rime")
-    case .fcitx5: return base("XDG_DATA_HOME", fallback: ".local/share").appending("fcitx5/rime")
-    case .fcitx: return base("XDG_CONFIG_HOME", fallback: ".config").appending("fcitx/rime")
-    case .ibus: return base("XDG_CONFIG_HOME", fallback: ".config").appending("ibus/rime")
-    }
-  }
-
-  func output(frontend: RimeFrontend?) throws -> FilePath {
-    let candidates: [RimeFrontend]
-    #if os(Windows)
-      candidates = [.weasel]
-    #elseif os(macOS)
-      candidates = [.squirrel, .fcitx5]
-    #else
-      candidates = [.fcitx5, .fcitx, .ibus]
-    #endif
-    if let frontend {
-      guard candidates.contains(frontend) else {
-        throw ValidationError(
-          "Frontend '\(frontend.rawValue)' is not supported on this platform. Use --output for a custom location."
-        )
-      }
-      return rimeDirectory(frontend)
-    }
-    let existing = candidates.filter {
-      var directory: ObjCBool = false
-      return FileManager.default.fileExists(
-        atPath: rimeDirectory($0).string, isDirectory: &directory)
-        && directory.boolValue
-    }
-    if existing.count == 1, let frontend = existing.first { return rimeDirectory(frontend) }
-    if existing.count > 1 {
-      throw ValidationError(
-        "Multiple Rime directories found (\(existing.map(\.rawValue).joined(separator: ", "))). Choose --frontend or --output."
-      )
-    }
-    #if os(macOS)
-      return rimeDirectory(.squirrel)
-    #elseif os(Windows)
-      return rimeDirectory(.weasel)
-    #else
-      throw ValidationError("Cannot identify a Rime frontend. Choose --frontend or --output.")
-    #endif
-  }
-
-  #if os(Windows)
-    private static func weaselUserDirectory() -> FilePath? {
-      let key = Array("Software\\Rime\\Weasel".utf16) + [0]
-      let value = Array("RimeUserDir".utf16) + [0]
-      var size: DWORD = 0
-      let flags = DWORD(RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ)
-      guard RegGetValueW(HKEY_CURRENT_USER, key, value, flags, nil, nil, &size) == ERROR_SUCCESS,
-        size >= 2
-      else { return nil }
-      var buffer = [WCHAR](repeating: 0, count: Int(size) / MemoryLayout<WCHAR>.size)
-      let status = buffer.withUnsafeMutableBytes {
-        RegGetValueW(HKEY_CURRENT_USER, key, value, flags, nil, $0.baseAddress, &size)
-      }
-      guard status == ERROR_SUCCESS else { return nil }
-      let text = String(decoding: buffer.prefix { $0 != 0 }, as: UTF16.self)
-      let path = FilePath(text)
-      return path.isAbsolute ? path : nil
-    }
-  #endif
-}
+extension RimeFrontend: ExpressibleByArgument {}
 
 struct LocationOptions: ParsableArguments {
   @Option(
@@ -157,17 +34,11 @@ struct LocationOptions: ParsableArguments {
   }
 
   func locations() throws -> WorkspaceLocations {
-    let defaults = PlatformDirectories()
-    let config = FilePath(configDirectory ?? defaults.configuration.string)
-    let state = FilePath(stateDirectory ?? defaults.state.string)
-    return try WorkspaceLocations(
-      userFilesRoot: .path(FilePath(userFiles ?? config.appending("user").string)),
-      configuration: ConfigurationFiles(
-        manifest: .path(config.appending("pinewind.yaml")),
-        localOverrides: .path(state.appending("pinewind.local.yaml")),
-        lock: .path(config.appending("pinewind.lock"))),
-      stateRoot: state.appending("managed"),
-      cacheRoot: FilePath(cacheDirectory ?? defaults.cache.string))
+    try PlatformDirectories().workspaceLocations(
+      configurationDirectory: configDirectory.map { FilePath($0) },
+      stateDirectory: stateDirectory.map { FilePath($0) },
+      cacheDirectory: cacheDirectory.map { FilePath($0) },
+      userFilesRoot: userFiles.map { .path(FilePath($0)) })
   }
 
   func open() async throws -> Workspace {

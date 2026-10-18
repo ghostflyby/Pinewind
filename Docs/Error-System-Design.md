@@ -1,6 +1,6 @@
 # 松风 / Pinewind:错误系统设计
 
-状态:2026-10-17 错误边界迁移版。顶层结构与类型命名已实现;标注"到实现中验证"的条目留待后续裁决。本文是错误面的唯一权威,与《Package-Management-Design》(工作区与存储契约)并列。
+状态:2026-10-18 包管理编辑入口版。顶层结构与类型命名已实现;标注"到实现中验证"的条目留待后续裁决。本文是错误面的唯一权威,与《Package-Management-Design》(工作区与存储契约)并列。
 
 ## 1. 服务对象与总原则
 
@@ -15,6 +15,8 @@
 消费者三类——文档修复者、环境修复者、库开发者——各取所需,载荷按此配置。
 
 ## 2. 顶层结构
+
+所有 PinewindCore 自定义的可抛出公共错误类型统一遵循 `PinewindErrorProtocol: Error, Sendable, CustomStringConvertible`。消费者可通过该协议统一捕获,再按具体类型访问事实、配置诊断或已提交的解析结果。该协议不改变错误归一化规则,不要求 `Hashable` 或统一的 `Failure` 属性。`CancellationError` 保持标准库类型,不属于该协议;`DocumentError`、`FileOperationFailure` 和 `ConfigurationDiagnostic` 仍只是载荷,不因此变为可抛出错误。
 
 ```swift
 enum PinewindError {
@@ -46,7 +48,7 @@ YAML/conf 定位信息是错误载荷的一部分,不设独立 validation 通道
 - 定位随求值逐层累积(解析点取节点 mark,求值层路过自己的条目时当场附着),只有错误值能承载这种沿途累积;
 - "收集不中断"与"立即中断"是同一错误值的两种消费姿态。
 
-诊断不设平行类型:批量结果就是同一词表的数组。
+诊断不设平行事实词表。内存配置编辑通过 ConfigurationDiagnostic 包装同一个 PinewindError,附带可选操作序号、包名与表单字段;这些定位不进入 DocumentContext,也不伪造文本行号。
 
 ## 4. 文档上下文(DocumentContext)
 
@@ -102,9 +104,9 @@ YAML/conf 定位信息是错误载荷的一部分,不设独立 validation 通道
 
 ## 9. 批量与签名
 
-- **查询型批量**(validate:找出文档全部问题):返回值 `-> [PinewindError]`。找出问题是询问的成功回答,不是控制流异常;致命失败(文档本身读不出)同样以错误值入数组,不区分第二通道。
-- **管线型批量**(独立单元的执行):收集后抛聚合容器。聚合是独立类型(如 `failures: [PinewindError]`),不是词表 case——单复数是基数差异,塞入词表会迫使每个单数匹配顺手排除聚合。批量只出现在操作主动声明单元独立的签名上;失败相关的操作首错中断。
-- typed throws:事实层的签名携带**层级最底层的具体类型**——单域链路用域类型(`throws(FileSystemFailure)`/`throws(DeclarationFailure)`…),跨域事实函数用 `throws(Failure)`,抛出点直接抛词表值;归因边界(解析/求值/文档方法/lock 解码)不标注顶层类型,以普通 `throws` 承载 PinewindError——类型系统不做 Failure⇄PinewindError 隐式转换,跨域归因边界强行标注只会制造全量 do/catch 噪声,归因语义由构造点保证。被取消(CancellationError)或外来错误(Foundation/Errno)污染的签名保持 untyped。公共操作边界(Workspace、配置会话、公开文档方法及默认后端)共用 `ErrorBoundary.normalize`:取消原样穿透,已有 `PinewindError` 原样返回,所有领域错误和 `Failure` 归位 runtime,未知错误入 defect。归一化保持幂等,取消以外的管线错误恒为 `PinewindError`。执行队列只转发,不提前归一化;取消检查不在提交完成后补做。
+- **查询型批量**:Workspace.validate(editing:) / ConfigurationSnapshot.validate() 返回 `[ConfigurationDiagnostic]`,每项保留同一 PinewindError 词表。找出配置问题是询问的成功回答;文档无法读取、解码失败或取消通过 throws 报告,不冒充可修正的编辑字段问题。字段校验谓词与真正求值共用,只汇总可独立判断的问题。
+- **管线型批量**(独立单元的执行):收集后抛聚合容器。聚合是独立类型(配置应用使用 ConfigurationValidationError,携带 diagnostics),不是词表 case——单复数是基数差异,塞入词表会迫使每个单数匹配顺手排除聚合。批量只出现在操作主动声明单元独立的签名上;失败相关的操作首错中断。
+- typed throws:事实层的签名携带**层级最底层的具体类型**——单域链路用域类型(`throws(FileSystemFailure)`/`throws(DeclarationFailure)`…),跨域事实函数用 `throws(Failure)`,抛出点直接抛词表值;归因边界(解析/求值/文档方法/lock 解码)不标注顶层类型,以普通 `throws` 承载 PinewindError——类型系统不做 Failure⇄PinewindError 隐式转换,跨域归因边界强行标注只会制造全量 do/catch 噪声,归因语义由构造点保证。被取消(CancellationError)或外来错误(Foundation/Errno)污染的签名保持 untyped。公共操作边界(Workspace、配置会话、公开文档方法及默认后端)共用 `ErrorBoundary.normalize`:取消原样穿透,已有 `PinewindError` 原样返回,所有领域错误和 `Failure` 归位 runtime,未知错误入 defect。归一化保持幂等,单数管线错误恒为 `PinewindError`;显式批量编辑入口保留 ConfigurationValidationError。提交后的准备失败以 PreparationFailure 包装已提交 Resolution 和同一 PinewindError cause,取消仍原样穿透。执行队列只转发,不提前归一化;取消检查不在提交完成后补做。
 
 ## 10. 迁移
 
@@ -128,3 +130,7 @@ YAML/conf 定位信息是错误载荷的一部分,不设独立 validation 通道
 - 文档及归因方法改为普通 throws;内部删除 embed/wrap/relay。纯校验继续使用具体 typed throws。模板的选项失败为 `Failure.declaration`,正则/替换范围不变量失败为 `Failure.defect`,不再提供 invalidTemplateRange 声明错误。
 
 条目级求值位置与解释器内 include 的逐帧定位仍遵循 §10 的边界:本次提供显式归因和推导链操作,不通过重新查字段或生成 YAML 伪造缺失的位置。
+
+## 12. 包管理编辑结果(2026-10-18)
+
+ConfigurationValidationError 只表示整批候选在配置预检中被拒绝,不把聚合添加为 PinewindError 或 Failure 的 case。PreparationFailure 只表示配置与 lock 已提交而后续准备失败,其 cause 保留原有归因和领域事实。操作阶段信息不通过解析 description 推断。持久化提交错误仍由原有 file/state 事实报告,未完成事务通过恢复日志完成;读取状态可确认最终结果。

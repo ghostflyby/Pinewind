@@ -24,7 +24,7 @@ jobs:
         run: swift build
 
       - name: Test
-        run: swift test --no-parallel
+        run: swift test --parallel
 
       - name: Create GitHub release
         env:

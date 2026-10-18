@@ -37,7 +37,7 @@ public struct ResourceID: Hashable, Sendable {
   public let package: PackageID
   public let resource: PinnedResource
 }
-public enum UpdateSelection: Sendable {
+public enum RefreshSelection: Sendable {
   case all
   case packages(Set<PackageID>)
   /// Refreshes all current occurrences of each selected request. IDs must match the old lock.

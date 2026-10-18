@@ -81,45 +81,16 @@ public actor Workspace {
     }
     return Workspace(locations: locations, services: services, options: options)
   }
-  /// Guarantees that everything surfacing from the pipeline is a `PinewindError`
-  /// while cancellation keeps its own type.
+  /// Normalizes single failures while retaining explicit validation aggregates
+  /// and preserving cancellation's own type.
   private func pipeline<T>(_ body: () async throws -> T) async throws -> T {
     do { return try await body() } catch {
       throw ErrorBoundary.normalize(error)
     }
   }
-  public func configuration() async throws -> ConfigurationSession {
-    try await pipeline { ConfigurationSession(snapshot: try await store.load(), store: store) }
-  }
   public func resolve(progress: OperationProgress? = nil) async throws -> Resolution {
     try await pipeline {
       try await self.resolveSnapshot(store.load(), preview: false, update: nil, progress: progress)
-    }
-  }
-  /// Resolve an edited draft before saving it. Preparation remains a separate
-  /// step: failures from fetch do not roll back the committed declaration and lock.
-  public func resolve(
-    editing operation: @Sendable (inout ConfigurationDraft) throws -> Void,
-    progress: OperationProgress? = nil
-  ) async throws -> Resolution {
-    try await pipeline {
-      let baseline = try await store.load()
-      var draft = ConfigurationDraft(
-        manifest: baseline.manifest, localOverrides: baseline.localOverrides,
-        relativeTo: locations.relativeTo)
-      try operation(&draft)
-      guard locations.configuration.localOverrides != nil || draft.localOverrides == nil else {
-        throw PinewindError.runtime(.state(.overridesDisabled))
-      }
-      _ = try draft.manifest.evaluate(localOverrides: draft.localOverrides)
-      let snapshot = ConfigurationSnapshot(
-        manifest: draft.manifest, localOverrides: draft.localOverrides,
-        sharedRevision: 0, localRevision: 0,
-        sharedIsDirty: draft.manifest != baseline.manifest,
-        localIsDirty: draft.localOverrides != baseline.localOverrides,
-        locations: locations, baseline: baseline.baseline)
-      return try await resolveSnapshot(
-        snapshot, preview: false, update: nil, progress: progress, commitConfiguration: true)
     }
   }
   public func resolve(preview: ConfigurationSnapshot, progress: OperationProgress? = nil)
@@ -130,7 +101,7 @@ public actor Workspace {
       return try await resolveSnapshot(preview, preview: true, update: nil, progress: progress)
     }
   }
-  public func update(_ selection: UpdateSelection = .all, progress: OperationProgress? = nil)
+  public func resolve(refreshing selection: RefreshSelection, progress: OperationProgress? = nil)
     async throws -> Resolution
   {
     try await pipeline {
@@ -139,7 +110,9 @@ public actor Workspace {
   }
   /// Refresh active named dependencies without requiring callers to decode locks
   /// or first resolve an edited manifest just to obtain selection IDs.
-  public func update(packagesNamed names: Set<String>, progress: OperationProgress? = nil)
+  public func resolve(
+    refreshingPackagesNamed names: Set<String>, progress: OperationProgress? = nil
+  )
     async throws -> Resolution
   {
     try await pipeline {
@@ -166,8 +139,8 @@ public actor Workspace {
         refreshingRequests: selected)
     }
   }
-  public func update(
-    _ selection: UpdateSelection = .all, preview: ConfigurationSnapshot,
+  public func resolve(
+    refreshing selection: RefreshSelection, preview: ConfigurationSnapshot,
     progress: OperationProgress? = nil
   ) async throws -> Resolution {
     try await pipeline {
@@ -183,11 +156,18 @@ public actor Workspace {
   }
 
   private func resolveSnapshot(
-    _ snapshot: ConfigurationSnapshot, preview: Bool, update: UpdateSelection?,
+    _ snapshot: ConfigurationSnapshot, preview: Bool, update: RefreshSelection?,
     progress: OperationProgress?, commitConfiguration: Bool = false,
     refreshingRequests: Set<PackageRequest> = []
   ) async throws -> Resolution {
     try check(snapshot)
+    if preview {
+      let diagnostics = snapshot.validate(scope: .shared)
+      guard diagnostics.isEmpty else {
+        throw ConfigurationValidationError(diagnostics: diagnostics)
+      }
+    }
+
     let phase: OperationPhase = update == nil ? .resolving : .updating
     progress?(.started(phase))
     let declarations = try snapshot.evaluate(.shared)
@@ -318,8 +298,11 @@ public actor Workspace {
       try await prepare(resolution, network: false, mode: .locked, progress: progress)
     }
   }
-  private func currentResolution() async throws -> Resolution {
-    let snapshot = try await store.load()
+  private func currentResolution(_ supplied: ConfigurationSnapshot? = nil) async throws
+    -> Resolution
+  {
+    let snapshot: ConfigurationSnapshot
+    if let supplied { snapshot = supplied } else { snapshot = try await store.load() }
     if let bytes = snapshot.baseline.lock {
       return try ResolutionCodec.decode(bytes, snapshot: snapshot)
     }
@@ -536,10 +519,8 @@ public actor Workspace {
       }
     }
     progress?(.started(.composing))
-    let requests = try store.documentLocations.map {
-      FileAccessRequest(url: try $0.url, intent: .read)
-    }
-    let result = try await store.coordinator.coordinate(requests) { urls in
+    let result = try await store.coordinated(intents: store.documentLocations.map { _ in .read }) {
+      urls, _ in
       var plan = plan
       plan.binding?.coordinatedURLs = urls
       try plan.binding?.validate()
@@ -733,23 +714,23 @@ public actor Workspace {
       throw ErrorBoundary.normalize(error)
     }
   }
-  private func selected(_ id: PackageID, in selection: UpdateSelection?) -> Bool {
+  private func selected(_ id: PackageID, in selection: RefreshSelection?) -> Bool {
     if case .packages(let ids) = selection { return ids.contains { $0.request == id.request } }
     return false
   }
-  private func selected(_ id: ImportID, in selection: UpdateSelection?) -> Bool {
+  private func selected(_ id: ImportID, in selection: RefreshSelection?) -> Bool {
     if case .imports(let ids) = selection {
       return ids.contains { $0.request == id.request }
     }
     return false
   }
-  private func selected(_ id: ResourceID, in selection: UpdateSelection?) -> Bool {
+  private func selected(_ id: ResourceID, in selection: RefreshSelection?) -> Bool {
     if case .resources(let ids) = selection {
       return ids.contains { $0.package.request == id.package.request && $0.resource == id.resource }
     }
     return false
   }
-  private func resourcesSelected(_ request: PackageRequest, in selection: UpdateSelection?) -> Bool
+  private func resourcesSelected(_ request: PackageRequest, in selection: RefreshSelection?) -> Bool
   {
     if case .resources(let ids) = selection {
       return ids.contains { $0.package.request == request }
@@ -757,7 +738,7 @@ public actor Workspace {
     return false
   }
   private func validateSelection(
-    _ selection: UpdateSelection?, packages: [LockedPackage], imports: [ResolvedImport],
+    _ selection: RefreshSelection?, packages: [LockedPackage], imports: [ResolvedImport],
     declarations: EvaluatedManifest
   ) throws {
     let valid: Bool
@@ -777,5 +758,150 @@ public actor Workspace {
     guard valid else {
       throw PinewindError.runtime(.state(.unknownSelection))
     }
+  }
+}
+
+/// Whether an applied configuration should also acquire its locked inputs.
+public enum PreparationPolicy: Sendable { case required, deferred }
+
+public struct ConfigurationApplication: Sendable {
+  public var configuration: ConfigurationSnapshot { resolution.snapshot }
+  public let resolution: Resolution
+  public let inputs: PreparedInputs?
+}
+
+/// Configuration and lock have committed. Retry install to finish preparation.
+/// Cancellation remains CancellationError; inspect configuration() after cancelling.
+public struct PreparationFailure: PinewindErrorProtocol {
+  public let resolution: Resolution
+  public let cause: PinewindError
+  public var description: String {
+    "\(cause)\nDependency declarations and lock are retained."
+  }
+}
+
+public enum InputReadiness: Sendable {
+  case ready
+  case unavailable(PinewindError)
+}
+
+public struct WorkspaceStatus: Sendable {
+  public let configuration: ConfigurationSnapshot
+  public let resolution: Resolution?
+  public let inputs: InputReadiness
+}
+
+extension Workspace {
+  /// Reads a detached candidate without resolving or committing new edits.
+  /// A previously committed transaction is recovered before reading.
+  public func configuration(
+    editing operation: @Sendable (inout ConfigurationEditor) -> Void = { _ in }
+  ) async throws -> ConfigurationSnapshot {
+    try await pipeline {
+      let baseline = try await store.load()
+      var editor = ConfigurationEditor(baseline)
+      operation(&editor)
+      return editor.snapshot(baseline: baseline)
+    }
+  }
+
+  /// Inspects declarations, lock and input readiness without resolving or downloading.
+  public func status() async throws -> WorkspaceStatus {
+    let configuration = try await self.configuration()
+    var resolution: Resolution?
+    do {
+      resolution = try await currentResolution(configuration)
+      _ = try await cachedInputs(resolution)
+      return WorkspaceStatus(configuration: configuration, resolution: resolution, inputs: .ready)
+    } catch is CancellationError { throw CancellationError() } catch let error as PinewindError {
+      return WorkspaceStatus(
+        configuration: configuration, resolution: resolution, inputs: .unavailable(error))
+    }
+  }
+
+  public func validate(
+    editing operation: @Sendable (inout ConfigurationEditor) -> Void = { _ in }
+  ) async throws -> [ConfigurationDiagnostic] {
+    try await configuration(editing: operation).validate()
+  }
+
+  /// Single and batch edits use the same validated commit and preparation path.
+  public func update(
+    preparation: PreparationPolicy = .required, progress: OperationProgress? = nil,
+    _ operation: @Sendable (inout ConfigurationEditor) -> Void
+  ) async throws -> ConfigurationApplication {
+    try await apply(configuration(editing: operation), preparation: preparation, progress: progress)
+  }
+
+  /// Applies exactly this candidate, rejecting a changed baseline rather than replaying edits.
+  public func apply(
+    _ candidate: ConfigurationSnapshot, preparation: PreparationPolicy = .required,
+    progress: OperationProgress? = nil
+  ) async throws -> ConfigurationApplication {
+    let resolution = try await pipeline {
+      try check(candidate)
+      let diagnostics = candidate.validate()
+      guard diagnostics.isEmpty else {
+        throw ConfigurationValidationError(diagnostics: diagnostics)
+      }
+      return try await resolveSnapshot(
+        candidate, preview: false, update: nil, progress: progress, commitConfiguration: true)
+    }
+    guard preparation == .required else {
+      return ConfigurationApplication(resolution: resolution, inputs: nil)
+    }
+    return ConfigurationApplication(
+      resolution: resolution, inputs: try await prepareCommitted(resolution, progress: progress))
+  }
+
+  private func prepareCommitted(_ resolution: Resolution, progress: OperationProgress?) async throws
+    -> PreparedInputs
+  {
+    do {
+      try Task.checkCancellation()
+      return try await fetch(resolution, progress: progress)
+    } catch is CancellationError { throw CancellationError() } catch let error as PinewindError {
+      throw PreparationFailure(resolution: resolution, cause: error)
+    }
+  }
+
+  public func install(locked: Bool = false, progress: OperationProgress? = nil) async throws
+    -> PreparedInputs
+  {
+    let resolution = locked ? try await currentResolution() : try await resolve(progress: progress)
+    return try await prepareCommitted(resolution, progress: progress)
+  }
+
+  public func refresh(
+    _ selection: RefreshSelection = .all, progress: OperationProgress? = nil
+  ) async throws -> ConfigurationApplication {
+    let resolution = try await resolve(refreshing: selection, progress: progress)
+    return ConfigurationApplication(
+      resolution: resolution, inputs: try await prepareCommitted(resolution, progress: progress))
+  }
+
+  public func refresh(packagesNamed names: Set<String>, progress: OperationProgress? = nil)
+    async throws -> ConfigurationApplication
+  {
+    let resolution = try await resolve(refreshingPackagesNamed: names, progress: progress)
+    return ConfigurationApplication(
+      resolution: resolution, inputs: try await prepareCommitted(resolution, progress: progress))
+  }
+
+  /// Rime runtime data is protected regardless of force or the calling frontend.
+  public func build(
+    to output: FilePath, overwriteUnmanaged: Bool = false, progress: OperationProgress? = nil
+  ) async throws -> CompositionResult {
+    let plan = try await plan(cachedInputs(progress: progress), progress: progress)
+    for path in plan.paths {
+      let parts = path.filePath.components.map { $0.string.lowercased() }
+      guard let first = parts.first,
+        !["build", "sync", "trash", "installation.yaml", "user.yaml"].contains(first),
+        !parts.contains(where: { $0.hasSuffix(".userdb") || $0.contains(".userdb.") })
+      else { throw PinewindError.runtime(.state(.runtimeOutputPath(path))) }
+    }
+    return try await compose(
+      plan, to: output, publication: .managedFiles(overwriteUnmanaged: overwriteUnmanaged),
+      progress: progress)
   }
 }

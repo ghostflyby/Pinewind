@@ -7,7 +7,7 @@
 import struct Glob.Pattern
 
 /// Path globs are deterministic and independent of the host shell and locale.
-public enum Glob {
+enum Glob {
   static func compile(_ pattern: String) throws(DeclarationFailure) -> Pattern {
     guard !pattern.isEmpty, !pattern.hasPrefix("/"), !pattern.contains("\\"),
       !pattern.contains("\0"), !pattern.split(separator: "/").contains("..")
@@ -23,7 +23,7 @@ public enum Glob {
     }
   }
 
-  public static func matches(_ pattern: String, path: RelativePath) throws(DeclarationFailure)
+  static func matches(_ pattern: String, path: RelativePath) throws(DeclarationFailure)
     -> Bool
   {
     try compile(pattern).match(path.string)
