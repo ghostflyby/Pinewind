@@ -78,7 +78,7 @@
       let install = try f.run(["install"] + f.options)
       #expect(install.status != 0)
       #expect(install.output.contains("expected a string"))
-      #expect(install.output.components(separatedBy: f.manifest.path).count == 2)
+      #expect(install.output.components(separatedBy: "pinewind.yaml:").count == 2)
       let json = try f.run(["lint", "--format", "json"] + f.options)
       #expect(json.status != 0)
       let object = try #require(

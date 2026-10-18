@@ -328,11 +328,16 @@ struct WorkspaceTests {
     #expect(report.diagnostics.count == 2)
     #expect(report.diagnostics.compactMap { $0.context.placement?.line } == [4, 6])
     #expect(report.diagnostics.allSatisfy { $0.context.path == f.manifest })
-    #expect(
-      report.diagnostics.allSatisfy {
-        $0.underlyingError as? FileSystemFailure
-          == .notFound(f.input.appending("custom.recipe.yaml"))
-      })
+    for diagnostic in report.diagnostics {
+      guard case .notFound(let path) = diagnostic.underlyingError as? FileSystemFailure else {
+        Issue.record("expected the missing recipe path")
+        continue
+      }
+      #expect(path.lastComponent?.string == "custom.recipe.yaml")
+      // Native canonicalization may expand Windows short paths. Verify the target
+      // directory through its existing content rather than requiring one path spelling.
+      #expect(try read(path.removingLastComponent().appending("default.yaml")) == "schema: {}\n")
+    }
     _ = try JSONEncoder().encode(report)
     // Check shared, local, and entry-level recipe origins independently.
     try write(
