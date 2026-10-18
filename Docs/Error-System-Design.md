@@ -28,6 +28,8 @@ Codable 是具体类型的能力,不要求基础协议可编码。编码直接�
 
 Errno、URLError、Yams.YamlError、SwiftBash.FileSystemError 按需遵循公共协议,不复制成另一组一一对应的枚举。Errno 保持原有 Codable。Yams 的原始错误、Context、Mark 获得原字段的 Encodable 实现;Context 没有公开构造入口,因此不声称支持 Decodable。不提供任意外部错误类型的自动恢复注册表。
 
+URLError 的 CustomStringConvertible 和 Yams 类型的 Encodable 属于外部类型对外部协议的追溯符合。上游以后加入相同符合时可能发生冲突,升级依赖或工具链时需要检查并移除对应适配。Yams 解析错误的关联位置编码为 `mark`,包含 `line`、`column`。
+
 文件操作不再压平为 SystemErrorCode;网络传输不再压平为 TransportFailureReason。显式识别的 HTTP 拒绝、HTTPS 约束和资源上限仍是 Pinewind 的业务事实。
 
 ## 3. 归因与位置
@@ -81,7 +83,7 @@ PreparationFailure 保留已提交的 Resolution 和原始 `cause: any Error`,�
 
 - 缺少 lock、源码或缓存不是 lint 错误。
 - 已有 lock 可以提供已知 commit 和 import 展开;陈旧、不兼容或损坏的二进制记录不能建立 YAML 裁决,不据此误报配置。
-- 已有本地源码和受管源码快照中的 recipe 会被检查;指定 recipe 尚未出现时不要求先安装。
+- 已有本地源码和受管源码快照中的 recipe 会被检查。源码尚未取得时跳过;源码已存在而显式指定的 recipe 缺失时,诊断指向原声明的 recipe 节点。未指定的默认 recipe 可以缺省。仅由 lock 展开、没有原始 YAML 选择器位置的显式 recipe 缺失通过正常 throws 报告,不伪造位置。
 - 已有锁定 YAML 资源仅在字节符合校验和时检查语法。损坏缓存不被误判为作者的 YAML 错误。
 - 不扫描与当前声明无关的缓存条目,不因缺少其他包而猜测依赖错误。
 

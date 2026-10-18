@@ -43,7 +43,9 @@ struct YAMLReader {
 
   /// An anchored verdict carrying a typed fact.
   func fail<E: Error>(_ failure: E, at node: Node? = nil) -> PinewindError {
-    .configuration(DocumentError(context: context(at: node), failure: failure))
+    // Preserve an existing attribution and its original position across decoder layers.
+    if let failure = failure as? PinewindError { return failure }
+    return .configuration(DocumentError(context: context(at: node), failure: failure))
   }
 
   /// An anchored decode failure; the detail carries the structural fact.

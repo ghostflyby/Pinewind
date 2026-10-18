@@ -234,7 +234,13 @@ struct WorkspaceTests {
       stale.diagnostics.first?.context.path
         == FilePath(url(customized).resolvingSymlinksInPath().path))
     #expect(await f.repositories.counts().0 == calls.0)
-
+    try FileManager.default.removeItem(at: url(customized))
+    let missing = try await workspace.lint()
+    #expect(missing.diagnostics.count == 1)
+    #expect(missing.diagnostics.first?.context.path == f.manifest)
+    #expect(missing.diagnostics.first?.context.placement?.line == 6)
+    #expect(await f.repositories.counts().0 == calls.0)
+    #expect(await f.repositories.counts().1 == calls.1)
   }
 
   @Test func lintUsesOriginalUTF16ColumnsAndEncodesParserFailures() async throws {
@@ -256,6 +262,100 @@ struct WorkspaceTests {
     let entries = try #require(object["diagnostics"] as? [[String: Any]])
     let cause = try #require(entries.first?["failure"] as? [String: Any])
     #expect(cause["parser"] != nil || cause["scanner"] != nil)
+    let parser = try #require((cause["parser"] ?? cause["scanner"]) as? [String: Any])
+    #expect(parser["mark"] is [String: Any])
+    #expect(parser["_2"] == nil)
+  }
+
+  @Test(arguments: [
+    "  - import: 5\n",
+    "  - import: https://example.test/import.conf\n    variables: {a: [1]}\n",
+  ])
+  func lintImportDecodeErrorsKeepOnePositionAndRemainEncodable(_ entry: String) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.manifest, "version: 1\norder:\n" + entry)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    let diagnostic = try #require(report.diagnostics.first)
+    #expect(report.diagnostics.count == 1)
+    #expect(diagnostic.underlyingError is DeclarationFailure)
+    #expect(diagnostic.context.placement?.line == (entry.contains("variables") ? 4 : 3))
+    #expect(diagnostic.description.components(separatedBy: f.manifest.string).count == 2)
+    let json = try JSONEncoder().encode(report)
+    let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+    let entries = try #require(object["diagnostics"] as? [[String: Any]])
+    let cause = try #require(entries.first?["failure"] as? [String: Any])
+    #expect(cause["syntaxError"] != nil)
+    #expect(await f.downloads.count() == 0)
+  }
+
+  @Test(arguments: [
+    "version: 1\nnames: 5\norder: [pkg, other]\n",
+    "version: 1\nnames: {pkg: hello}\norder: [pkg]\n",
+  ])
+  func lintSkipsNameAndURLChecksWhenTheirStructureIsUnreadable(_ yaml: String) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.manifest, yaml)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 1)
+    #expect(
+      report.diagnostics.first?.underlyingError as? DeclarationFailure
+        == .syntaxError(detail: "expected a mapping"))
+    // Local overrides are an independent document, but an unreadable name table
+    // still cannot establish whether another name exists in the effective manifest.
+    try write(f.manifest, "version: 1\nnames: {}\norder: [pkg, other]\n")
+    try write(f.overrides, "version: 1\nnames: 5\n")
+    let local = try await workspace.lint()
+    #expect(local.diagnostics.count == 3)
+    #expect(local.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
+    #expect(local.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
+  }
+
+  @Test func lintChecksExplicitMissingRecipesAtTheirAuthoredSelectors() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let source = url(f.input).absoluteString
+    try write(f.input.appending("default.yaml"), "schema: {}\n")
+    try write(
+      f.manifest,
+      "version: 1\norder:\n  - url: \(source)\n    recipe: custom\n  - url: \(source)\n    recipe: custom\n"
+    )
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 2)
+    #expect(report.diagnostics.compactMap { $0.context.placement?.line } == [4, 6])
+    #expect(report.diagnostics.allSatisfy { $0.context.path == f.manifest })
+    #expect(
+      report.diagnostics.allSatisfy {
+        $0.underlyingError as? FileSystemFailure
+          == .notFound(f.input.appending("custom.recipe.yaml"))
+      })
+    _ = try JSONEncoder().encode(report)
+    // Check shared, local, and entry-level recipe origins independently.
+    try write(
+      f.manifest,
+      "version: 1\nnames:\n  pkg: {url: \(source), recipe: shared}\norder:\n  - pkg\n  - {name: pkg, recipe: entry}\n"
+    )
+    try write(f.overrides, "version: 1\nnames:\n  pkg: {recipe: local}\n")
+    let layered = try await workspace.lint()
+    #expect(layered.diagnostics.count == 3)
+    #expect(layered.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
+    #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
+    // Null clears an inherited explicit selector; an absent source remains optional.
+    try write(f.overrides, "version: 1\nnames:\n  pkg: {recipe: null}\n")
+    let reset = try await workspace.lint()
+    #expect(reset.diagnostics.count == 2)
+    #expect(reset.diagnostics.allSatisfy { $0.context.path == f.manifest })
+    try write(
+      f.manifest,
+      "version: 1\nnames: {pkg: {url: \(source)}}\norder:\n  - pkg\n  - {url: \(url(f.root.appending("absent package")).absoluteString), recipe: custom}\n"
+    )
+    #expect(try await workspace.lint().isValid)
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
   }
 
   @Test func lintChecksIndependentRecipeSectionsWithoutPreparingMissingFiles() async throws {

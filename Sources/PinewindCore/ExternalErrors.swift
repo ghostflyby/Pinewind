@@ -62,7 +62,7 @@ extension YamlError: @retroactive Encodable {
       var fields = root.nestedContainer(keyedBy: YAMLCodeKey.self, forKey: YAMLCodeKey(name))
       try fields.encodeIfPresent(context, forKey: YAMLCodeKey("context"))
       try fields.encode(problem, forKey: YAMLCodeKey("problem"))
-      try fields.encode(mark, forKey: YAMLCodeKey("_2"))
+      try fields.encode(mark, forKey: YAMLCodeKey("mark"))
       try fields.encode(yaml, forKey: YAMLCodeKey("yaml"))
     case .writer(let problem), .emitter(let problem), .representer(let problem):
       let name: String
