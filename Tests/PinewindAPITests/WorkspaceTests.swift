@@ -124,7 +124,11 @@ private struct Fixture {
     try FileManager.default.createDirectory(at: url(input), withIntermediateDirectories: true)
   }
   func remove() { try? FileManager.default.removeItem(at: url(root)) }
-  func workspace(options: WorkspaceOptions = WorkspaceOptions()) async throws -> Workspace {
+  // Functional tests share CI CPU and disk with the rest of the parallel suite.
+  // Interpreter timeout behavior is tested separately with an explicit short budget.
+  func workspace(
+    options: WorkspaceOptions = WorkspaceOptions(imports: ImportLimits(timeout: .seconds(60)))
+  ) async throws -> Workspace {
     try await Workspace.open(
       locations: locations,
       services: WorkspaceServices(repositories: repositories, resources: downloads),
@@ -139,7 +143,7 @@ private struct Fixture {
   }
 }
 
-@Suite("Public Workspace API", .timeLimit(.minutes(1)))
+@Suite("Public Workspace API", .timeLimit(.minutes(3)))
 struct WorkspaceTests {
   @Test func validationCollectsFailedEditsAndAllIndependentFieldsWithoutSideEffects() async throws {
     let f = try Fixture()
@@ -1191,7 +1195,8 @@ struct WorkspaceTests {
     try write(f.manifest, "version: 1\norder: [{import: \(remote.absoluteString)}]\n")
     let workspace = try await f.workspace(
       options: WorkspaceOptions(
-        imports: ImportLimits(maximumFileBytes: 64), maximumResourceBytes: hostLimit))
+        imports: ImportLimits(timeout: .seconds(60), maximumFileBytes: 64),
+        maximumResourceBytes: hostLimit))
     _ = try await workspace.resolve()
     _ = try await workspace.fetchAndCompose(to: f.output)
     let baseline = try Data(contentsOf: url(f.lock))
@@ -1517,7 +1522,7 @@ struct WorkspaceTests {
     let bounded = try await Workspace.open(
       locations: f.locations,
       services: WorkspaceServices(repositories: f.repositories, resources: f.downloads),
-      options: WorkspaceOptions(imports: ImportLimits(maximumFileBytes: 64)))
+      options: WorkspaceOptions(imports: ImportLimits(timeout: .seconds(60), maximumFileBytes: 64)))
     await #expect {
       _ = try await bounded.resolve(refreshing: .all)
     } throws: {

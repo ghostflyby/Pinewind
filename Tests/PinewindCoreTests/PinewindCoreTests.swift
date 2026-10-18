@@ -796,6 +796,9 @@ struct CompositionTests {
 
 @Suite("Pinewind conf sandbox")
 struct ConfTests {
+  // Leave headroom for parallel CI load; the timeout regression below uses 50 ms.
+  private let importer = PlumImporter(timeout: .seconds(60))
+
   @Test(arguments: ["u/", "/repo", "u//repo", "/", "repo@", "@branch"])
   func descriptorsRejectEmptySourceSegments(_ descriptor: String) {
     #expect(throws: Failure.self) { try PlumImporter.package(descriptor) }
@@ -827,7 +830,7 @@ struct ConfTests {
     let manifest = try await loadConfiguration(
       inputRoot: f.input, localStateRoot: f.root.appendingPathComponent("state")
     ).snapshot().evaluate()
-    let expanded = try await PlumImporter().expand(manifest, inputRoot: f.input)
+    let expanded = try await importer.expand(manifest, inputRoot: f.input)
     #expect(
       expanded.entries == [
         .package(try PlumImporter.package("emoji")), .package(try PlumImporter.package("essay")),
@@ -853,17 +856,17 @@ struct ConfTests {
     let f = try Fixture("ConfInclude")
     defer { f.remove() }
     let request = try ConfImport(source: "test.conf", variables: ["branch": "dev"])
-    let list = try await PlumImporter().evaluate(request, inputRoot: f.input)
+    let list = try await importer.evaluate(request, inputRoot: f.input)
     #expect(list == ["rimeinn/rime-moran@dev", "essay", "essay"])
   }
 
   @Test func builtinsAndDescriptorTranslationWork() async throws {
     let f = try Fixture()
     defer { f.remove() }
-    let preset = try await PlumImporter().evaluate(
+    let preset = try await importer.evaluate(
       ConfImport(source: ":preset"), inputRoot: f.input)
-    let extra = try await PlumImporter().evaluate(ConfImport(source: ":extra"), inputRoot: f.input)
-    let all = try await PlumImporter().evaluate(ConfImport(source: ":all"), inputRoot: f.input)
+    let extra = try await importer.evaluate(ConfImport(source: ":extra"), inputRoot: f.input)
+    let all = try await importer.evaluate(ConfImport(source: ":all"), inputRoot: f.input)
     #expect(
       preset == [
         "bopomofo", "cangjie", "essay", "luna-pinyin", "prelude", "quick", "stroke", "terra-pinyin",
@@ -871,7 +874,7 @@ struct ConfTests {
     #expect(extra.count == 14)
     #expect(all == preset + extra)
     await #expect(throws: PinewindError.self) {
-      try await PlumImporter().evaluate(ConfImport(source: ":unknown"), inputRoot: f.input)
+      try await importer.evaluate(ConfImport(source: ":unknown"), inputRoot: f.input)
     }
     let request = try PlumImporter.package("emoji@master:customize:schema=terra_pinyin")
     #expect(request.url.absoluteString == "https://github.com/rime/rime-emoji")
@@ -885,7 +888,7 @@ struct ConfTests {
     defer { f.remove() }
     try f.write("write.conf", "echo stolen > /conf/stolen", in: f.input)
     await #expect {
-      try await PlumImporter().evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
+      try await importer.evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
       guard case .interpreter(.evaluationFailed(let detail)) = document.failure else {
@@ -896,7 +899,7 @@ struct ConfTests {
     #expect(!FileManager.default.fileExists(atPath: f.input.appendingPathComponent("stolen").path))
     try f.write("escape.conf", "source /etc/passwd", in: f.input)
     await #expect(throws: FileSystemError.notFound("/etc/passwd")) {
-      try await PlumImporter().evaluate(ConfImport(source: "escape.conf"), inputRoot: f.input)
+      try await importer.evaluate(ConfImport(source: "escape.conf"), inputRoot: f.input)
     }
   }
 
@@ -905,7 +908,7 @@ struct ConfTests {
     defer { f.remove() }
     try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
     await #expect {
-      try await PlumImporter().evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
+      try await importer.evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
     } throws: { $0 is InterpreterFailure }
   }
 }
