@@ -46,7 +46,9 @@ private actor ControlledCoordinator: FileAccessCoordinating {
     _ requests: [FileAccessRequest],
     accessor: @escaping @Sendable ([URL]) throws -> Value
   ) async throws -> Value {
-    let writing = requests.contains { $0.intent != .read }
+    let writing = requests.contains {
+      $0.intent != .read && $0.url.lastPathComponent != "configuration.pending.plist"
+    }
     if writing {
       activeWrites += 1
       maximumWrites = max(maximumWrites, activeWrites)
@@ -107,7 +109,9 @@ struct FileAccessCoordinatorTests {
     #expect(
       !FileManager.default.fileExists(
         atPath: actual.appendingPathComponent("pinewind.local.yaml").path))
-    let writes = await coordinator.requests.filter { $0.intent != .read }
+    let writes = await coordinator.requests.filter {
+      $0.intent != .read && $0.url.lastPathComponent != "configuration.pending.plist"
+    }
     #expect(writes.map(\.intent) == [.write, .write, .delete])
     #expect(
       writes.map { $0.url.lastPathComponent } == [

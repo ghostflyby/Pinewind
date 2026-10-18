@@ -8,10 +8,10 @@ import Foundation
 import SystemPackage
 
 public enum ConfigurationScope: Sendable { case shared, effective }
-public enum ConfigurationLayer: Sendable { case shared, local }
-public struct SaveReceipt: Sendable {
-  public let layer: ConfigurationLayer
-  public let revision: UInt64
+enum ConfigurationLayer: Sendable { case shared, local }
+struct SaveReceipt: Sendable {
+  let layer: ConfigurationLayer
+  let revision: UInt64
 }
 public enum PackageInsertion: Sendable {
   /// Insert before the first user-files entry, or append if there is none.
@@ -21,11 +21,11 @@ public enum PackageInsertion: Sendable {
   case after(String)
   case end
 }
-public struct ConfigurationDraft: Hashable, Sendable {
-  public var manifest: ManifestDocument
-  public var localOverrides: LocalOverridesDocument?
+struct ConfigurationDraft: Hashable, Sendable {
+  var manifest: ManifestDocument
+  var localOverrides: LocalOverridesDocument?
   private let relativeTo: FilePath
-  public init(
+  init(
     manifest: ManifestDocument = ManifestDocument(), localOverrides: LocalOverridesDocument? = nil
   ) {
     self.init(
@@ -39,49 +39,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     self.localOverrides = localOverrides
     self.relativeTo = relativeTo
   }
-  public mutating func addPackage(
-    _ name: String, request: PackageRequest, insertion: PackageInsertion = .beforeUserFiles
-  ) throws {
-    guard name != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
-    guard manifest.names[name] == nil else {
-      throw PinewindError.runtime(.declaration(.duplicateName(name)))
-    }
-    let index: Int
-    switch insertion {
-    case .beforeUserFiles:
-      index =
-        manifest.order.firstIndex {
-          if case .userFiles = $0 { return true }
-          return false
-        }
-        ?? manifest.order.endIndex
-    case .end: index = manifest.order.endIndex
-    case .before(let anchor), .after(let anchor):
-      let matches = manifest.order.indices.filter { index in
-        switch manifest.order[index] {
-        case .userFiles: return anchor == "self"
-        case .named(let name, _): return name == anchor
-        default: return false
-        }
-      }
-      guard let match = matches.first else {
-        throw PinewindError.runtime(.declaration(.orderAnchorNotFound(anchor)))
-      }
-      guard matches.count == 1 else {
-        throw PinewindError.runtime(.declaration(.ambiguousOrderAnchor(anchor)))
-      }
-      if case .after = insertion { index = match + 1 } else { index = match }
-    }
-    var fields = PackageFields(
-      url: .value(request.url), recipe: request.recipe.map { .value($0) } ?? .reset,
-      options: .value(request.options),
-      include: request.filter.include.map { .value($0) } ?? .reset,
-      exclude: .value(request.filter.exclude))
-    if let revision = request.revision { fields.revision = .value(revision) }
-    manifest.names[name] = fields
-    manifest.order.insert(.named(name), at: index)
-  }
-  public mutating func renamePackage(_ old: String, to new: String) throws {
+  mutating func renamePackage(_ old: String, to new: String) throws {
     guard old == new || localOverrides?.names[new] == nil else {
       throw PinewindError.runtime(.declaration(.duplicateName(new)))
     }
@@ -90,7 +48,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
       localOverrides?.names[new] = fields
     }
   }
-  public mutating func removePackage(_ name: String) throws {
+  mutating func removePackage(_ name: String) throws {
     guard manifest.names[name] != nil else {
       throw PinewindError.runtime(.declaration(.unknownName(name)))
     }
@@ -101,7 +59,7 @@ public struct ConfigurationDraft: Hashable, Sendable {
     try manifest.removePackage(name)
     localOverrides?.names.removeValue(forKey: name)
   }
-  public mutating func redirectPackage(_ name: String, to location: FileLocation)
+  mutating func redirectPackage(_ name: String, to location: FileLocation)
     throws
   {
     guard manifest.names[name] != nil else {
@@ -115,25 +73,28 @@ public struct ConfigurationDraft: Hashable, Sendable {
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
-  public mutating func moveEntry(from: Int, to: Int) throws {
+  mutating func moveEntry(from: Int, to: Int) throws {
     try manifest.moveEntry(from: from, to: to)
   }
 }
 public struct ConfigurationSnapshot: Sendable {
   public let manifest: ManifestDocument
   public let localOverrides: LocalOverridesDocument?
-  public let sharedRevision: UInt64
-  public let localRevision: UInt64
-  public let sharedIsDirty: Bool
-  public let localIsDirty: Bool
+  let sharedRevision: UInt64
+  let localRevision: UInt64
+  let sharedIsDirty: Bool
+  let localIsDirty: Bool
   let locations: WorkspaceLocations
   let baseline: DocumentBaseline
+  var editingDiagnostics: [ConfigurationDiagnostic] = []
+  var editingOrigins: [String: Int] = [:]
+  var editingLocalOrigins: [String: Int] = [:]
   public func evaluate(_ scope: ConfigurationScope = .effective) throws
     -> EvaluatedManifest
   {
     try manifest.evaluate(localOverrides: scope == .shared ? nil : localOverrides)
   }
-  public func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {
+  func documentDiagnostics(scope: ConfigurationScope = .effective) -> [PinewindError] {
     func context(_ location: FileLocation?) -> DocumentContext? {
       guard let location, let path = try? location.filePath else { return nil }
       return try? DocumentContext(path: path)
@@ -150,6 +111,11 @@ struct DocumentBaseline: Sendable {
   var local: Data?
   var lock: Data?
 }
+private enum ConfigurationAccess<Value: Sendable>: Sendable {
+  case value(Value)
+  case recoveryRequired
+}
+
 struct ConfigurationStore: Sendable {
   let locations: WorkspaceLocations
   let coordinator: any FileAccessCoordinating
@@ -161,10 +127,49 @@ struct ConfigurationStore: Sendable {
     [locations.configuration.manifest, locations.configuration.lock]
       + (locations.configuration.localOverrides.map { [$0] } ?? [])
   }
+  var transactionLocation: URL {
+    get throws { try locations.stateRoot.appending("configuration.pending.plist").foundationURL }
+  }
+  func coordinated<Value: Sendable>(
+    intents: [FileAccessRequest.Intent],
+    _ accessor: @escaping @Sendable ([URL], URL) throws -> Value
+  ) async throws -> Value {
+    let identities = try documentLocations.map { try $0.url.absoluteString }
+    func access(recovering: Bool) async throws -> ConfigurationAccess<Value> {
+      var requests = try zip(documentLocations, intents).map {
+        try FileAccessRequest(url: $0.0.url, intent: recovering ? .write : $0.1)
+      }
+      requests.append(try FileAccessRequest(url: transactionLocation, intent: .write))
+      return try await coordinator.coordinate(requests) { urls in
+        let documents = Array(urls.dropLast())
+        let journal = urls[urls.count - 1]
+        if !recovering, try Self.read(journal) != nil { return .recoveryRequired }
+        if recovering {
+          try ConfigurationTransaction.recover(
+            at: journal, documents: documents, identities: identities)
+        }
+        return .value(try accessor(documents, journal))
+      }
+    }
+    switch try await access(recovering: false) {
+    case .value(let value): return value
+    case .recoveryRequired:
+      // Release read access before reacquiring write access. A read accessor
+      // must never mutate coordinated cloud documents during recovery.
+      switch try await access(recovering: true) {
+      case .value(let value): return value
+      case .recoveryRequired:
+        throw PinewindError.runtime(
+          .defect(
+            .invariant(
+              detail: "configuration recovery did not finish", origin: Origin())))
+      }
+    }
+  }
+
   func load() async throws -> ConfigurationSnapshot {
-    let requests = try documentLocations.map { FileAccessRequest(url: try $0.url, intent: .read) }
-    let values = try await coordinator.coordinate(requests) { urls in
-      try urls.map { try Self.read($0) }
+    let values = try await coordinated(intents: documentLocations.map { _ in .read }) { urls, _ in
+      try urls.map(Self.read)
     }
     func text(_ bytes: Data, location: FileLocation) throws -> String {
       guard let value = String(data: bytes, encoding: .utf8) else {
@@ -229,10 +234,10 @@ struct ConfigurationStore: Sendable {
     }
   }
   func commitLock(_ bytes: Data, expected: DocumentBaseline) async throws {
-    let requests = try documentLocations.enumerated().map { index, location in
-      FileAccessRequest(url: try location.url, intent: index == 1 ? .write : .read)
+    let intents: [FileAccessRequest.Intent] = documentLocations.indices.map {
+      $0 == 1 ? .write : .read
     }
-    try await coordinator.coordinate(requests) { urls in
+    try await coordinated(intents: intents) { urls, _ in
       guard try Self.read(urls[0]) == expected.shared,
         try urls.count < 3 || Self.read(urls[2]) == expected.local
       else {
@@ -260,28 +265,19 @@ struct ConfigurationStore: Sendable {
     let after =
       [shared, Optional(lock)]
       + (locations.configuration.localOverrides == nil ? [] : [local])
-    let requests = try documentLocations.enumerated().map { index, location in
-      FileAccessRequest(
-        url: try location.url,
-        intent: before[index] == after[index] ? .read : (after[index] == nil ? .delete : .write))
+    let intents: [FileAccessRequest.Intent] = before.indices.map {
+      before[$0] == after[$0] ? .read : (after[$0] == nil ? .delete : .write)
     }
-    try await coordinator.coordinate(requests) { urls in
+    let identities = try documentLocations.map { try $0.url.absoluteString }
+    try await coordinated(intents: intents) { urls, journal in
       guard try urls.map(Self.read) == before else {
         throw PinewindError.runtime(.state(.externallyModified))
       }
       try Cancellation.check()
-      // Once writing begins, finish the coordinated commit without cancellation gaps.
-      for index in urls.indices where index != 1 {
-        try Self.replace(
-          after[index], at: urls[index], expected: before[index], checkCancellation: false)
-      }
-      guard try Self.read(urls[0]) == shared,
-        try urls.count < 3 || Self.read(urls[2]) == local
-      else {
-        throw PinewindError.runtime(.state(.staleInputs))
-      }
-      try Self.replace(
-        lock, at: urls[1], expected: snapshot.baseline.lock, checkCancellation: false)
+      // Journal order follows document order: shared, lock, local. All readers
+      // recover under the same coordination before observing any document.
+      try ConfigurationTransaction(version: 1, documents: identities, before: before, after: after)
+        .commit(at: journal, documents: urls)
     }
     return ConfigurationSnapshot(
       manifest: snapshot.manifest, localOverrides: snapshot.localOverrides,
@@ -291,7 +287,7 @@ struct ConfigurationStore: Sendable {
   }
 }
 
-public actor ConfigurationSession {
+actor ConfigurationSession {
   private let store: ConfigurationStore
   private var draft: ConfigurationDraft
   private var baseline: DocumentBaseline
@@ -308,7 +304,7 @@ public actor ConfigurationSession {
       relativeTo: store.locations.relativeTo)
     saved = draft
   }
-  public func snapshot() -> ConfigurationSnapshot {
+  func snapshot() -> ConfigurationSnapshot {
     ConfigurationSnapshot(
       manifest: draft.manifest, localOverrides: draft.localOverrides,
       sharedRevision: sharedRevision, localRevision: localRevision,
@@ -316,17 +312,17 @@ public actor ConfigurationSession {
       localIsDirty: draft.localOverrides != saved.localOverrides,
       locations: store.locations, baseline: baseline)
   }
-  public func edit(_ operation: @Sendable (inout ConfigurationDraft) throws -> Void) rethrows {
+  func edit(_ operation: @Sendable (inout ConfigurationDraft) throws -> Void) rethrows {
     var next = draft
     try operation(&next)
     if next.manifest != draft.manifest { sharedRevision += 1 }
     if next.localOverrides != draft.localOverrides { localRevision += 1 }
     draft = next
   }
-  public func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {
-    snapshot().validate(scope: scope)
+  func validate(scope: ConfigurationScope = .effective) -> [PinewindError] {
+    snapshot().documentDiagnostics(scope: scope)
   }
-  public func save(_ layer: ConfigurationLayer) async throws -> SaveReceipt {
+  func save(_ layer: ConfigurationLayer) async throws -> SaveReceipt {
     do {
       await acquire()
       defer { release() }
@@ -372,7 +368,7 @@ public actor ConfigurationSession {
 
     } catch { throw ErrorBoundary.normalize(error) }
   }
-  public func reload() async throws {
+  func reload() async throws {
     do {
       await acquire()
       defer { release() }
@@ -389,7 +385,7 @@ public actor ConfigurationSession {
 
     } catch { throw ErrorBoundary.normalize(error) }
   }
-  public func discardChangesAndReload() async throws {
+  func discardChangesAndReload() async throws {
     do {
       await acquire()
       defer { release() }

@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Yams
 
 /// An authored field: omission inherits, null clears, and a value replaces the whole field.
@@ -42,16 +43,47 @@ public struct PackageFields: Hashable, Sendable {
     self.exclude = exclude
   }
 
-  func validate() throws(DeclarationFailure) {
-    if let url = url.value, url.scheme == nil {
-      throw DeclarationFailure.relativeSourceURL(url)
-    }
-    try FileFilter(include: include.value, exclude: exclude.value ?? []).validate()
-    try revision.value?.validate()
-    if url.value?.isFileURL == true, revision.value != nil {
-      throw DeclarationFailure.revisionWithFileSource
-    }
+  func validate() throws(Failure) {
+    if let first = problems().first { throw first.failure }
   }
+
+  /// Shared by fail-fast evaluation and collecting editor validation.
+  func problems() -> [(field: String, failure: Failure)] {
+    var result: [(field: String, failure: Failure)] = []
+    func attempt(_ field: String, _ operation: () throws -> Void) {
+      do { try operation() } catch {
+        if let failure = Failure.recognizing(error) {
+          result.append((field, failure))
+        } else {
+          result.append(
+            (field, .defect(.wrapped(detail: String(describing: error), origin: Origin()))))
+        }
+      }
+    }
+    if let url = url.value {
+      attempt("url") {
+        guard url.scheme != nil else { throw DeclarationFailure.relativeSourceURL(url) }
+        _ = try SourceIdentity.normalize(url)
+      }
+    }
+    attempt("revision") { try revision.value?.validate() }
+    if url.value?.isFileURL == true, revision.value != nil {
+      result.append(("revision", .declaration(.revisionWithFileSource)))
+    }
+    if let recipe = recipe.value {
+      attempt("recipe") {
+        guard !recipe.contains("\0"), !recipe.contains("\\") else {
+          throw FileSystemFailure.notPortable(FilePath(recipe))
+        }
+        _ = try RelativePath(FilePath(recipe + ".recipe.yaml"))
+      }
+    }
+    for (field, patterns) in [("include", include.value ?? []), ("exclude", exclude.value ?? [])] {
+      for pattern in patterns { attempt(field) { _ = try Glob.compile(pattern) } }
+    }
+    return result
+  }
+
 }
 
 public enum OrderEntry: Hashable, Sendable {
@@ -99,7 +131,7 @@ public struct ManifestDocument: Hashable, Sendable {
     }
   }
 
-  public mutating func renamePackage(_ old: String, to new: String) throws {
+  mutating func renamePackage(_ old: String, to new: String) throws {
     guard let fields = names[old] else {
       throw PinewindError.runtime(.declaration(.unknownName(old)))
     }
@@ -116,7 +148,7 @@ public struct ManifestDocument: Hashable, Sendable {
     }
   }
 
-  public mutating func removePackage(_ name: String) throws {
+  mutating func removePackage(_ name: String) throws {
     guard names[name] != nil else { throw PinewindError.runtime(.declaration(.unknownName(name))) }
     guard
       !order.contains(where: {
@@ -128,7 +160,7 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   /// Destination is the final index after moving; duplicate entries remain distinct positions.
-  public mutating func moveEntry(from: Int, to: Int) throws {
+  mutating func moveEntry(from: Int, to: Int) throws {
     guard order.indices.contains(from), order.indices.contains(to) else {
       throw PinewindError.runtime(.declaration(.orderIndexOutOfBounds))
     }

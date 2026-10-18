@@ -203,8 +203,9 @@ enum ConfigurationEvaluator {
       filter: FileFilter(include: fields.include.value, exclude: fields.exclude.value ?? []))
   }
 
-  private static func validate(_ name: String, fields: PackageFields) throws(DeclarationFailure) {
-    guard name != "self" else { throw .reservedName("self") }
+  private static func validate(_ name: String, fields: PackageFields) throws(Failure) {
+    guard !name.isEmpty else { throw .declaration(.emptyName) }
+    guard name != "self" else { throw .declaration(.reservedName("self")) }
     try fields.validate()
   }
 
@@ -220,12 +221,12 @@ enum ConfigurationEvaluator {
     }
     for (name, fields) in document.names.sorted(by: { $0.key < $1.key }) {
       do { try validate(name, fields: fields) } catch {
-        append(.declaration(error), anchoredBy: sharedContext)
+        append(error, anchoredBy: sharedContext)
       }
     }
     for (name, fields) in (local?.names ?? [:]).sorted(by: { $0.key < $1.key }) {
       do { try validate(name, fields: fields) } catch {
-        append(.declaration(error), anchoredBy: localContext ?? sharedContext)
+        append(error, anchoredBy: localContext ?? sharedContext)
       }
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
@@ -243,10 +244,10 @@ enum ConfigurationEvaluator {
   {
     var names = document.names
     for (name, fields) in names {
-      do { try validate(name, fields: fields) } catch { throw .declaration(error) }
+      try validate(name, fields: fields)
     }
     for (name, fields) in local?.names ?? [:] {
-      do { try validate(name, fields: fields) } catch { throw .declaration(error) }
+      try validate(name, fields: fields)
       names[name] = merge(fields, into: names[name] ?? PackageFields())
     }
     var entries: [ManifestEntry] = []

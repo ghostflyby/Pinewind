@@ -30,7 +30,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
 
   /// Attaches a document without changing an existing primary attribution.
   /// Machine failures can be observed in a document, but cannot indict it.
-  public func attributed(to context: DocumentContext, as attribution: DocumentAttribution)
+  func attributed(to context: DocumentContext, as attribution: DocumentAttribution)
     -> PinewindError
   {
     guard case .runtime(let failure) = self else { return self }
@@ -43,7 +43,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
   }
 
   /// Adds an enclosing import/include frame; the primary location stays intact.
-  public func addingDerivation(_ frame: DocumentContext) -> PinewindError {
+  func addingDerivation(_ frame: DocumentContext) -> PinewindError {
     func adding(to error: DocumentError) -> DocumentError {
       var context = error.context
       var anchor = frame
@@ -59,7 +59,7 @@ public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum DocumentAttribution: Sendable { case configuration, incident }
+enum DocumentAttribution: Sendable { case configuration, incident }
 
 /// Mechanical boxing only. Foreign errors must be translated where the operation is known.
 enum ErrorBoundary {
@@ -68,6 +68,7 @@ enum ErrorBoundary {
   ) -> any Error {
     if error is CancellationError { return error }
     if let error = error as? PinewindError { return error }
+    if let error = error as? ConfigurationValidationError { return error }
     if let failure = Failure.recognizing(error) { return PinewindError.runtime(failure) }
     return PinewindError.runtime(
       .defect(.wrapped(detail: String(describing: error), origin: Origin(file: fileID, line: line)))
@@ -376,6 +377,8 @@ public enum Budget: Sendable, Hashable, CustomStringConvertible {
 }
 
 public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertible {
+  case invalidPackageSource(String)
+  case emptyName
   case reservedName(String)
   case unknownName(String)
   case nameStillReferenced(String)
@@ -417,6 +420,8 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
 
   public var description: String {
     switch self {
+    case .invalidPackageSource(let source): return "invalid package source: \(source)"
+    case .emptyName: return "dependency name must not be empty"
     case .reservedName(let name): return "'\(name)' is a reserved name"
     case .unknownName(let name): return "unknown package name '\(name)'"
     case .nameStillReferenced(let name): return "package name '\(name)' is still referenced"
@@ -486,6 +491,11 @@ public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
 }
 
 public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
+  case unsupportedFrontend(String)
+  case ambiguousOutputDirectories([FilePath])
+  case frontendRequired
+  case runtimeOutputPath(RelativePath)
+  case invalidConfigurationTransaction(FilePath)
   case publicationModeConflict(FilePath)
   case unmanagedOutputFiles(directory: FilePath, paths: [RelativePath])
   case invalidPublicationRecord(FilePath)
@@ -499,6 +509,16 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
   public var description: String {
     switch self {
+    case .unsupportedFrontend(let name):
+      return "frontend \(name) is unsupported on this platform; select a custom output directory"
+    case .ambiguousOutputDirectories(let paths):
+      return
+        "multiple Rime directories found: \(paths.map(\.string).joined(separator: ", ")); select a destination"
+    case .frontendRequired: return "cannot identify a Rime frontend; select a destination"
+    case .runtimeOutputPath(let path): return "build contains Rime runtime data at \(path.string)"
+    case .invalidConfigurationTransaction(let path):
+      return
+        "invalid configuration transaction: \(path.string). Restore the transaction from backup before accessing configuration."
     case .publicationModeConflict(let path):
       return
         "managed-file publication cannot target a Windows junction: \(path.string). Use a real directory rather than a replaceable generation."

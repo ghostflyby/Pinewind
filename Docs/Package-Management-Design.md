@@ -1,10 +1,10 @@
 # 松风 / Pinewind:工作区与存储契约
 
-状态:2026-10-17 新 API。提供 `PinewindCore` 与消费其公开 API 的 `pinewind` CLI。尚未发布,不保留旧 API、旧清单结构或旧内部锁编码兼容层。用户清单仍声明整数 `version: 1`。错误面的设计见《Error-System-Design》,为错误类型、定位与归因的唯一权威。
+状态:2026-10-18 包管理 API。提供 `PinewindCore` 与消费其公开 API 的 `pinewind` CLI。尚未发布,不保留旧 API、旧清单结构或旧内部锁编码兼容层。用户清单仍声明整数 `version: 1`。错误面的设计见《Error-System-Design》,为错误类型、定位与归因的唯一权威。
 
 ## 1. 域与位置
 
-库区分用户文件树、外部配置文档、持久本机状态、可抛弃缓存和派生组合结果。一切根路径由调用方提供,库不选择用户目录;公开入口省略相对基准时捕获当前目录并固定。
+库区分用户文件树、外部配置文档、持久本机状态、可抛弃缓存和派生组合结果。一切根路径由调用方提供,显式 Workspace 不选择用户目录,PlatformDirectories 提供可选的平台发现便利入口;公开入口省略相对基准时捕获当前目录并固定。
 
 `WorkspaceLocations` 包含:
 
@@ -66,31 +66,36 @@ order:
 
 `ManifestDocument`、`LocalOverridesDocument` 保留不完整草稿,求值直接合并类型化字段。解析保留语法错误位置;编辑后的求值诊断提供字段和条目,不伪造生成 YAML 的行号。保存保持语义,不保留注释与布局。
 
-## 4. 配置会话
+## 4. 配置编辑与批量应用
 
-`workspace.configuration()` 加载独立 `ConfigurationSession`,不会使工作区默认操作使用内存草稿。
+Workspace 是唯一的公开编辑入口。configuration(editing:) 返回绑定工作区与文件基线的不可变候选,不会替换默认保存状态。update { configuration in ... } 通过同一个 ConfigurationEditor 执行单次或批量修改,校验、解析、提交后默认准备依赖;apply(snapshot) 应用已经预览过的同一候选。编辑闭包同步、非抛出,不能 await;不会为重试而重放。
 
-- edit 接受同步闭包,抛错时整份 ConfigurationDraft 回滚。
-- snapshot 是独立不可变值,分别携带两层修订和 isDirty。
-- save(.shared)/save(.local) 分别校验、保存,返回实际持久化修订。I/O 等待期间可以编辑,新编辑不会被误标为已经保存。
-- 本地草稿为 nil 时保存会删除覆写,此恢复操作不要求共享草稿可部署。禁用本地覆写位置时保存该层报错。
-- reload 拒绝丢弃未保存编辑;discardChangesAndReload 明确放弃。重载等待期间又发生编辑时拒绝覆盖。
-- 重命名维护共享引用和本地覆写。ConfigurationDraft.removePackage 删除对应 order 引用和本地覆写;ManifestDocument.removePackage 拒绝删除仍被引用的定义。
-- addPackage 默认插入第一个 self 前,没有 self 则追加;显式 before/after 的命名锚点必须唯一。
+ConfigurationEditor 的添加、删除、重命名、改向和移动方法均不抛配置错误。每次操作在临时值上执行,失败保留原值并记录诊断,因此重复添加不会通过字典覆盖丢失证据。允许通过 PackageFields 提交不完整字段;来源简写和相对位置在 Core 中解析。添加默认位于首个 self 前;删除维护全部命名引用和本地覆写;重命名维护两层对应名称。相对改向始终使用工作区基准。
 
-Apple 文件访问经 NSFileCoordinator,使用回调实际 URL。其他平台通过 stateRoot 内稳定的本机配置锁协调;同一配置集合的调用者共用 stateRoot。锁文件不删除,不应同步。App 在进入库前准备云文件和权限;识别到未下载的云端占位文档时报告内容未准备,不回退为默认清单。
+validate(editing:) 与 candidate.validate() 返回 ConfigurationDiagnostic 集合,默认同时检查共享与有效配置,与实际应用一致。诊断包含原有 PinewindError 及可选操作序号、包名、字段;后者只定位内存编辑,不进入文档文本定位。独立字段错误汇总,无法判断的派生错误跳过。预览不提交;存在错误时 update/apply 在联网前整体抛 ConfigurationValidationError。文件读取失败和取消仍抛出,不伪装为配置诊断。
 
-两个配置文件和共享解析锁分别原子写入,不构成跨文件或跨设备同步事务。每次写入检查加载基线,拒绝覆盖外部修改。
+无公开 Session、独立草稿构造、逐层保存回执或重载协议。GUI 保存表单状态或候选快照;需要最新状态时重新读取 Workspace。旧的文档协调会话仅为内部实现,不是外部契约。
+
+Apple 文件访问经 NSFileCoordinator,使用其返回的实际 URL。其他平台通过 stateRoot 内稳定的本机配置锁协调;同一配置集合共用 stateRoot。每次协调同时访问机器本地事务日志。App 负责云文件下载和权限。日志缺失时不会产生配置内容写入;若存在此前持久化的提交,读取前先恢复。
+
+应用前预检所有文档与 lock 基线。提交使用包含 before/after 字节和文档身份的持久化重做日志:先同步日志,再逐文件原子替换并同步,最后删除并同步日志。日志持久化即提交点,此后不响应取消。崩溃后 Core 读者在相同协调范围内先完成恢复,只看到完整结果;当前字节不属于 before/after 的任何一者则拒绝恢复,不覆盖外部修改。损坏或不属于本配置集合的日志硬失败并提供恢复提示。
+
+该事务协议保证协作 Core 调用者的整批可见性与恢复,不承诺其他程序直接读取或跨设备同步时的跨文件原子性。持久化期间 I/O 错误可能留下待恢复提交;重新访问可完成。解析失败不写配置;提交后的准备失败保留声明与 lock,以 PreparationFailure 携带已提交 Resolution 和原有 PinewindError。取消保持 CancellationError,可通过 configuration/status 查询已提交状态。
 
 ## 5. 阶段与副作用
 
 | 入口 | 行为 |
 |---|---|
 | resolve | 保留匹配版本,补全变化声明,成功后提交共享锁 |
-| resolve(editing:) | 在内存中编辑并解析,成功后保存配置,最后提交锁;fetch 失败不回滚 |
-| update(selection) | 更新指定范围,成功后提交共享锁 |
-| update(packagesNamed:) | 从当前声明选择活跃远程命名依赖,刷新对应仓库,不要求预先 resolve |
-| resolve/update(preview:) | 使用显式配置快照,不提交文档或锁 |
+| update / apply | 编辑校验与解析成功后事务提交配置和 lock,默认准备依赖 |
+| validate | 收集配置诊断,不联网、不提交本次编辑 |
+| status | 查询配置、解析结果及输入准备状态,不联网 |
+| install | resolve 后准备,locked 模式只接受保存锁 |
+| refresh | 刷新版本与资源后准备,不构建 |
+| build | 离线规划,保护 Rime 运行数据,按文件发布 |
+| resolve(refreshing:) | 更新指定范围,成功后提交共享锁 |
+| resolve(refreshingPackagesNamed:) | 从当前声明选择活跃远程命名依赖,刷新对应仓库,不要求预先 resolve |
+| resolve(preview:) / resolve(refreshing:preview:) | 使用显式配置快照,不提交文档或锁 |
 | fetch | 按确定版本取回源码和资源,不改锁 |
 | cachedInputs | 只接受完整缓存和本地树,不联网 |
 | plan | 固定本次目录成员、文件和 recipe 快照 |
@@ -102,9 +107,9 @@ Resolution、PreparedInputs、CompositionPlan 由库创建,外部不能任意构
 
 源码请求按规范化仓库身份和 revision 在一次事务中复用,同一请求不能对应冲突 commit。不同 recipe/options 的应用位置独立保留。非 GitHub 请求地址保留 .git 后缀,缓存身份可消除后缀;GitHub 地址统一规范化并由后端补 .git 获取。
 
-resolve/update 在全部解析、下载和校验完成后,再次协调检查共享配置、本地配置及旧锁的基线,然后原子提交新锁。中途失败或取消不改变旧锁。UpdateSelection 支持包、import 和资源标识;不属于当前解析的标识报错。
+resolve/refresh 在全部解析、下载和校验完成后,再次协调检查共享配置、本地配置及旧锁的基线,然后原子提交新锁。中途失败或取消不改变旧锁。RefreshSelection 支持包、import 和资源标识;不属于当前解析的标识报错。
 
-resolve(editing:) 在写入前统一预检所有基线,声明与覆写逐文件原子写入,lock 最后提交;开始写入后不因取消中断此提交。跨文件 I/O 失败或进程中断不承诺回滚,未完成的声明需重新 resolve。返回结果绑定已保存的新配置,可直接 fetch。CLI 的 add 解析失败不写声明,解析成功后准备失败则保留声明与 lock,以 install 重试。
+update/apply 的事务与失败边界见 §4。preparation: .deferred 仅提交和解析,适合移除依赖;默认 required 准备输入。返回 ConfigurationApplication,包含 Resolution 和可选 PreparedInputs。
 
 ImportID.index 是生成标识时的位置,用于校验旧锁中的标识。执行选择更新按 request 匹配当前清单,同一 request 的所有出现位置一起刷新;声明移动不影响匹配,声明已删除或 request 改变则拒绝选择。过期 expansion 标识仍被拒绝。
 
@@ -146,7 +151,7 @@ glob 以根相对路径求值,*、? 和字符类不跨 `/`,** 可跨目录,中�
 
 以上为默认 directory 模式。managedFiles() 用于含有运行状态的 Rime 用户目录:先渲染完整候选,只检查、更新计划涉及的文件与历史受管文件,不枚举或交换整个输出目录。单个文件通过同目录临时文件与原子替换提交。旧受管路径只有当前哈希匹配历史记录时才删除,否则保留并报告 preservedPaths。未受管同名文件若内容不同,在修改任何输出前一次性报告全部冲突;只有 managedFiles(overwriteUnmanaged: true) / CLI build --force 才可覆盖,并通过 overwrittenUnmanagedPaths 报告。与生成内容相同的文件可复用并纳入管理。
 
-所有权与未完成的发布意图按规范化输出位置保存在 stateRoot/publications。意图先写入临时文件并同步,再原子替换;POSIX 同步父目录,Windows 使用 FlushFileBuffers 与写穿透替换。输出更新及已提交记录使用同样的同步顺序。意图持久化完成前不修改输出。中途失败或取消后,下一次构建利用旧/新哈希恢复。损坏 pending 只丢弃无法证明的所有权,通过 PublicationWarning 报告;无所有权证据的输出仍受冲突保护。读取 pending 的 I/O 错误不被当作可忽略的损坏。已提交 record 损坏则硬失败,错误提供恢复备份或移走记录以重置所有权的指引。此模式不承诺多文件整体原子性,也不修改不相关的词库及运行状态。CLI 另外拒绝把已知 Rime 运行数据路径作为生成目标,即使指定 --force 也不能绕过。
+所有权与未完成的发布意图按规范化输出位置保存在 stateRoot/publications。意图先写入临时文件并同步,再原子替换;POSIX 同步父目录,Windows 使用 FlushFileBuffers 与写穿透替换。输出更新及已提交记录使用同样的同步顺序。意图持久化完成前不修改输出。中途失败或取消后,下一次构建利用旧/新哈希恢复。损坏 pending 只丢弃无法证明的所有权,通过 PublicationWarning 报告;无所有权证据的输出仍受冲突保护。读取 pending 的 I/O 错误不被当作可忽略的损坏。已提交 record 损坏则硬失败,错误提供恢复备份或移走记录以重置所有权的指引。此模式不承诺多文件整体原子性,也不修改不相关的词库及运行状态。Core 的 build 入口拒绝把已知 Rime 运行数据路径作为生成目标,即使指定 --force 也不能绕过。
 
 Windows 两种模式按保留末级入口的 publicationPath 获取同一发布锁,managedFiles 在锁内拒绝末级 junction,不允许通过代次入口修改被 directory 模式替换的文件。用户配置在 junction 后方时应直接选择其实际普通目录。CI 校验 GetLongPathNameW 不展开末级受管 junction 的入口断言。
 
@@ -158,7 +163,7 @@ Windows 两种模式按保留末级入口的 publicationPath 获取同一发布�
 
 受管文件的打开、读、定位、元数据检查和关闭优先使用 Swift System 的 `FileDescriptor`。锁文件只打开一次,在同一描述符上非阻塞尝试排他锁,关闭时释放;等待和取消逻辑跨平台共用。POSIX 仅为现有描述符补充 `flock`;Windows 保留禁止删除共享的打开策略,将原生句柄转交描述符管理,并通过 `LockFileEx` 锁定约定的首字节。两者提供协作式进程互斥,不承诺完全相同的内核锁语义。内部内容读取使用原始字节,不进行文本转换。
 
-取消检查覆盖等待、下载、文件枚举、哈希和渲染,提交前执行最后检查。提交已经完成则返回成功,不在成功提交后再报告取消。普通 resolve/update 与 directory 发布失败或取消保留旧锁和完整已发布输出;resolve(editing:) 的跨文件提交与 managedFiles 的恢复边界如前所述。候选和临时视图清理。
+取消检查覆盖等待、下载、文件枚举、哈希和渲染,提交前执行最后检查。提交已经完成则返回成功,不在成功提交后再报告取消。普通 resolve/refresh 与 directory 发布失败或取消保留旧锁和完整已发布输出;update/apply 的跨文件提交与 managedFiles 的恢复边界如前所述。候选和临时视图清理。
 
 PinewindError 按 configuration/incident/runtime 区分归因,事实由 Failure 的领域载荷承载,说明由 description 推导。文档上下文含路径、URL、可选行列及推导链,不含字段路径;归一化与载荷约定以《Error-System-Design》为准。CancellationError 单独保留。每次操作可独立接收进度回调,界面线程切换由调用方处理。
 
@@ -167,3 +172,7 @@ PinewindError 按 configuration/incident/runtime 区分归因,事实由 Failure 
 测试包含公开消费方 target、独立文档位置、草稿与保存基线、离线后端计数、资源版本和校验、conf include、开发覆写、取消与原子发布、真实进程间锁、跨平台路径和既有补丁/大文件回归。默认测试不联网,真实 GitHub 测试通过 PINEWIND_NETWORK_TESTS 显式启用。
 
 CLI 默认使用平台配置、状态和缓存目录,输出到所选 Rime 实现的用户配置目录,不引入当前目录项目根。add/install/update 准备依赖,remove 更新声明及 lock,build 离线发布,paths 只读显示位置。CLI 不包含跨设备 sync 或 Rime 引擎部署。
+
+## 10. 公开边界
+
+CLI 和 GUI 共用 Workspace 的 update/validate/configuration/apply/install/refresh/status/build。分阶段 resolve/fetch/cachedInputs/plan/compose 保持公开,供预览与高级操作使用。ConfigurationEditor 无公开构造器;ConfigurationSnapshot 为只读候选。ConfigurationSession、ConfigurationDraft、ConfigurationLayer、SaveReceipt、具体 Git/HTTP 后端、Glob 与归因辅助方法内部化。PinnedResource 只读公开,构造器内部化;ManifestDocument 上重复的变更方法内部化。自定义 RepositoryProvider / ResourceDownloader 协议及其必要类型继续公开;默认后端配置通过 WorkspaceServices.live(credentials:session:) 提供。

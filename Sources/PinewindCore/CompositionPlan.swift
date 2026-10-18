@@ -12,7 +12,7 @@ public struct PinnedResource: Hashable, Sendable {
   public let path: RelativePath
   public let sha256: String
 
-  public init(url: URL, path: RelativePath, sha256: String) throws {
+  init(url: URL, path: RelativePath, sha256: String) throws {
     guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
       throw DeclarationFailure.unsupportedSourceURL(url)
     }

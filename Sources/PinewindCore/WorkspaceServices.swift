@@ -7,6 +7,10 @@
 import Foundation
 import SystemPackage
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 public protocol RepositoryProvider: Sendable {
   func resolve(_ request: RepositoryRequest) async throws -> SourceIdentity
   func prepareSource(_ identity: SourceIdentity, cacheRoot: FilePath) async throws -> SourceSnapshot
@@ -31,7 +35,12 @@ public struct WorkspaceServices: Sendable {
     self.repositories = repositories
     self.resources = resources
   }
-  public static var live: Self {
-    Self(repositories: GitKitRepositoryProvider(), resources: HTTPSResourceDownloader())
+  public static var live: Self { live() }
+  public static func live(
+    credentials: GitCredentialProvider? = nil, session: URLSession = .shared
+  ) -> Self {
+    Self(
+      repositories: GitKitRepositoryProvider(credentials: credentials),
+      resources: HTTPSResourceDownloader(session: session))
   }
 }
