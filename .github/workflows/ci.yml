@@ -45,7 +45,7 @@ jobs:
           path: .build
           key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
-        run: swift test --no-parallel
+        run: swift test --parallel
 
   linux-test:
     name: Linux · swift test
@@ -73,7 +73,7 @@ jobs:
           path: .build
           key: linux-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
-        run: swift test --no-parallel
+        run: swift test --parallel
 
   windows-test:
     name: Windows · swift test
@@ -94,7 +94,7 @@ jobs:
           path: .build
           key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
-        run: swift test --no-parallel
+        run: swift test --parallel
       - name: Preserve Windows build cache after failure
         if: failure() && steps.windows-swiftpm-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
@@ -154,7 +154,7 @@ jobs:
           scheme: Pinewind-Package
           destination: platform=iOS Simulator,id=${{ env.SIM_ID }}
           result-bundle-path: ${{ runner.temp }}/pinewind-ios-diagnostics/Pinewind.xcresult
-          parallel-testing-enabled: false
+          parallel-testing-enabled: true
           disable-automatic-package-resolution: true
           skip-macro-validation: true
           skip-package-plugin-validation: true
