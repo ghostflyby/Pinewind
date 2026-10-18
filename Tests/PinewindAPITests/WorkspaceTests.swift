@@ -177,7 +177,7 @@ struct WorkspaceTests {
     #expect(!exists(f.lock) && !exists(f.output))
   }
 
-  @Test func lintChecksBothDocumentsAndEveryFilterWhileSkippingUnavailableSources() async throws {
+  @Test func lintChecksBothDocumentsAndEveryFilterWithoutRequiringRemoteSources() async throws {
     let f = try Fixture()
     defer { f.remove() }
     let missing = url(f.root.appending("absent package")).absoluteString
@@ -193,9 +193,9 @@ struct WorkspaceTests {
     try write(f.overrides, "version: 2\nnames: {bad: {url: true}}\nunknown: value\n")
     let workspace = try await f.workspace()
     let report = try await workspace.lint()
-    #expect(report.diagnostics.count == 6)
+    #expect(report.diagnostics.count == 7)
     #expect(report.diagnostics.filter { $0.context.path == f.overrides }.count == 3)
-    #expect(report.diagnostics.filter { $0.context.path == f.manifest }.count == 3)
+    #expect(report.diagnostics.filter { $0.context.path == f.manifest }.count == 4)
     #expect(!exists(f.lock))
     #expect(await f.repositories.counts().0 == 0)
   }
@@ -314,6 +314,95 @@ struct WorkspaceTests {
     #expect(local.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
   }
 
+  @Test(arguments: ["[self]\n", "hello\n", "null\n"])
+  func lintStopsDependentRootChecksButContinuesOtherDocuments(_ yaml: String) async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.manifest, yaml)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 1)
+    #expect(
+      report.diagnostics.first?.underlyingError as? DeclarationFailure
+        == .syntaxError(detail: "expected a mapping"))
+    #expect(report.diagnostics.first?.context.placement?.line == 1)
+    _ = try JSONEncoder().encode(report)
+    try write(f.manifest, "version: 1\norder: [missing]\n")
+    try write(f.overrides, yaml)
+    let independent = try await workspace.lint()
+    #expect(independent.diagnostics.count == 2)
+    #expect(independent.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
+    #expect(independent.diagnostics.filter { $0.context.path == f.manifest }.count == 1)
+  }
+
+  @Test func lintChecksLocalSourceDirectoriesAtTheirAuthoredURLs() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let missing = f.root.appending("absent package")
+    let file = f.root.appending("ordinary file")
+    try write(file, "not a directory")
+    try write(
+      f.manifest,
+      "version: 1\norder:\n  - url: \(url(missing).absoluteString)\n    recipe: custom\n  - url: \(url(missing).absoluteString)\n  - url: \(url(file).absoluteString)\n  - {url: https://example.test/absent, recipe: custom}\n"
+    )
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 3)
+    #expect(report.diagnostics.compactMap { $0.context.placement?.line } == [3, 5, 6])
+    #expect(report.diagnostics.allSatisfy { $0.context.path == f.manifest })
+    #expect(
+      report.diagnostics.prefix(2).allSatisfy {
+        $0.underlyingError as? FileSystemFailure == .notFound(missing)
+      })
+    #expect(report.diagnostics.last?.underlyingError as? FileSystemFailure == .notADirectory(file))
+    _ = try JSONEncoder().encode(report)
+    // Named definitions and both override layers retain the URL's own origin.
+    try write(
+      f.manifest,
+      "version: 1\nnames:\n  pkg: {url: \(url(missing).absoluteString)}\norder:\n  - pkg\n  - {name: pkg, url: \(url(file).absoluteString)}\n"
+    )
+    try write(f.overrides, "version: 1\nnames:\n  pkg: {url: \(url(missing).absoluteString)}\n")
+    let layered = try await workspace.lint()
+    #expect(layered.diagnostics.count == 3)
+    #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
+    #expect(layered.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+  }
+
+  @Test func lintImportedMissingRecipesUseTheUnpositionedOperationFailureChannel() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let endpoint = URL(string: "https://conf.test/packages.conf")!
+    await f.downloads.set(endpoint, "package_list=(rime/example:customize)\n")
+    try await f.repositories.install(
+      firstID, files: ["customize.recipe.yaml": "recipe: {Rx: customize}\ninstall_files: []\n"])
+    try write(f.manifest, "version: 1\norder: [{import: \(endpoint.absoluteString)}]\n")
+    let workspace = try await f.workspace()
+    let resolution = try await workspace.resolve()
+    #expect(resolution.imports.first?.packages.first?.recipe == "customize")
+    #expect(try await workspace.lint().isValid)
+    let calls = await f.repositories.counts()
+    let downloads = await f.downloads.count()
+    let cache = url(f.locations.cacheRoot.appending("sources"))
+    let key = try #require(
+      FileManager.default.contentsOfDirectory(at: cache, includingPropertiesForKeys: nil).first)
+    let recipe = key.appendingPathComponent(firstID + "/customize.recipe.yaml")
+    try FileManager.default.removeItem(at: recipe)
+    try write(
+      f.manifest,
+      "version: 1\norder: [{import: \(endpoint.absoluteString)}, missing]\n")
+    // This contract deliberately returns no partial report on an operation failure,
+    // even if an independent YAML diagnostic has already been collected.
+    await #expect { try await workspace.lint() } throws: { error in
+      guard case .notFound(let path) = error as? FileSystemFailure else { return false }
+      return path.lastComponent?.string == "customize.recipe.yaml"
+    }
+    #expect(await f.repositories.counts().0 == calls.0)
+    #expect(await f.repositories.counts().1 == calls.1)
+    #expect(await f.downloads.count() == downloads)
+  }
+
   @Test func lintChecksExplicitMissingRecipesAtTheirAuthoredSelectors() async throws {
     let f = try Fixture()
     defer { f.remove() }
@@ -349,14 +438,14 @@ struct WorkspaceTests {
     #expect(layered.diagnostics.count == 3)
     #expect(layered.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
     #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
-    // Null clears an inherited explicit selector; an absent source remains optional.
+    // Null clears an inherited explicit selector; unavailable remote sources remain optional.
     try write(f.overrides, "version: 1\nnames:\n  pkg: {recipe: null}\n")
     let reset = try await workspace.lint()
     #expect(reset.diagnostics.count == 2)
     #expect(reset.diagnostics.allSatisfy { $0.context.path == f.manifest })
     try write(
       f.manifest,
-      "version: 1\nnames: {pkg: {url: \(source)}}\norder:\n  - pkg\n  - {url: \(url(f.root.appending("absent package")).absoluteString), recipe: custom}\n"
+      "version: 1\nnames: {pkg: {url: \(source)}}\norder:\n  - pkg\n  - {url: https://example.test/absent, recipe: custom}\n"
     )
     #expect(try await workspace.lint().isValid)
     #expect(await f.repositories.counts().0 == 0)

@@ -54,6 +54,7 @@ final class YAMLLinter {
   }
   private struct Request {
     let value: PackageRequest
+    let sourceContext: DocumentContext?
     let recipeContext: DocumentContext?
   }
 
@@ -68,6 +69,12 @@ final class YAMLLinter {
       return
     }
     diagnostics.append(document)
+  }
+  private func record<E: Error>(_ failure: E, at context: DocumentContext?) throws {
+    // Imported Plum descriptors can select a recipe without a YAML selector.
+    // Such failures use the operation channel, like other unpositioned I/O errors.
+    guard let context else { throw failure }
+    try record(PinewindError.configuration(DocumentError(context: context, failure: failure)))
   }
   private func emit<E: Error>(_ error: E, reader: YAMLReader, at node: Node) throws {
     try record(reader.fail(error, at: node))
@@ -145,11 +152,15 @@ final class YAMLLinter {
       return Document(namesValid: false)
     }
     reader.anchor = root
+    guard root.mapping != nil else {
+      try record(reader.error("expected a mapping", at: root))
+      return Document(namesValid: false)
+    }
     let fields = try mapping(
       root, reader: reader,
       allowed: local ? ["version", "names"] : ["version", "names", "order"])
     _ = try attempt { try reader.version(fields) }
-    var result = Document(namesValid: root.mapping != nil)
+    var result = Document()
     if let names = fields["names"] {
       let initial = diagnostics.count
       let definitions = try mapping(names, reader: reader)
@@ -223,14 +234,15 @@ final class YAMLLinter {
     return authored != nil && authored?.tag != Tag(.null) && definition.fields.url == .inherit
   }
 
-  private func recipeContext(
-    _ fields: PackageFields, node: Node, reader: YAMLReader, inheriting: DocumentContext? = nil
+  private func fieldContext<Value: Hashable & Sendable>(
+    _ field: FieldOverride<Value>, key: String, node: Node, reader: YAMLReader,
+    inheriting: DocumentContext? = nil
   ) -> DocumentContext? {
-    switch fields.recipe {
+    switch field {
     case .inherit: return inheriting
     case .reset: return nil
     case .value:
-      return node.mapping?.first { $0.key.scalar?.string == "recipe" }
+      return node.mapping?.first { $0.key.scalar?.string == key }
         .map { reader.context(at: $0.value) }
     }
   }
@@ -239,11 +251,14 @@ final class YAMLLinter {
     var requests: [Request] = []
     for entry in shared.entries {
       var value: PackageFields
-      var context: DocumentContext?
+      var sourceContext: DocumentContext?
+      var recipeContext: DocumentContext?
       switch entry.value {
       case .package(let fields):
         value = fields
-        context = recipeContext(fields, node: entry.node, reader: entry.reader)
+        sourceContext = fieldContext(fields.url, key: "url", node: entry.node, reader: entry.reader)
+        recipeContext = fieldContext(
+          fields.recipe, key: "recipe", node: entry.node, reader: entry.reader)
       case .named(let name, let overrides):
         let definition = shared.definitions[name]
         let update = local?.definitions[name]
@@ -262,17 +277,28 @@ final class YAMLLinter {
         else { continue }
         value = definition?.fields ?? PackageFields()
         if let definition {
-          context = recipeContext(
-            definition.fields, node: definition.node, reader: definition.reader)
+          sourceContext = fieldContext(
+            definition.fields.url, key: "url", node: definition.node, reader: definition.reader)
+          recipeContext = fieldContext(
+            definition.fields.recipe, key: "recipe", node: definition.node,
+            reader: definition.reader)
         }
         if let update {
           value = ConfigurationEvaluator.merge(update.fields, into: value)
-          context = recipeContext(
-            update.fields, node: update.node, reader: update.reader, inheriting: context)
+          sourceContext = fieldContext(
+            update.fields.url, key: "url", node: update.node, reader: update.reader,
+            inheriting: sourceContext)
+          recipeContext = fieldContext(
+            update.fields.recipe, key: "recipe", node: update.node, reader: update.reader,
+            inheriting: recipeContext)
         }
         value = ConfigurationEvaluator.merge(overrides, into: value)
-        context = recipeContext(
-          overrides, node: entry.node, reader: entry.reader, inheriting: context)
+        sourceContext = fieldContext(
+          overrides.url, key: "url", node: entry.node, reader: entry.reader,
+          inheriting: sourceContext)
+        recipeContext = fieldContext(
+          overrides.recipe, key: "recipe", node: entry.node, reader: entry.reader,
+          inheriting: recipeContext)
         if value.url.value == nil, !hasInvalidURL(definition), !hasInvalidURL(update) {
           let origin = update ?? definition
           try emit(
@@ -285,7 +311,9 @@ final class YAMLLinter {
       }
       do {
         requests.append(
-          Request(value: try ConfigurationEvaluator.request(value), recipeContext: context))
+          Request(
+            value: try ConfigurationEvaluator.request(value), sourceContext: sourceContext,
+            recipeContext: recipeContext))
       } catch {
         try emit(error, reader: entry.reader, at: entry.node)
       }
@@ -310,7 +338,9 @@ final class YAMLLinter {
       where shared.entries.contains(where: {
         if case .importConf(let request) = $0.value { return request == imported.id.request }
         return false
-      }) { all += imported.packages.map { Request(value: $0, recipeContext: nil) } }
+      }) {
+        all += imported.packages.map { Request(value: $0, sourceContext: nil, recipeContext: nil) }
+      }
     }
     var seen = Set<PackageRequest>()
     for evidence in all {
@@ -319,6 +349,16 @@ final class YAMLLinter {
       let directory: FilePath
       if request.url.isFileURL {
         directory = try NativePath.from(request.url)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.string, isDirectory: &isDirectory)
+        else {
+          try record(FileSystemFailure.notFound(directory), at: evidence.sourceContext)
+          continue
+        }
+        guard isDirectory.boolValue else {
+          try record(FileSystemFailure.notADirectory(directory), at: evidence.sourceContext)
+          continue
+        }
       } else {
         let pin =
           locked?.packages.first(where: { $0.request == request })
@@ -342,15 +382,13 @@ final class YAMLLinter {
         else { continue }
         directory = source.directory
       }
-      // A source that has not been acquired is optional evidence. Once present,
+      // A remote source that has not been acquired is optional evidence. Once present,
       // an explicitly selected recipe can be checked against its authored selector.
       guard FileManager.default.fileExists(atPath: directory.string) else { continue }
       let path = try SafePath.file(request.recipePath, in: directory)
       guard FileManager.default.fileExists(atPath: path.string) else {
         guard request.recipe != nil else { continue }
-        let failure = FileSystemFailure.notFound(path)
-        guard let context = evidence.recipeContext else { throw failure }
-        try record(PinewindError.configuration(DocumentError(context: context, failure: failure)))
+        try record(FileSystemFailure.notFound(path), at: evidence.recipeContext)
         continue
       }
       guard seen.insert(request).inserted else { continue }
