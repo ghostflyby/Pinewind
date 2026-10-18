@@ -211,7 +211,7 @@ struct ConfigurationTests {
 
 @Suite("Pinewind composition")
 struct CompositionTests {
-  @Test func plansFreezeFilesAndRecipesAndReleaseDiskSnapshots() async throws {
+  @Test func plansFreezeFilesAndRecipesAndReleaseDiskSnapshots() throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("words.txt", "before", in: f.a)
@@ -219,30 +219,37 @@ struct CompositionTests {
       "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: before}]}",
       in: f.a)
     let entries: [ManifestEntry] = [.package(try f.request(f.a)), .package(try f.request(f.a))]
-    var plan: CompositionPlan? = try f.plan(entries)
-    let operations = try #require(plan?.files[RelativePath("words.txt")])
-    guard case .write(let frozen) = operations[0].action,
-      case .write(let repeated) = operations[1].action
-    else {
-      Issue.record("expected frozen file references")
-      return
-    }
-    #expect(frozen == repeated)
-    #expect(operations[0].source == f.a.appendingPathComponent("words.txt"))
-    // Mutate the original inode: an unsafe hard-link snapshot would also change.
-    let handle = try FileHandle(forWritingTo: f.a.appendingPathComponent("words.txt"))
-    try handle.write(contentsOf: Data("after!".utf8))
-    try handle.close()
-    try f.write(
-      "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: after}]}",
-      in: f.a)
     let composer = Composer()
-    _ = try await composer.compose(try #require(plan), inputRoot: f.input, outputRoot: f.output)
-    #expect(try f.read("words.txt") == "before")
-    #expect(try f.read("custom.yaml").contains("value: before"))
-    plan = nil
+    func composeFrozenPlan() throws -> FilePath? {
+      let plan = try f.plan(entries)
+      let operations = try #require(plan.files[RelativePath("words.txt")])
+      guard case .write(let frozen) = operations[0].action,
+        case .write(let repeated) = operations[1].action
+      else {
+        Issue.record("expected frozen file references")
+        return nil
+      }
+      #expect(frozen == repeated)
+      #expect(operations[0].source == f.a.appendingPathComponent("words.txt"))
+      // Mutate the original inode: an unsafe hard-link snapshot would also change.
+      let handle = try FileHandle(forWritingTo: f.a.appendingPathComponent("words.txt"))
+      try handle.write(contentsOf: Data("after!".utf8))
+      try handle.close()
+      try f.write(
+        "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: after}]}",
+        in: f.a)
+      _ = try composer.compose(plan, inputRoot: native(f.input), outputRoot: native(f.output))
+      #expect(try f.read("words.txt") == "before")
+      #expect(try f.read("custom.yaml").contains("value: before"))
+      return frozen
+    }
+    // Use the synchronous core entry point: the async fixture adapter's queue
+    // closure can retain the plan after resuming its caller. End all plan copies'
+    // scope before checking last-owner cleanup.
+    let frozen = try #require(try composeFrozenPlan())
     #expect(!FileManager.default.fileExists(atPath: frozen.removingLastComponent().string))
-    _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    _ = try composer.compose(
+      f.plan(entries), inputRoot: native(f.input), outputRoot: native(f.output))
     #expect(try f.read("words.txt") == "after!")
     #expect(try f.read("custom.yaml").contains("value: after"))
   }
