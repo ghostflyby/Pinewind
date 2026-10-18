@@ -1,0 +1,19 @@
+version: 1
+names:
+  emoji:
+    url: https://github.com/rime/rime-emoji.git
+    revision: {ref: main}
+    options: {enabled: "true", count: "123", empty: "", text: "松风"}
+order:
+  - emoji
+  - self
+  - name: emoji
+    revision: {commit: "0123456789012345678901234567890123456789"}
+    options: {}
+    include: []
+    exclude: null
+  - import: ":preset"
+    variables: {value: "false"}
+  - url: https://example.com/repo.git
+    recipe: "null"
+  - self: {include: ["*.yaml"], exclude: ["scratch/**"]}

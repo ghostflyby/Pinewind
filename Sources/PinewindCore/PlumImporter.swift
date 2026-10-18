@@ -6,15 +6,18 @@
 
 import BashInterpreter
 import Foundation
+import SystemPackage
 
 /// Conf evaluation uses a fresh SwiftBash shell and a read-only resource mount.
 /// Built-in lists are native data; local confs use the interpreter. Remote resource views
 /// will be supplied by the HTTP acquisition layer, never by enabling shell networking.
-public struct PlumImporter: Sendable {
-  public let timeout: Duration
-  public init(timeout: Duration = .seconds(5)) { self.timeout = timeout }
+struct PlumImporter: Sendable {
+  let limits: ImportLimits
+  var timeout: Duration { limits.timeout }
+  init(timeout: Duration = .seconds(5)) { limits = ImportLimits(timeout: timeout) }
+  init(limits: ImportLimits) { self.limits = limits }
 
-  public func expand(_ manifest: Manifest, inputRoot: URL) async throws -> Manifest {
+  func expand(_ manifest: Manifest, inputRoot: FilePath) async throws -> Manifest {
     var entries: [ManifestEntry] = []
     for entry in manifest.entries {
       if case .importConf(let request) = entry {
@@ -28,40 +31,50 @@ public struct PlumImporter: Sendable {
     return Manifest(entries: entries)
   }
 
-  public func evaluate(_ request: ConfImport, inputRoot: URL) async throws -> [String] {
-    guard request.variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
+  func evaluate(_ request: ConfImport, inputRoot: FilePath) async throws -> [String] {
     if request.source.hasPrefix(":") {
       return try BuiltinPackageLists.descriptors(for: request.source)
     }
-    guard !request.source.contains("://") else {
-      throw PinewindError("remote conf requires the HTTP resource preparation layer")
+    // Remote conf imports are dispatched by the acquisition layer; the local
+    // evaluator must never see them.
+    guard let path = request.localPath else {
+      throw Failure.defect(
+        .invariant(
+          detail: "remote conf requires the HTTP resource preparation layer",
+          origin: Origin()))
     }
-    let path =
-      request.source.hasPrefix("./") ? String(request.source.dropFirst(2)) : request.source
     let file = try SafePath.file(path, in: inputRoot)
     return try await evaluate(
-      file: file, resourceRoot: file.deletingLastPathComponent(), variables: request.variables)
+      file: file, resourceRoot: file.removingLastComponent(), variables: request.variables)
   }
 
-  public func evaluate(file: URL, resourceRoot: URL, variables: [String: String] = [:]) async throws
+  func evaluate(
+    file: FilePath, resourceRoot: FilePath, variables: [String: String] = [:],
+    fileSystem: (any FileSystem)? = nil
+  ) async throws
     -> [String]
   {
-    guard variables["root_dir"] == nil else { throw PinewindError("root_dir is reserved") }
-    guard
-      file.deletingLastPathComponent().resolvingSymlinksInPath()
-        == resourceRoot.resolvingSymlinksInPath()
-    else {
-      throw PinewindError("conf must be directly inside its read-only resource root")
+    guard variables["root_dir"] == nil else {
+      throw DeclarationFailure.reservedVariable("root_dir")
     }
-    let name = file.lastPathComponent
+    guard
+      (try SafePath.canonical(file.removingLastComponent()))
+        == (try SafePath.canonical(resourceRoot))
+    else {
+      throw InterpreterFailure.forbiddenOperation(path: file.string)
+    }
+    let context = try DocumentContext(path: file)
+    let name = file.lastComponent?.string ?? ""
     let shell = BashInterpreter.Shell(
       environment: Environment(variables: variables, workingDirectory: "/conf"))
     shell.environment["root_dir"] = "/conf"
     shell.errexit = true
-    shell.fileSystem = MountedFileSystem(
-      mounts: [.init(virtual: "/conf", host: resourceRoot.path, readOnly: true)],
-      backing: RealFileSystem())
-    let budget = ConfSourceBudget()
+    shell.fileSystem =
+      fileSystem
+      ?? MountedFileSystem(
+        mounts: [.init(virtual: "/conf", host: resourceRoot.string, readOnly: true)],
+        backing: RealFileSystem())
+    let budget = ConfSourceBudget(limits: limits)
     shell.installShellBuiltin(BoundedSource(name: "source", budget: budget))
     shell.installShellBuiltin(BoundedSource(name: ".", budget: budget))
     // No external command catalog or network permissions are installed.
@@ -78,32 +91,48 @@ public struct PlumImporter: Sendable {
         errors.finish()
         guard status == .success else {
           let message = await errors.readAllString()
-          throw PinewindError("conf evaluation failed: " + message, source: file.path)
+          throw PinewindError.incident(
+            DocumentError(
+              context: context,
+              failure: .interpreter(
+                .evaluationFailed(
+                  detail: message.trimmingCharacters(in: .whitespacesAndNewlines)))))
         }
         guard shell.environment.associativeArrays["package_list"] == nil else {
-          throw PinewindError("package_list must be an indexed array", source: file.path)
+          throw PinewindError.configuration(
+            DocumentError(
+              context: context,
+              failure: .interpreter(
+                .evaluationFailed(detail: "package_list must be an indexed array"))))
         }
         if shell.environment.variables["package_list"] != nil {
-          throw PinewindError("package_list must be an indexed array", source: file.path)
+          throw PinewindError.configuration(
+            DocumentError(
+              context: context,
+              failure: .interpreter(
+                .evaluationFailed(detail: "package_list must be an indexed array"))))
         }
         return shell.environment.arrays["package_list"]?.elementsInOrder ?? []
       }
       group.addTask {
         try await Task.sleep(for: timeout)
-        throw PinewindError("conf evaluation timed out", source: file.path)
+        throw PinewindError.incident(
+          DocumentError(context: context, failure: .interpreter(.timedOut)))
       }
       defer { group.cancelAll() }
       guard let first = try await group.next() else {
-        throw PinewindError("conf evaluation cancelled")
+        throw CancellationError()
       }
       return first
     }
   }
 
-  public static func package(_ descriptor: String) throws -> PackageRequest {
+  static func package(_ descriptor: String) throws -> PackageRequest {
     let sections = descriptor.split(separator: ":", omittingEmptySubsequences: false).map(
       String.init)
-    guard !sections[0].isEmpty else { throw PinewindError("empty plum package descriptor") }
+    guard !sections[0].isEmpty else {
+      throw Failure.interpreter(.evaluationFailed(detail: "empty plum package descriptor"))
+    }
     let source = sections[0].split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
       .map(String.init)
     let segments = source[0].split(separator: "/", omittingEmptySubsequences: false).map(
@@ -111,25 +140,26 @@ public struct PlumImporter: Sendable {
     guard segments.count == 1 || segments.count == 2, segments.allSatisfy({ !$0.isEmpty }),
       source.count == 1 || !source[1].isEmpty
     else {
-      throw PinewindError("invalid plum package descriptor")
+      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum package descriptor"))
     }
     let owner = segments.count == 2 ? segments[0] : "rime"
     let repository =
       segments.count == 2
       ? segments[1] : (segments[0].hasPrefix("rime-") ? segments[0] : "rime-" + segments[0])
     guard let url = URL(string: "https://github.com/\(owner)/\(repository)") else {
-      throw PinewindError("invalid plum repository")
+      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum repository"))
     }
     var options: [String: String] = [:]
     for token in sections.dropFirst(2).flatMap({ $0.split(separator: ",").map(String.init) }) {
       let pair = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
       guard pair.count == 2, !pair[0].isEmpty, options[String(pair[0])] == nil else {
-        throw PinewindError("plum options must be unique key=value literals")
+        throw Failure.interpreter(
+          .evaluationFailed(detail: "plum options must be unique key=value literals"))
       }
       options[String(pair[0])] = String(pair[1])
     }
     return try PackageRequest(
-      url: url, ref: source.count == 2 ? source[1] : nil,
+      url: url, revision: source.count == 2 ? .reference(source[1]) : nil,
       recipe: sections.count > 1 && !sections[1].isEmpty ? sections[1] : nil, options: options)
   }
 }
@@ -137,14 +167,22 @@ public struct PlumImporter: Sendable {
 /// Shared across interpreter subshell copies; a bounded include count also stops
 /// cyclic source chains without changing the semantics of repeated includes.
 private actor ConfSourceBudget {
+  let limits: ImportLimits
+  init(limits: ImportLimits) { self.limits = limits }
   private var calls = 0
   private var bytes = 0
 
-  func charge(_ size: Int) throws {
+  func charge(_ size: Int) throws(InterpreterFailure) {
     calls += 1
     bytes += size
-    guard calls <= 64, size <= 1_048_576, bytes <= 4_194_304 else {
-      throw PinewindError("conf include resource limit exceeded")
+    guard calls <= limits.maximumSources else {
+      throw InterpreterFailure.budgetExceeded(.sources)
+    }
+    guard size <= limits.maximumFileBytes else {
+      throw InterpreterFailure.budgetExceeded(.fileBytes)
+    }
+    guard bytes <= limits.maximumTotalBytes else {
+      throw InterpreterFailure.budgetExceeded(.totalBytes)
     }
   }
 }

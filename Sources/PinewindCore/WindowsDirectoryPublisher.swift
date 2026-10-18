@@ -6,46 +6,76 @@
 
 #if os(Windows)
   import Foundation
+  import SystemPackage
   import WinSDK
 
   /// A stable junction points to a complete private generation. Updating its
   /// reparse data switches targets without renaming or removing the active root.
   enum WindowsDirectoryPublisher {
-    static func storage(for output: URL) -> URL {
-      output.deletingLastPathComponent().appendingPathComponent(
-        "." + output.lastPathComponent + ".pinewind-generations", isDirectory: true)
+    /// Resolve parent aliases and expand the entry's short name without following
+    /// the final managed junction into its replaceable generation.
+    static func publicationPath(_ output: FilePath) throws(FileSystemFailure) -> FilePath {
+      guard let component = output.lastComponent else {
+        throw FileSystemFailure.isFilesystemRoot(output)
+      }
+      let parent = try resolvedPath(output.removingLastComponent())
+      let entry = parent.appending(component)
+      guard FileManager.default.fileExists(atPath: entry.string) else { return entry }
+      var buffer = [WCHAR](repeating: 0, count: 32_768)
+      let count = entry.withPlatformString {
+        GetLongPathNameW($0, &buffer, DWORD(buffer.count))
+      }
+      guard count > 0, Int(count) < buffer.count else {
+        throw FileSystemFailure.unresolvable(entry)
+      }
+      return FilePath(platformString: buffer)
     }
 
-    static func validate(_ output: URL) throws {
+    static func storage(for output: FilePath) -> FilePath {
+      output.removingLastComponent().appending(
+        "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
+    }
+
+    static func validate(_ output: FilePath) throws(FileSystemFailure) {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
-        let target = try resolvedURL(target)
+        let target = try resolvedPath(target)
         guard
-          try canonicalPath(target.deletingLastPathComponent())
+          try canonicalPath(target.removingLastComponent())
             == canonicalPath(storage(for: output)),
-          isGeneration(target.lastPathComponent)
-        else { throw PinewindError("composition output is not a Pinewind generation junction") }
-      } else if FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory) {
-        guard isDirectory.boolValue else {
-          throw PinewindError("Windows composition output must be a directory")
+          isGeneration(target.lastComponent?.string ?? "")
+        else {
+          throw FileSystemFailure.publicationFailed(
+            detail: "composition output is not a Pinewind generation junction")
         }
-        guard try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty else {
-          throw PinewindError("Windows composition output must be empty or managed by Pinewind")
+      } else if FileManager.default.fileExists(atPath: output.string, isDirectory: &isDirectory) {
+        guard isDirectory.boolValue else {
+          throw FileSystemFailure.publicationFailed(
+            detail: "Windows composition output must be a directory")
+        }
+        let entries: [String]
+        do { entries = try FileManager.default.contentsOfDirectory(atPath: output.string) } catch {
+          throw FileSystemFailure.operationFailed(
+            FileOperationFailure(operation: .enumerate, paths: [output], error: error))
+        }
+        guard entries.isEmpty else {
+          throw FileSystemFailure.publicationFailed(
+            detail: "Windows composition output must be empty or managed by Pinewind")
         }
       }
     }
 
-    static func publish(_ candidate: URL, at output: URL) throws {
+    static func publish(_ candidate: FilePath, at output: FilePath) throws {
       let fm = FileManager.default
-      if try currentTarget(output) != nil || fm.fileExists(atPath: output.path) {
+      if try currentTarget(output) != nil || fm.fileExists(atPath: output.string) {
         try redirect(output, to: candidate)
       } else {
-        let link = output.deletingLastPathComponent().appendingPathComponent(
+        let link = output.removingLastComponent().appending(
           ".pinewind-link-" + UUID().uuidString)
         try fm.createDirectory(at: link, withIntermediateDirectories: false)
         defer {
           if let path = try? windowsNativePath(link) {
-            _ = path.withCString(encodedAs: UTF16.self) { RemoveDirectoryW($0) }
+            _ = path.withPlatformString { RemoveDirectoryW($0) }
           }
         }
         try redirect(link, to: candidate)
@@ -60,7 +90,7 @@
       for old
         in (try? fm.contentsOfDirectory(
           at: storage(for: output), includingPropertiesForKeys: nil)) ?? []
-      where isGeneration(old.lastPathComponent) {
+      where isGeneration(old.lastComponent?.string ?? "") {
         guard let path = try? canonicalPath(old), path != activePath, path != candidatePath else {
           continue
         }
@@ -68,36 +98,15 @@
       }
     }
 
-    /// Hold from reading the previous generation through candidate construction,
-    /// publication and cleanup, including across independent instances/processes.
-    static func withPublicationLock<T>(in storage: URL, _ body: () throws -> T) throws -> T {
-      let file = storage.appendingPathComponent("publication.lock")
-      let handle = try windowsNativePath(file).withCString(encodedAs: UTF16.self) {
-        CreateFileW(
-          $0, DWORD(GENERIC_READ) | DWORD(GENERIC_WRITE), DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE),
-          nil,
-          DWORD(OPEN_ALWAYS), DWORD(FILE_ATTRIBUTE_NORMAL), nil)
-      }
-      guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError("cannot open composition lock (Windows error \(GetLastError()))")
-      }
-      defer { _ = CloseHandle(handle) }
-      var overlapped = OVERLAPPED()
-      guard LockFileEx(handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK), 0, 1, 0, &overlapped) else {
-        throw PinewindError("cannot lock composition output (Windows error \(GetLastError()))")
-      }
-      defer { _ = UnlockFileEx(handle, 0, 1, 0, &overlapped) }
-      return try body()
-    }
-
     private static func isGeneration(_ name: String) -> Bool {
       name.hasPrefix("generation-") && UUID(uuidString: String(name.dropFirst(11))) != nil
     }
 
     private static func withHandle<T>(
-      _ url: URL, access: DWORD, following: Bool = false, _ body: (HANDLE) throws -> T
-    ) throws -> T {
-      let handle = try windowsNativePath(url).withCString(encodedAs: UTF16.self) {
+      _ url: FilePath, access: DWORD, following: Bool = false,
+      _ body: (HANDLE) throws(FileSystemFailure) -> T
+    ) throws(FileSystemFailure) -> T {
+      let handle = try windowsNativePath(url).withPlatformString {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
           DWORD(OPEN_EXISTING),
@@ -105,7 +114,8 @@
           nil)
       }
       guard let handle, handle != INVALID_HANDLE_VALUE else {
-        throw PinewindError("cannot open composition junction (Windows error \(GetLastError()))")
+        throw FileSystemFailure.publicationFailed(
+          detail: "cannot open composition junction (Windows error \(GetLastError()))")
       }
       defer { _ = CloseHandle(handle) }
       return try body(handle)
@@ -113,41 +123,41 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: URL) throws -> String {
-      try resolvedURL(url).standardizedFileURL.path.lowercased()
+    static func canonicalPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+      FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedURL(_ url: URL) throws -> URL {
-      var ancestor = url.standardizedFileURL
-      var missing: [String] = []
-      while !FileManager.default.fileExists(atPath: ancestor.path) {
-        let parent = ancestor.deletingLastPathComponent()
-        guard parent.path != ancestor.path else {
-          throw PinewindError("cannot resolve composition path")
+    static func resolvedPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+      var ancestor = url
+      var missing: [FilePath.Component] = []
+      while !FileManager.default.fileExists(atPath: ancestor.string) {
+        let parent = ancestor.removingLastComponent()
+        guard parent != ancestor, let component = ancestor.lastComponent else {
+          throw FileSystemFailure.publicationFailed(detail: "cannot resolve composition path")
         }
-        missing.append(ancestor.lastPathComponent)
+        missing.append(component)
         ancestor = parent
       }
-      var resolved = try withHandle(ancestor, access: 0, following: true) { handle in
+      var resolved = try withHandle(ancestor, access: 0, following: true) {
+        (handle: HANDLE)
+          throws(FileSystemFailure) -> FilePath in
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
-          throw PinewindError("cannot resolve composition path (Windows error \(GetLastError()))")
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot resolve composition path (Windows error \(GetLastError()))")
         }
-        var path = String(decoding: buffer.prefix(Int(count)), as: UTF16.self)
-        if path.hasPrefix("\\\\?\\UNC\\") {
-          path = "\\\\" + path.dropFirst(8)
-        } else if path.hasPrefix("\\\\?\\") {
-          path.removeFirst(4)
-        }
-        return URL(fileURLWithPath: path)
+        let path = FilePath(platformString: buffer)
+        return try windowsNativePath(path)
       }
-      for component in missing.reversed() { resolved.appendPathComponent(component) }
+      for component in missing.reversed() { resolved.append(component) }
+      let normalized = resolved.lexicallyNormalized()
+      if normalized != resolved { return try resolvedPath(normalized) }
       return resolved
     }
 
-    static func currentTarget(_ output: URL) throws -> URL? {
-      let attributes = try windowsNativePath(output).withCString(encodedAs: UTF16.self) {
+    static func currentTarget(_ output: FilePath) throws(FileSystemFailure) -> FilePath? {
+      let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }
       if attributes == DWORD(INVALID_FILE_ATTRIBUTES) {
@@ -155,10 +165,12 @@
         if error == DWORD(ERROR_FILE_NOT_FOUND) || error == DWORD(ERROR_PATH_NOT_FOUND) {
           return nil
         }
-        throw PinewindError("cannot inspect composition output (Windows error \(error))")
+        throw FileSystemFailure.publicationFailed(
+          detail: "cannot inspect composition output (Windows error \(error))")
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
-      return try withHandle(output, access: 0) { handle in
+      return try withHandle(output, access: 0) {
+        (handle: HANDLE) throws(FileSystemFailure) -> FilePath in
         var buffer = Data(count: 16_384)
         var count: DWORD = 0
         let ok = buffer.withUnsafeMutableBytes {
@@ -167,26 +179,32 @@
             DWORD($0.count), &count, nil)
         }
         guard ok else {
-          throw PinewindError("cannot read composition junction (Windows error \(GetLastError()))")
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot read composition junction (Windows error \(GetLastError()))")
         }
         guard count >= 16,
           buffer.integer(at: 0, as: UInt32.self) == UInt32(IO_REPARSE_TAG_MOUNT_POINT)
-        else { throw PinewindError("composition output is not a directory junction") }
+        else {
+          throw FileSystemFailure.publicationFailed(
+            detail: "composition output is not a directory junction")
+        }
         let offset = 16 + Int(buffer.integer(at: 8, as: UInt16.self))
         let length = Int(buffer.integer(at: 10, as: UInt16.self))
         guard offset + length <= Int(count), length.isMultiple(of: 2),
           var path = String(
             data: buffer.subdata(in: offset..<(offset + length)), encoding: .utf16LittleEndian),
           path.hasPrefix("\\??\\")
-        else { throw PinewindError("invalid composition junction target") }
+        else {
+          throw FileSystemFailure.publicationFailed(detail: "invalid composition junction target")
+        }
         path.removeFirst(4)
         if path.hasPrefix("UNC\\") { path = "\\\\" + path.dropFirst(4) }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return FilePath(path)
       }
     }
 
-    static func redirect(_ output: URL, to candidate: URL) throws {
-      let printName = try windowsNativePath(candidate)
+    static func redirect(_ output: FilePath, to candidate: FilePath) throws {
+      let printName = try windowsNativePath(candidate).string
       let substituteName =
         printName.hasPrefix("\\\\")
         ? "\\??\\UNC\\" + printName.dropFirst(2) : "\\??\\" + printName
@@ -194,7 +212,7 @@
       let printable = Array(printName.utf16)
       let dataLength = 8 + (substitute.count + printable.count + 2) * 2
       guard dataLength + 8 <= 16_384 else {
-        throw PinewindError("composition junction path is too long")
+        throw FileSystemFailure.publicationFailed(detail: "composition junction path is too long")
       }
       var data = Data()
       data.appendInteger(UInt32(IO_REPARSE_TAG_MOUNT_POINT))
@@ -205,7 +223,9 @@
       data.appendInteger(UInt16((substitute.count + 1) * 2))
       data.appendInteger(UInt16(printable.count * 2))
       for word in substitute + [0] + printable + [0] { data.appendInteger(word) }
-      try withHandle(output, access: DWORD(GENERIC_WRITE)) { handle in
+      try withHandle(output, access: DWORD(GENERIC_WRITE)) {
+        (handle: HANDLE)
+          throws(FileSystemFailure) -> Void in
         var count: DWORD = 0
         let ok = data.withUnsafeMutableBytes {
           DeviceIoControl(
@@ -213,8 +233,8 @@
             nil)
         }
         guard ok else {
-          throw PinewindError(
-            "cannot publish composition junction (Windows error \(GetLastError()))")
+          throw FileSystemFailure.publicationFailed(
+            detail: "cannot publish composition junction (Windows error \(GetLastError()))")
         }
       }
     }

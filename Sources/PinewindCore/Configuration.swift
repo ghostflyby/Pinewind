@@ -5,154 +5,221 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 
-public struct FileFilter: Hashable, Codable, Sendable {
+public struct FileFilter: Hashable, Sendable {
   public var include: [String]?
   public var exclude: [String]
-
   public init(include: [String]? = nil, exclude: [String] = []) {
     self.include = include
     self.exclude = exclude
   }
-
-  public func accepts(_ path: String) throws -> Bool {
-    let included =
-      try include.map { patterns in
-        try patterns.contains { try Glob.matches($0, path: path) }
-      } ?? true
-    guard included else { return false }
-    return !(try exclude.contains { try Glob.matches($0, path: path) })
+  public func accepts(_ path: RelativePath) throws(DeclarationFailure) -> Bool {
+    if let include {
+      var matched = false
+      for pattern in include {
+        if try Glob.matches(pattern, path: path) {
+          matched = true
+          break
+        }
+      }
+      if !matched { return false }
+    }
+    for pattern in exclude {
+      if try Glob.matches(pattern, path: path) { return false }
+    }
+    return true
+  }
+  func validate() throws(DeclarationFailure) {
+    for pattern in (include ?? []) + exclude { _ = try Glob.compile(pattern) }
   }
 }
 
-public struct PackageRequest: Hashable, Codable, Sendable {
-  /// The acquisition URL. Non-GitHub repository suffixes remain part of the endpoint;
-  /// SourceIdentity derives the separate canonical identity used by caches.
+public struct CommitID: Hashable, Sendable, CustomStringConvertible {
+  public let string: String
+  public init(_ string: String) throws(DeclarationFailure) {
+    guard string.count == 40, string.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+      throw DeclarationFailure.invalidCommitID(string)
+    }
+    self.string = string.lowercased()
+  }
+  public var description: String { string }
+}
+
+public enum GitRevision: Hashable, Sendable {
+  case defaultBranch
+  case branch(String)
+  case tag(String)
+  case reference(String)
+  case commit(CommitID)
+  var reference: String? {
+    switch self {
+    case .defaultBranch, .commit: return nil
+    case .branch(let value): return "refs/heads/" + value
+    case .tag(let value): return "refs/tags/" + value
+    case .reference(let value): return value
+    }
+  }
+  func validate() throws(DeclarationFailure) {
+    if let value = reference, value.isEmpty || value.contains("\0") || value.hasSuffix("/") {
+      throw DeclarationFailure.invalidRevision
+    }
+  }
+}
+
+struct RepositoryKey: Hashable, Sendable {
+  let url: URL
+  let revision: GitRevision
+}
+
+public struct RepositoryRequest: Hashable, Sendable {
   public let url: URL
-  public let ref: String?
-  public let commit: String?
+  public let revision: GitRevision
+  let canonicalURL: URL
+  var key: RepositoryKey { RepositoryKey(url: canonicalURL, revision: revision) }
+  public init(url: URL, revision: GitRevision = .defaultBranch) throws(Failure) {
+    let normalized = try SourceIdentity.normalize(url, preservingGitSuffix: true)
+    guard !normalized.isFileURL else {
+      throw Failure.git(.unsupportedSourceURL(normalized))
+    }
+    do { try revision.validate() } catch { throw Failure.declaration(error) }
+    self.url = normalized
+    self.canonicalURL = try SourceIdentity.normalize(normalized)
+    self.revision = revision
+  }
+}
+
+public enum PackageSource: Hashable, Sendable {
+  case git(RepositoryRequest)
+  case directory(FileLocation)
+}
+
+public struct PackageRequest: Hashable, Sendable {
+  public let source: PackageSource
   public let recipe: String?
+  let recipePath: RelativePath
   public let options: [String: String]
   public let filter: FileFilter
+  let url: URL
+  var revision: GitRevision? {
+    if case .git(let repository) = source { return repository.revision }
+    return nil
+  }
+  var ref: String? { revision?.reference }
+  var commit: String? {
+    if case .commit(let id) = revision { return id.string }
+    return nil
+  }
 
   public init(
-    url: URL, ref: String? = nil, commit: String? = nil,
-    recipe: String? = nil, options: [String: String] = [:], filter: FileFilter = FileFilter()
-  ) throws {
-    self.url = try SourceIdentity.normalize(url, preservingGitSuffix: true)
-    if url.isFileURL && (ref != nil || commit != nil) {
-      throw PinewindError("file sources cannot specify ref or commit")
+    source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
+    filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
+  ) throws(Failure) {
+    if let recipe, recipe.contains("\0") || recipe.contains("\\") {
+      throw Failure.file(.notPortable(FilePath(recipe)))
     }
-    if ref != nil && commit != nil {
-      throw PinewindError("ref and commit are mutually exclusive")
+    let recipePath: RelativePath
+    do {
+      recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
+    } catch { throw Failure.file(error) }
+    do { try filter.validate() } catch { throw Failure.declaration(error) }
+    switch source {
+    case .git(let repository):
+      self.url = repository.url
+      self.source = source
+    case .directory(let location):
+      let resolved: FileLocation
+      do { resolved = try location.resolved(relativeTo: relativeTo) } catch {
+        throw Failure.file(error)
+      }
+      do { self.url = try resolved.url } catch { throw Failure.file(error) }
+      self.source = .directory(resolved)
     }
-    if let commit, !SourceIdentity.isCommit(commit) {
-      throw PinewindError("commit must be a complete 40-character hexadecimal commit ID")
-    }
-    if let recipe { try SafePath.validate(recipe + ".recipe.yaml") }
-    self.ref = ref
-    self.commit = commit?.lowercased()
-    self.recipe = recipe
+    self.recipe = recipe.map { _ in String(recipePath.string.dropLast(".recipe.yaml".count)) }
+    self.recipePath = recipePath
     self.options = options
     self.filter = filter
   }
-}
-
-public struct ConfImport: Hashable, Codable, Sendable {
-  public let source: String
-  public let variables: [String: String]
-  public init(source: String, variables: [String: String] = [:]) throws {
-    guard variables["root_dir"] == nil else {
-      throw PinewindError("root_dir is reserved for the conf resource view")
+  init(
+    url: URL, revision: GitRevision? = nil, recipe: String? = nil, options: [String: String] = [:],
+    filter: FileFilter = FileFilter()
+  ) throws(Failure) {
+    if url.isFileURL {
+      guard revision == nil else {
+        throw Failure.declaration(.revisionWithFileSource)
+      }
+      try self.init(
+        source: .directory(.fileURL(url)), recipe: recipe, options: options, filter: filter)
+    } else {
+      try self.init(
+        source: .git(RepositoryRequest(url: url, revision: revision ?? .defaultBranch)),
+        recipe: recipe, options: options, filter: filter)
     }
-    self.source = source
-    self.variables = variables
   }
 }
 
-public enum ManifestEntry: Hashable, Codable, Sendable {
+public struct ConfImport: Hashable, Sendable {
+  public let source: String
+  public let variables: [String: String]
+  let localPath: RelativePath?
+  public init(source: String, variables: [String: String] = [:]) throws(Failure) {
+    guard variables["root_dir"] == nil else {
+      throw Failure.declaration(.reservedVariable("root_dir"))
+    }
+    guard !source.isEmpty else {
+      throw Failure.declaration(.importSourceRequired)
+    }
+    guard !source.contains("\0") else {
+      throw Failure.file(.notPortable(FilePath(source)))
+    }
+    if source.hasPrefix(":") || source.contains("://") {
+      localPath = nil
+    } else {
+      guard !source.contains("\\") else {
+        throw Failure.file(.notPortable(FilePath(source)))
+      }
+      do { localPath = try RelativePath(FilePath(source)) } catch { throw Failure.file(error) }
+    }
+    self.source = localPath?.string ?? source
+    self.variables = variables
+  }
+}
+public enum ManifestEntry: Hashable, Sendable {
   case userFiles(FileFilter)
   case package(PackageRequest)
   case importConf(ConfImport)
 }
-
-/// The effective, ordered declarations. Shared and locally overridden configurations
-/// are loaded separately; a local edit never writes a lock or hashes the working tree.
-/// Edit authored declarations through Configuration and ManifestDocument instead.
-public struct Manifest: Hashable, Codable, Sendable {
+public struct EvaluatedManifest: Hashable, Sendable {
   public let entries: [ManifestEntry]
-
-  public init(entries: [ManifestEntry]) { self.entries = entries }
-
-  public static func parse(
-    _ yaml: String, localOverrides: String? = nil,
-    source: String = "pinewind.yaml"
-  ) throws -> Manifest {
-    try ConfigurationParser.parse(yaml, overrides: localOverrides, source: source)
-  }
-
-  public static func load(
-    inputRoot: URL, localStateRoot: URL, applyLocalOverrides: Bool = true
-  ) async throws -> Manifest {
-    guard inputRoot.isFileURL, localStateRoot.isFileURL else {
-      throw PinewindError("configuration roots must be file URLs")
-    }
-    guard try !SafePath.overlaps(inputRoot, localStateRoot) else {
-      throw PinewindError("local state must not overlap the configuration input directory")
-    }
-    let file = inputRoot.appendingPathComponent("pinewind.yaml")
-    let local = localStateRoot.appendingPathComponent("pinewind.local.yaml")
-    let requests =
-      [FileAccessRequest(url: file, intent: .read)]
-      + (applyLocalOverrides ? [FileAccessRequest(url: local, intent: .read)] : [])
-    return try await FileAccessCoordinator.platform(localStateRoot: localStateRoot).coordinate(
-      requests
-    ) { urls in
-      guard let bytes = try Configuration.read(urls[0]) else {
-        return Manifest(entries: [.userFiles(FileFilter())])
-      }
-      func text(_ bytes: Data) throws -> String {
-        guard let text = String(data: bytes, encoding: .utf8) else {
-          throw PinewindError("configuration must be UTF-8 YAML")
-        }
-        return text
-      }
-      let overrides = applyLocalOverrides ? try Configuration.read(urls[1]).map(text) : nil
-      return try parse(text(bytes), localOverrides: overrides, source: urls[0].path)
-    }
-  }
 }
+typealias Manifest = EvaluatedManifest
 
-public struct SourceIdentity: Hashable, Codable, Sendable {
+public struct SourceIdentity: Hashable, Sendable {
   public let url: URL
-  public let commit: String
-
-  public init(url: URL, commit: String) throws {
-    self.url = try Self.normalize(url)
-    guard Self.isCommit(commit), !url.isFileURL else {
-      throw PinewindError("a remote snapshot requires a complete commit ID")
+  public let commit: CommitID
+  public init(url: URL, commit: CommitID) throws(Failure) {
+    self.url = try Self.normalize(url, preservingGitSuffix: true)
+    guard !url.isFileURL else {
+      throw Failure.git(.unsupportedSourceURL(url))
     }
-    self.commit = commit.lowercased()
+    self.commit = commit
   }
-
-  static func isCommit(_ text: String) -> Bool {
-    text.count == 40 && text.allSatisfy { $0.isASCII && $0.isHexDigit }
+  init(url: URL, commit: String) throws(Failure) {
+    let id: CommitID
+    do { id = try CommitID(commit) } catch { throw Failure.declaration(error) }
+    try self.init(url: url, commit: id)
   }
-
-  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
+  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws(Failure) -> URL {
     if url.isFileURL {
-      guard !url.path.hasPrefix("~"), (url.path as NSString).isAbsolutePath else {
-        throw PinewindError("file sources require absolute paths")
-      }
-      guard url.host == nil || url.host == "" || url.host == "localhost" else {
-        throw PinewindError("file URLs must refer to the local machine")
-      }
-      return url.standardizedFileURL
+      do { _ = try NativePath.from(url) } catch { throw Failure.file(error) }
+      // File URL spelling carries authority and provider information. Filesystem
+      // identity checks use NativePath/SafePath rather than URL normalization.
+      return url
     }
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
       parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
       parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil
-    else { throw PinewindError("package sources must be local file URLs or HTTPS repository URLs") }
+    else { throw Failure.declaration(.unsupportedSourceURL(url)) }
     parts.scheme = "https"
     parts.host = host.lowercased()
     if parts.port == 443 { parts.port = nil }
@@ -161,7 +228,9 @@ public struct SourceIdentity: Hashable, Codable, Sendable {
       parts.path.removeLast(4)
     }
     if host.lowercased() == "github.com" { parts.path = parts.path.lowercased() }
-    guard let normalized = parts.url else { throw PinewindError("invalid package URL") }
+    guard let normalized = parts.url else {
+      throw Failure.git(.malformedRepositoryURL(url))
+    }
     return normalized
   }
 }

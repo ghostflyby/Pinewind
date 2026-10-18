@@ -5,6 +5,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import Foundation
+import SystemPackage
 import Testing
 
 @testable import PinewindCore
@@ -61,7 +62,7 @@ private actor ControlledCoordinator: FileAccessCoordinating {
     }
     if writing && failNext {
       failNext = false
-      throw PinewindError("test coordination failure")
+      throw PinewindError.runtime(.file(.lockFailed(detail: "test coordination failure")))
     }
     return try await base.coordinate(requests, accessor: accessor)
   }
@@ -69,14 +70,14 @@ private actor ControlledCoordinator: FileAccessCoordinating {
 
 private actor RedirectingCoordinator: FileAccessCoordinating {
   let directory: URL
-  private(set) var intents: [FileAccessRequest.Intent] = []
+  private(set) var requests: [FileAccessRequest] = []
   init(directory: URL) { self.directory = directory }
 
   func coordinate<Value: Sendable>(
     _ requests: [FileAccessRequest],
     accessor: @escaping @Sendable ([URL]) throws -> Value
   ) async throws -> Value {
-    intents += requests.map(\.intent)
+    self.requests += requests
     return try accessor(requests.map { directory.appendingPathComponent($0.url.lastPathComponent) })
   }
 }
@@ -88,12 +89,12 @@ struct FileAccessCoordinatorTests {
     defer { f.remove() }
     let actual = f.root.appendingPathComponent("relocated")
     let coordinator = RedirectingCoordinator(directory: actual)
-    let configuration = try await Configuration.load(
+    let configuration = try await loadConfiguration(
       inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
-    try await configuration.saveShared()
-    await configuration.edit { _, local in local = LocalOverridesDocument() }
-    try await configuration.saveLocalOverrides()
-    let reloaded = try await Configuration.load(
+    _ = try await configuration.save(.shared)
+    await configuration.edit { draft in draft.localOverrides = LocalOverridesDocument() }
+    _ = try await configuration.save(.local)
+    let reloaded = try await loadConfiguration(
       inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
     let snapshot = await reloaded.snapshot()
     #expect(snapshot.localOverrides != nil)
@@ -101,27 +102,32 @@ struct FileAccessCoordinatorTests {
     #expect(!FileManager.default.fileExists(atPath: f.local.path))
     #expect(
       FileManager.default.fileExists(atPath: actual.appendingPathComponent("pinewind.yaml").path))
-    await configuration.edit { _, local in local = nil }
-    try await configuration.saveLocalOverrides()
+    await configuration.edit { draft in draft.localOverrides = nil }
+    _ = try await configuration.save(.local)
     #expect(
       !FileManager.default.fileExists(
         atPath: actual.appendingPathComponent("pinewind.local.yaml").path))
-    let intents = await coordinator.intents
-    #expect(intents == [.read, .read, .write, .write, .read, .read, .delete])
+    let writes = await coordinator.requests.filter { $0.intent != .read }
+    #expect(writes.map(\.intent) == [.write, .write, .delete])
+    #expect(
+      writes.map { $0.url.lastPathComponent } == [
+        "pinewind.yaml", "pinewind.local.yaml", "pinewind.local.yaml",
+      ])
   }
 
   @Test func saveWaitsSerializeIOButDoNotOverwriteNewEdits() async throws {
     let f = CoordinationFixture()
     defer { f.remove() }
     let coordinator = ControlledCoordinator(
-      base: FileAccessCoordinator.platform(localStateRoot: f.local))
-    let configuration = try await Configuration.load(
+      base: FileAccessCoordinator.platform(
+        stateRoot: native(f.local.appendingPathComponent("coordination"))))
+    let configuration = try await loadConfiguration(
       inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
-    let first = Task { try await configuration.saveShared() }
+    let first = Task { _ = try await configuration.save(.shared) }
     await coordinator.waitForWrite()
-    await configuration.edit { shared, _ in shared.order = [] }
-    let second = Task { try await configuration.saveShared() }
-    let third = Task { try await configuration.saveShared() }
+    await configuration.edit { draft in draft.manifest.order = [] }
+    let second = Task { _ = try await configuration.save(.shared) }
+    let third = Task { _ = try await configuration.save(.shared) }
     let duringWait = await configuration.snapshot()
     #expect(duringWait.manifest.order.isEmpty)
     await coordinator.releaseWrite()
@@ -129,7 +135,7 @@ struct FileAccessCoordinatorTests {
     try await second.value
     try await third.value
     #expect(await coordinator.maximumWrites == 1)
-    let saved = try await Configuration.load(inputRoot: f.input, localStateRoot: f.local)
+    let saved = try await loadConfiguration(inputRoot: f.input, localStateRoot: f.local)
     #expect(await saved.snapshot().manifest.order.isEmpty)
     #expect(await configuration.snapshot().manifest.order.isEmpty)
   }
@@ -138,35 +144,39 @@ struct FileAccessCoordinatorTests {
     let f = CoordinationFixture()
     defer { f.remove() }
     let coordinator = ControlledCoordinator(
-      base: FileAccessCoordinator.platform(localStateRoot: f.local))
-    let configuration = try await Configuration.load(
+      base: FileAccessCoordinator.platform(
+        stateRoot: native(f.local.appendingPathComponent("coordination"))))
+    let configuration = try await loadConfiguration(
       inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
     await coordinator.failNextWrite()
-    let save = Task { try await configuration.saveShared() }
+    let save = Task { _ = try await configuration.save(.shared) }
     await coordinator.waitForWrite()
     await coordinator.releaseWrite()
     await #expect(throws: PinewindError.self) { try await save.value }
     #expect(
       !FileManager.default.fileExists(atPath: f.input.appendingPathComponent("pinewind.yaml").path))
-    try await configuration.saveShared()
-    let loaded = try await Configuration.load(inputRoot: f.input, localStateRoot: f.local)
+    _ = try await configuration.save(.shared)
+    let loaded = try await loadConfiguration(inputRoot: f.input, localStateRoot: f.local)
     #expect(await loaded.snapshot().manifest.order == [.userFiles(FileFilter())])
   }
 
   @Test func twoSessionsCannotBothOverwriteTheSameBaseline() async throws {
     let f = CoordinationFixture()
     defer { f.remove() }
-    let first = try await Configuration.load(inputRoot: f.input, localStateRoot: f.local)
-    let second = try await Configuration.load(inputRoot: f.input, localStateRoot: f.local)
-    await second.edit { shared, _ in shared.order = [] }
+    let first = try await loadConfiguration(inputRoot: f.input, localStateRoot: f.local)
+    let second = try await loadConfiguration(inputRoot: f.input, localStateRoot: f.local)
+    await second.edit { draft in draft.manifest.order = [] }
     let successes = try await withThrowingTaskGroup(of: Bool.self) { group in
       for configuration in [first, second] {
         group.addTask {
           do {
-            try await configuration.saveShared()
+            _ = try await configuration.save(.shared)
             return true
-          } catch let error as PinewindError {
-            #expect(error.message.contains("changed on disk"))
+          } catch {
+            guard case .runtime(.state(.externallyModified)) = error as? PinewindError else {
+              Issue.record("unexpected error: \(error)")
+              return false
+            }
             return false
           }
         }
@@ -185,19 +195,39 @@ struct FileAccessCoordinatorTests {
     // This former location must not silently redirect the shared package anymore.
     try Data("not valid YAML: [".utf8).write(
       to: f.input.appendingPathComponent("pinewind.local.yaml"))
-    let configuration = try await Configuration.load(inputRoot: f.input, localStateRoot: f.local)
+    let configuration = try await loadConfiguration(inputRoot: f.input, localStateRoot: f.local)
     #expect(await configuration.snapshot().localOverrides == nil)
-    await configuration.edit { _, local in local = LocalOverridesDocument() }
-    try await configuration.saveLocalOverrides()
+    await configuration.edit { draft in draft.localOverrides = LocalOverridesDocument() }
+    _ = try await configuration.save(.local)
     #expect(
       FileManager.default.fileExists(
         atPath: f.local.appendingPathComponent("pinewind.local.yaml").path))
     #expect(
       try String(contentsOf: f.input.appendingPathComponent("pinewind.local.yaml"), encoding: .utf8)
         == "not valid YAML: [")
-    await #expect(throws: PinewindError.self) {
-      try await Configuration.load(
+    await #expect(throws: FileSystemFailure.self) {
+      try await loadConfiguration(
         inputRoot: f.input, localStateRoot: f.input.appendingPathComponent("local"))
     }
   }
+  @Test func saveReceiptTracksOnlyTheCapturedDraftRevision() async throws {
+    let f = CoordinationFixture()
+    defer { f.remove() }
+    let coordinator = ControlledCoordinator(
+      base: FileAccessCoordinator.platform(
+        stateRoot: native(f.local.appendingPathComponent("coordination"))))
+    let session = try await loadConfiguration(
+      inputRoot: f.input, localStateRoot: f.local, coordinator: coordinator)
+    let saving = Task { try await session.save(.shared) }
+    await coordinator.waitForWrite()
+    await session.edit { draft in draft.manifest.order = [] }
+    await coordinator.releaseWrite()
+    let receipt = try await saving.value
+    #expect(receipt.revision == 0)
+    #expect(await session.snapshot().sharedRevision == 1)
+    #expect(await session.snapshot().sharedIsDirty)
+    _ = try await session.save(.shared)
+    #expect(await session.snapshot().sharedIsDirty == false)
+  }
+
 }
