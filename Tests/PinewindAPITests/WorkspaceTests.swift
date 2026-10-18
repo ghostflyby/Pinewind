@@ -161,7 +161,8 @@ struct WorkspaceTests {
     #expect(diagnostics.filter { $0.operationIndex == 1 }.count == 1)
     #expect(candidate.manifest.names["bad"] == badFields)
     await #expect { _ = try await workspace.apply(candidate) } throws: {
-      ($0 as? ConfigurationValidationError)?.diagnostics == diagnostics
+      guard let error = $0 as? any PinewindErrorProtocol else { return false }
+      return (error as? ConfigurationValidationError)?.diagnostics == diagnostics
     }
     #expect(!exists(f.manifest) && !exists(f.lock) && !exists(f.overrides))
     #expect(await f.repositories.counts().0 == 0)
@@ -274,9 +275,10 @@ struct WorkspaceTests {
     do {
       _ = try await workspace.update(progress: progress) { $0.addPackage("alias", fields: fields) }
       Issue.record("expected preparation failure")
-    } catch let error as PreparationFailure {
-      #expect(error.resolution.packages.count == 1)
-      #expect(error.cause.description.contains("503"))
+    } catch let error as any PinewindErrorProtocol {
+      let failure = try #require(error as? PreparationFailure)
+      #expect(failure.resolution.packages.count == 1)
+      #expect(failure.cause.description.contains("503"))
     }
     #expect(try await workspace.configuration().manifest.names["alias"] == fields)
     let lock = try Data(contentsOf: url(f.lock))

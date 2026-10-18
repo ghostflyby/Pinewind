@@ -165,6 +165,8 @@ let applied = try await workspace.apply(valid)
 
 候选不改变工作区的已保存状态。`apply` 检查整个配置与 lock 的基线,不自动重放编辑闭包;发生外部修改则整批拒绝。校验或解析失败不提交。本次批量的声明、本地覆写和 lock 由持久化重做日志协调提交,Core 读者先恢复未完成事务再读取;日志持久化后即进入提交阶段,不再响应取消。I/O 故障可能返回错误并留下待恢复日志,下一次访问完成同一事务。它不保证其他程序或云同步逐个读取这些文件时的跨文件原子可见性。
 
+Core 自定义的公共错误统一遵循 `PinewindErrorProtocol` (`Error`、`Sendable`、`CustomStringConvertible`),CLI/GUI 可统一捕获后按具体类型处理;取消仍是标准库的 `CancellationError`。
+
 默认应用后准备依赖。提交后的准备失败抛出 `PreparationFailure`,提供已提交的 `resolution` 和原始 `cause: PinewindError`;声明与 lock 保留,可用 `install(locked: true)` 重试。取消始终保持 `CancellationError`,取消后可重新查询状态。只提交并解析、不准备文件时使用 `preparation: .deferred`,例如移除包。
 
 `workspace.status()` 只读返回配置、可用的解析结果和输入准备状态,不自动解析或下载;损坏或缺失的 lock/cache 通过类型化状态原因展示。配置读取会恢复此前已提交的事务。构建使用 `build(to:)`,在 Core 内统一执行离线构建和 Rime 运行时文件保护;底层 `compose` 仍提供通用发布能力。

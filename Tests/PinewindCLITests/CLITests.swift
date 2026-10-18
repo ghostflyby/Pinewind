@@ -159,7 +159,10 @@
       let result = try f.run(["add", package.path, "--name", "broken"] + f.options)
       #expect(result.status != 0)
       #expect(result.output.contains("retained"))
-      #expect(result.output.contains("pinewind install"))
+      #expect(
+        result.output.components(separatedBy: "Run 'pinewind install' to retry preparation.").count
+          == 2)
+      #expect(!result.output.contains("Retry installation to prepare files."))
       #expect(
         try ManifestDocument.parse(String(contentsOf: f.manifest, encoding: .utf8)).names["broken"]
           != nil)

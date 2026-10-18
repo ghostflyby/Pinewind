@@ -7,11 +7,16 @@
 import Foundation
 import SystemPackage
 
+/// Common interface for all throwable errors defined by PinewindCore.
+/// Concrete types retain their structured facts, diagnostics, and recovery state.
+/// Cancellation continues to use Swift's CancellationError.
+public protocol PinewindErrorProtocol: Error, Sendable, CustomStringConvertible {}
+
 // MARK: - Top level
 
 /// The pipeline error: a verdict about a document, an incident observed while
 /// processing one, or an unanchored machine failure.
-public enum PinewindError: Error, Sendable, Hashable, CustomStringConvertible {
+public enum PinewindError: PinewindErrorProtocol, Hashable {
   /// The document is at fault; the location is part of the fact.
   case configuration(DocumentError)
   /// Something happened while processing a declaration; the location witnesses
@@ -163,7 +168,7 @@ public struct Origin: Sendable, Hashable, CustomStringConvertible {
 // MARK: - Fact vocabulary
 
 /// The single fact vocabulary, grouped by pipeline subject matter.
-public enum Failure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum Failure: PinewindErrorProtocol, Hashable {
   case git(GitFailure)
   case file(FileSystemFailure)
   case network(NetworkFailure)
@@ -189,7 +194,7 @@ public enum Failure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum GitFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum GitFailure: PinewindErrorProtocol, Hashable {
   case referenceNotFound(String)
   case ambiguousReference(String)
   case defaultBranchIndeterminate(URL)
@@ -237,7 +242,7 @@ public enum TreeEntry: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum FileSystemFailure: PinewindErrorProtocol, Hashable {
   case notFound(FilePath)
   case notRegularFile(FilePath)
   case notADirectory(FilePath)
@@ -301,7 +306,7 @@ public enum FileSystemFailure: Error, Sendable, Hashable, CustomStringConvertibl
   }
 }
 
-public enum NetworkFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum NetworkFailure: PinewindErrorProtocol, Hashable {
   case rejected(status: Int, url: URL)
   case transportFailed(url: URL, reason: TransportFailureReason, detail: String)
   case insecureScheme(URL)
@@ -342,7 +347,7 @@ public enum TransportFailureReason: Sendable, Hashable {
   }
 }
 
-public enum InterpreterFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum InterpreterFailure: PinewindErrorProtocol, Hashable {
   case evaluationFailed(detail: String)
   case timedOut
   case budgetExceeded(Budget)
@@ -376,7 +381,7 @@ public enum Budget: Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum DeclarationFailure: PinewindErrorProtocol, Hashable {
   case invalidPackageSource(String)
   case emptyName
   case reservedName(String)
@@ -472,7 +477,7 @@ public enum DeclarationFailure: Error, Sendable, Hashable, CustomStringConvertib
   }
 }
 
-public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum LockFailure: PinewindErrorProtocol, Hashable {
   case incompatible(detail: String)
   case malformed(detail: String)
   case declarationChanged
@@ -490,7 +495,7 @@ public enum LockFailure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum StateFailure: PinewindErrorProtocol, Hashable {
   case unsupportedFrontend(String)
   case ambiguousOutputDirectories([FilePath])
   case frontendRequired
@@ -539,7 +544,7 @@ public enum StateFailure: Error, Sendable, Hashable, CustomStringConvertible {
   }
 }
 
-public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
+public enum CacheFailure: PinewindErrorProtocol, Hashable {
   case contentMissing(URL)
   case checksumMismatch(url: URL, expected: String, actual: String)
 
@@ -556,7 +561,7 @@ public enum CacheFailure: Error, Sendable, Hashable, CustomStringConvertible {
 
 /// Failures of the library's own reasoning or of its foreign-error boundaries.
 /// The audience is the library developer; the origin is the payload.
-public enum Defect: Error, Sendable, Hashable, CustomStringConvertible {
+public enum Defect: PinewindErrorProtocol, Hashable {
   case invariant(detail: String, origin: Origin)
   case wrapped(detail: String, origin: Origin)
 

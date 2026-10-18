@@ -772,11 +772,11 @@ public struct ConfigurationApplication: Sendable {
 
 /// Configuration and lock have committed. Retry install to finish preparation.
 /// Cancellation remains CancellationError; inspect configuration() after cancelling.
-public struct PreparationFailure: Error, Sendable, CustomStringConvertible {
+public struct PreparationFailure: PinewindErrorProtocol {
   public let resolution: Resolution
   public let cause: PinewindError
   public var description: String {
-    "\(cause)\nDependency declarations and lock are retained. Retry installation to prepare files."
+    "\(cause)\nDependency declarations and lock are retained."
   }
 }
 

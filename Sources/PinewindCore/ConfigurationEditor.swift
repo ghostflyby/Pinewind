@@ -22,7 +22,7 @@ public struct ConfigurationDiagnostic: Hashable, Sendable, CustomStringConvertib
 
 /// The apply operation was rejected before acquisition or persistence.
 /// Each item retains the same PinewindError vocabulary used by single failures.
-public struct ConfigurationValidationError: Error, Hashable, Sendable, CustomStringConvertible {
+public struct ConfigurationValidationError: PinewindErrorProtocol, Hashable {
   public let diagnostics: [ConfigurationDiagnostic]
   public var description: String {
     diagnostics.map(\.description).joined(separator: "\n")
@@ -273,6 +273,9 @@ extension ConfigurationSnapshot {
     if locations.configuration.localOverrides == nil, localOverrides != nil {
       append(StateFailure.overridesDisabled, field: "localOverrides")
     }
+    // Keep these collecting structural checks aligned with ConfigurationEvaluator.evaluate
+    // and document schema validation when order-entry rules change. Invalid entries are
+    // diagnosed here before valid entries proceed through the shared evaluator.
     for (index, entry) in manifest.order.enumerated() {
       let before = result.count
       var name: String?

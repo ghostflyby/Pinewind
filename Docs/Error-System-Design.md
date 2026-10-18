@@ -16,6 +16,8 @@
 
 ## 2. 顶层结构
 
+所有 PinewindCore 自定义的可抛出公共错误类型统一遵循 `PinewindErrorProtocol: Error, Sendable, CustomStringConvertible`。消费者可通过该协议统一捕获,再按具体类型访问事实、配置诊断或已提交的解析结果。该协议不改变错误归一化规则,不要求 `Hashable` 或统一的 `Failure` 属性。`CancellationError` 保持标准库类型,不属于该协议;`DocumentError`、`FileOperationFailure` 和 `ConfigurationDiagnostic` 仍只是载荷,不因此变为可抛出错误。
+
 ```swift
 enum PinewindError {
   case configuration(DocumentError)  // 裁决:文档有错,位置是事实主体
