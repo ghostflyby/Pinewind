@@ -26,8 +26,8 @@ struct ResourceStore: Sendable {
     // Injectable downloaders may ignore the transfer cap; enforce it again before caching.
     let size = try await BlockingIO.run { try SnapshotFiles.byteCount(candidate) }
     guard size <= maximumBytes else {
-      throw PinewindError.runtime(
-        .network(.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)))
+      throw
+        NetworkFailure.sizeLimitExceeded(url: url, maximumBytes: maximumBytes)
     }
     let hash = try await BlockingIO.run { try SnapshotFiles.sha256(candidate) }
     let pin = try PinnedResource(url: url, path: target, sha256: hash)
@@ -57,8 +57,8 @@ struct ResourceStore: Sendable {
     if FileManager.default.fileExists(atPath: cached.string) {
       let size = try await BlockingIO.run { try SnapshotFiles.byteCount(cached) }
       guard size <= maximumBytes else {
-        throw PinewindError.runtime(
-          .network(.sizeLimitExceeded(url: pin.url, maximumBytes: maximumBytes)))
+        throw
+          NetworkFailure.sizeLimitExceeded(url: pin.url, maximumBytes: maximumBytes)
       }
       let actual = try await BlockingIO.run { try SnapshotFiles.sha256(cached) }
       if actual == pin.sha256 { return }
@@ -70,8 +70,8 @@ struct ResourceStore: Sendable {
     }
     let actual = try await self.pin(pin.url, target: pin.path, maximumBytes: maximumBytes)
     guard actual.sha256 == pin.sha256 else {
-      throw PinewindError.runtime(
-        .cache(.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual.sha256)))
+      throw
+        CacheFailure.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual.sha256)
     }
   }
 }

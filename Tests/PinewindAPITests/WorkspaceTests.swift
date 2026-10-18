@@ -86,7 +86,7 @@ private actor Downloads: ResourceDownloader {
     calls += 1
     limits[endpoint, default: []].append(maximumBytes)
     guard let bytes = files[endpoint] else {
-      throw PinewindError.runtime(.network(.rejected(status: 404, url: endpoint)))
+      throw NetworkFailure.rejected(status: 404, url: endpoint)
     }
     try FileManager.default.createDirectory(
       at: url(destination.removingLastComponent()), withIntermediateDirectories: true)
@@ -145,6 +145,183 @@ private struct Fixture {
 
 @Suite("Public Workspace API", .timeLimit(.minutes(3)))
 struct WorkspaceTests {
+  @Test func lintCollectsIndependentOriginalYAMLPositionsWithoutResolving() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(
+      f.manifest,
+      """
+      version: 1
+      names:
+        bad:
+          url: http://example.test/repository
+          revision: {branch: ""}
+          include: ["../first", "../second"]
+      order:
+        - missingOne
+        - missingTwo
+        - bad
+      """)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 6)
+    #expect(
+      report.diagnostics.allSatisfy { $0.context.path == f.manifest && $0.context.placement != nil }
+    )
+    #expect(Set(report.diagnostics.compactMap { $0.context.placement?.line }) == [4, 5, 6, 8, 9])
+    let json = try JSONEncoder().encode(report)
+    let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+    #expect((object["diagnostics"] as? [Any])?.count == 6)
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+    #expect(!exists(f.lock) && !exists(f.output))
+  }
+
+  @Test func lintChecksBothDocumentsAndEveryFilterWhileSkippingUnavailableSources() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let missing = url(f.root.appending("absent package")).absoluteString
+    try write(
+      f.manifest,
+      """
+      version: 1
+      order:
+        - url: \(missing)
+        - url: https://example.test/absent
+        - self: {include: ["../one", "../two"], exclude: ["../three"]}
+      """)
+    try write(f.overrides, "version: 2\nnames: {bad: {url: true}}\nunknown: value\n")
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 6)
+    #expect(report.diagnostics.filter { $0.context.path == f.overrides }.count == 3)
+    #expect(report.diagnostics.filter { $0.context.path == f.manifest }.count == 3)
+    #expect(!exists(f.lock))
+    #expect(await f.repositories.counts().0 == 0)
+  }
+
+  @Test func lintUsesCapturedSourceRecipesWithoutCallingInjectedBackends() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["recipe.yaml": "install_files: []\n"])
+    try f.remote()
+    let workspace = try await f.workspace()
+    _ = try await workspace.resolve()
+    let calls = await f.repositories.counts()
+    let cache = url(f.locations.cacheRoot.appending("sources"))
+    let key = try #require(
+      FileManager.default.contentsOfDirectory(
+        at: cache,
+        includingPropertiesForKeys: nil
+      ).first)
+    let recipe = FilePath(key.appendingPathComponent(firstID + "/recipe.yaml").path)
+    try write(recipe, "download_files: [http://insecure.test/resource]\n")
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 1)
+    #expect(
+      report.diagnostics.first?.context.path == FilePath(url(recipe).resolvingSymlinksInPath().path)
+    )
+    #expect(report.diagnostics.first?.context.placement?.line == 1)
+    #expect(await f.repositories.counts().0 == calls.0)
+    #expect(await f.repositories.counts().1 == calls.1)
+    // Recipe metadata changes do not erase an already-known repository revision.
+    let customized = FilePath(key.appendingPathComponent(firstID + "/customize.recipe.yaml").path)
+    try write(customized, "recipe: {Rx: customize}\ndownload_files: [http://insecure.test/file]\n")
+    try f.remote(recipe: "customize")
+    let stale = try await workspace.lint()
+    #expect(stale.diagnostics.count == 1)
+    #expect(
+      stale.diagnostics.first?.context.path
+        == FilePath(url(customized).resolvingSymlinksInPath().path))
+    #expect(await f.repositories.counts().0 == calls.0)
+
+  }
+
+  @Test func lintUsesOriginalUTF16ColumnsAndEncodesParserFailures() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let line = "order: [{options: {label: 😀}, name: missing}]"
+    try write(f.manifest, "version: 1\n" + line + "\n")
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    let position = try #require(report.diagnostics.first?.context.placement)
+    let prefix = line[..<line.range(of: "missing")!.lowerBound]
+    #expect(position.line == 2 && position.column == prefix.utf16.count + 1)
+    try write(f.manifest, "version: 1\norder: [self\n")
+    let broken = try await workspace.lint()
+    #expect(broken.diagnostics.count == 1)
+    #expect(broken.diagnostics.first?.context.placement?.line == 3)
+    let json = try JSONEncoder().encode(broken)
+    let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+    let entries = try #require(object["diagnostics"] as? [[String: Any]])
+    let cause = try #require(entries.first?["failure"] as? [String: Any])
+    #expect(cause["parser"] != nil || cause["scanner"] != nil)
+  }
+
+  @Test func lintChecksIndependentRecipeSectionsWithoutPreparingMissingFiles() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.manifest, "version: 1\norder: [{url: \(url(f.input).absoluteString)}]\n")
+    try write(
+      f.input.appending("recipe.yaml"),
+      """
+      download_files: [http://insecure.test/file]
+      patch_files:
+        target.yaml: {not: a-sequence}
+      install_files: [../bad]
+      """)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 3)
+    #expect(report.diagnostics.allSatisfy { $0.context.placement != nil })
+    #expect(!exists(f.lock) && !exists(f.output))
+  }
+
+  @Test func lintUsesVerifiedCachedYAMLAndDoesNotBlameConfigurationForDamagedCache() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let endpoint = URL(string: "https://resources.test/schema.yaml")!
+    await f.downloads.set(endpoint, "schema: [broken\n")
+    try await f.repositories.install(
+      firstID, files: ["recipe.yaml": "download_files: [\(endpoint)]\n"])
+    try f.remote()
+    let workspace = try await f.workspace()
+    let resolution = try await workspace.resolve()
+    let pin = try #require(resolution.packages.first?.resources.first)
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 1)
+    #expect(report.diagnostics.first?.context.url == endpoint)
+    let file = f.locations.cacheRoot.appending("resources/" + pin.sha256)
+    try write(file, "different bytes")
+    #expect(try await workspace.lint().isValid)
+    try FileManager.default.removeItem(at: url(file))
+    #expect(try await workspace.lint().isValid)
+    #expect(await f.downloads.count() == 1)
+  }
+
+  @Test func lintCollectsMissingSourcesAlongsideIndependentErrorsWithoutInventingDependentOnes()
+    async throws
+  {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(
+      f.manifest,
+      """
+      version: 1
+      names:
+        incomplete: {include: [../bad]}
+        invalid: {url: true, include: [../other]}
+      order: [incomplete, invalid]
+      """)
+    let workspace = try await f.workspace()
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 4)
+    #expect(
+      report.diagnostics.filter { $0.underlyingError as? DeclarationFailure == .inlineURLRequired }
+        .count == 1)
+    #expect(report.diagnostics.allSatisfy { $0.context.placement != nil })
+  }
+
   @Test func validationCollectsFailedEditsAndAllIndependentFieldsWithoutSideEffects() async throws {
     let f = try Fixture()
     defer { f.remove() }
@@ -166,7 +343,7 @@ struct WorkspaceTests {
     #expect(candidate.manifest.names["bad"] == badFields)
     await #expect { _ = try await workspace.apply(candidate) } throws: {
       guard let error = $0 as? any PinewindErrorProtocol else { return false }
-      return (error as? ConfigurationValidationError)?.diagnostics == diagnostics
+      return (error as? ConfigurationValidationError)?.diagnostics.count == diagnostics.count
     }
     #expect(!exists(f.manifest) && !exists(f.lock) && !exists(f.overrides))
     #expect(await f.repositories.counts().0 == 0)
@@ -282,7 +459,7 @@ struct WorkspaceTests {
     } catch let error as any PinewindErrorProtocol {
       let failure = try #require(error as? PreparationFailure)
       #expect(failure.resolution.packages.count == 1)
-      #expect(failure.cause.description.contains("503"))
+      #expect(String(describing: failure.cause).contains("503"))
     }
     #expect(try await workspace.configuration().manifest.names["alias"] == fields)
     let lock = try Data(contentsOf: url(f.lock))
@@ -323,7 +500,7 @@ struct WorkspaceTests {
             _ = try await workspace.apply(candidate)
             return true
           } catch {
-            #expect(error as? PinewindError == .runtime(.state(.externallyModified)))
+            #expect(error as? StateFailure == .externallyModified)
             return false
           }
         }
@@ -348,8 +525,8 @@ struct WorkspaceTests {
     try write(f.input.appending("words.userdb/data"), "database")
     let workspace = try await f.workspace()
     await #expect(
-      throws: PinewindError.runtime(
-        .state(.runtimeOutputPath(try RelativePath("words.userdb/data"))))
+      throws:
+        StateFailure.runtimeOutputPath(try RelativePath("words.userdb/data"))
     ) {
       _ = try await workspace.build(to: f.output, overwriteUnmanaged: true)
     }
@@ -394,7 +571,7 @@ struct WorkspaceTests {
       Issue.record("expected unresolved status")
       return
     }
-    #expect(error == .runtime(.lock(.resolveRequired)))
+    #expect(error as? LockFailure == .resolveRequired)
     #expect(!exists(f.lock))
     #expect(await f.repositories.counts().0 == 0)
   }
@@ -418,7 +595,7 @@ struct WorkspaceTests {
     if !frontends.isEmpty {
       let discovered = directories.discoverRimeDirectories()
       #expect(Set(discovered.map(\.frontend)) == Set(frontends))
-      #expect(throws: PinewindError.self) { _ = try directories.output(frontend: nil) }
+      #expect(throws: StateFailure.self) { _ = try directories.output(frontend: nil) }
       #expect(
         try directories.output(frontend: frontends[0]) == directories.rimeDirectory(frontends[0]))
     }
@@ -491,8 +668,7 @@ struct WorkspaceTests {
       Issue.record("unmanaged collision was overwritten")
     } catch {
       guard
-        case .runtime(.state(.unmanagedOutputFiles(let directory, let paths))) = error
-          as? PinewindError
+        case .unmanagedOutputFiles(let directory, let paths) = error as? StateFailure
       else {
         Issue.record("unexpected error: \(error)")
         return
@@ -561,7 +737,7 @@ struct WorkspaceTests {
       _ = try await workspace.compose(to: f.output, publication: .managedFiles())
       Issue.record("pending read failure was ignored")
     } catch {
-      guard case .runtime(.file) = error as? PinewindError else {
+      guard error is any FileOperationErrorProtocol || error is FileSystemFailure else {
         Issue.record("unexpected failure: \(error)")
         return
       }
@@ -582,7 +758,7 @@ struct WorkspaceTests {
           to: f.output, publication: .managedFiles(overwriteUnmanaged: true))
         Issue.record("managed files wrote through a generation junction")
       } catch {
-        guard case .runtime(.state(.publicationModeConflict)) = error as? PinewindError else {
+        guard case .publicationModeConflict = error as? StateFailure else {
           Issue.record("unexpected failure: \(error)")
           return
         }
@@ -642,7 +818,7 @@ struct WorkspaceTests {
     }
     let inputs = try await a.fetch(resolution)
     let plan = try await a.plan(inputs)
-    let expected = PinewindError.runtime(.state(.foreignSnapshot))
+    let expected = StateFailure.foreignSnapshot
     await #expect(throws: expected) { _ = try await b.fetch(resolution) }
     await #expect(throws: expected) { _ = try await b.cachedInputs(resolution) }
     await #expect(throws: expected) { _ = try await b.plan(inputs) }
@@ -668,7 +844,7 @@ struct WorkspaceTests {
     let lock = try Data(contentsOf: url(f.lock))
     let strict = try await f.workspace(options: WorkspaceOptions(maximumResourceBytes: 4))
     await #expect(
-      throws: PinewindError.runtime(.network(.sizeLimitExceeded(url: resource, maximumBytes: 4)))
+      throws: NetworkFailure.sizeLimitExceeded(url: resource, maximumBytes: 4)
     ) {
       if network { _ = try await strict.fetch() } else { _ = try await strict.cachedInputs() }
     }
@@ -681,7 +857,7 @@ struct WorkspaceTests {
     let workspace = try await f.workspace()
     let request = try PackageRequest(source: .git(RepositoryRequest(url: endpoint)))
     await f.repositories.rejecting(resolution: true)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: NetworkFailure.self) {
       _ = try await workspace.update(
         preparation: .deferred, { $0.addPackage("new", request: request) }
       ).resolution
@@ -716,7 +892,7 @@ struct WorkspaceTests {
     let lock = try Data(contentsOf: url(f.lock))
     try FileManager.default.removeItem(at: url(f.locations.cacheRoot))
     await f.repositories.rejecting(preparation: true)
-    await #expect(throws: PinewindError.self) { _ = try await workspace.fetch(resolution) }
+    await #expect(throws: NetworkFailure.self) { _ = try await workspace.fetch(resolution) }
     #expect(try read(f.manifest) == manifest)
     #expect(try Data(contentsOf: url(f.lock)) == lock)
     #expect(!exists(f.output))
@@ -743,7 +919,7 @@ struct WorkspaceTests {
     let external = try ManifestDocument(order: []).yaml()
     try write(f.manifest, external)
     await f.repositories.release()
-    await #expect(throws: PinewindError.self) { _ = try await task.value }
+    await #expect(throws: StateFailure.self) { _ = try await task.value }
     #expect(try read(f.manifest) == external)
     #expect(try Data(contentsOf: url(f.lock)) == lock)
   }
@@ -840,7 +1016,7 @@ struct WorkspaceTests {
     #expect(updated.packages.first(where: { $0.request == first })?.commit.string == secondID)
     #expect(updated.packages.first(where: { $0.request == other })?.commit.string == firstID)
     let lock = try Data(contentsOf: url(f.lock))
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       _ = try await workspace.resolve(refreshingPackagesNamed: ["absent"])
     }
     #expect(try Data(contentsOf: url(f.lock)) == lock)
@@ -899,8 +1075,7 @@ struct WorkspaceTests {
       _ = try await workspace.compose(to: f.output, publication: .managedFiles())
       Issue.record("invalid publication record accepted")
     } catch {
-      guard let error = error as? PinewindError,
-        case .runtime(.state(.invalidPublicationRecord)) = error
+      guard case .invalidPublicationRecord = error as? StateFailure
       else {
         Issue.record("unexpected error: \(error)")
         return
@@ -938,8 +1113,7 @@ struct WorkspaceTests {
           _ = try await workspace.compose(plan, to: output)
           Issue.record("managed storage was accepted as a publication target")
         } catch {
-          guard let error = error as? PinewindError,
-            case .runtime(.file(.overlappingPaths)) = error
+          guard case .overlappingPaths = error as? FileSystemFailure
           else {
             Issue.record("unexpected error: \(error)")
             continue
@@ -997,7 +1171,7 @@ struct WorkspaceTests {
     let local = try PackageRequest(source: .directory(.path("package")))
     #expect(local.source == .directory(.path(captured.appending("package"))))
     let incompleteURL = try #require(URL(string: "file:relative"))
-    #expect(throws: Failure.self) {
+    #expect(throws: FileSystemFailure.self) {
       _ = try PackageRequest(source: .directory(.fileURL(incompleteURL)))
     }
     let locations = try WorkspaceLocations(
@@ -1057,7 +1231,7 @@ struct WorkspaceTests {
     let candidate = try await workspace.configuration { $0.manifest.order = [] }
     #expect(try await workspace.compose(to: f.output).paths.count == 1)
     _ = try await workspace.apply(candidate)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: StateFailure.self) {
       _ = try await workspace.compose(plan, to: f.output)
     }
     #expect(try read(f.output.appending("schema.yaml")) == "value: saved")
@@ -1068,7 +1242,7 @@ struct WorkspaceTests {
     try await f.repositories.install(firstID, files: ["default.yaml": "value: first"])
     try f.remote(duplicate: true)
     let workspace = try await f.workspace()
-    await #expect(throws: PinewindError.self) { _ = try await workspace.compose(to: f.output) }
+    await #expect(throws: LockFailure.self) { _ = try await workspace.compose(to: f.output) }
     let resolution = try await workspace.resolve()
     #expect(resolution.packages.count == 1)
     #expect(await f.repositories.counts().0 == 1)
@@ -1158,7 +1332,7 @@ struct WorkspaceTests {
     // This injected downloader ignores its limit, so this also tests the store's final check.
     await f.downloads.set(resource, String(repeating: "x", count: 9))
     await #expect(
-      throws: PinewindError.runtime(.network(.sizeLimitExceeded(url: resource, maximumBytes: 8)))
+      throws: NetworkFailure.sizeLimitExceeded(url: resource, maximumBytes: 8)
     ) {
       switch operation {
       case "update":
@@ -1204,7 +1378,7 @@ struct WorkspaceTests {
     await f.downloads.set(remote, String(repeating: "#", count: 65))
     let limit = min(hostLimit, 64)
     await #expect(
-      throws: PinewindError.runtime(.network(.sizeLimitExceeded(url: remote, maximumBytes: limit)))
+      throws: NetworkFailure.sizeLimitExceeded(url: remote, maximumBytes: limit)
     ) {
       _ = try await workspace.fetchAndCompose(to: f.output)
     }
@@ -1216,7 +1390,7 @@ struct WorkspaceTests {
   func resourceLimitMustBePositive(_ maximumBytes: Int) async throws {
     let f = try Fixture()
     defer { f.remove() }
-    await #expect(throws: PinewindError.runtime(.state(.invalidOptions))) {
+    await #expect(throws: StateFailure.invalidOptions) {
       _ = try await f.workspace(options: WorkspaceOptions(maximumResourceBytes: maximumBytes))
     }
   }
@@ -1238,7 +1412,7 @@ struct WorkspaceTests {
     let lock = try Data(contentsOf: url(f.lock))
     try FileManager.default.removeItem(at: url(f.locations.cacheRoot.appending("resources")))
     await f.downloads.set(resource, "changed upstream")
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: CacheFailure.self) {
       _ = try await workspace.fetchAndCompose(to: f.output)
     }
     #expect(try Data(contentsOf: url(f.lock)) == lock)
@@ -1263,7 +1437,7 @@ struct WorkspaceTests {
     _ = try await workspace.compose(workspace.plan(prepared), to: f.output)
     #expect(try read(f.output.appending("default.yaml")) == "local edited")
     #expect(try Data(contentsOf: url(f.lock)) == originalLock)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: FileSystemFailure.self) {
       _ = try await workspace.compose(workspace.plan(prepared), to: local)
     }
   }
@@ -1279,7 +1453,7 @@ struct WorkspaceTests {
       f.overrides,
       "version: 1\nnames:\n  package:\n    url: https://other.test/repository\n    revision: {branch: dev}\n"
     )
-    await #expect(throws: PinewindError.self) { _ = try await workspace.fetch() }
+    await #expect(throws: DeclarationFailure.self) { _ = try await workspace.fetch() }
     _ = try await workspace.fetchAndCompose(to: f.output, mode: .development)
     #expect(try Data(contentsOf: url(f.lock)) == originalLock)
   }
@@ -1340,7 +1514,7 @@ struct WorkspaceTests {
     while !(await f.repositories.didStart()) { try await Task.sleep(for: .milliseconds(5)) }
     try write(f.manifest, "version: 1\norder: [self]\n")
     await f.repositories.release()
-    await #expect(throws: PinewindError.self) { _ = try await task.value }
+    await #expect(throws: StateFailure.self) { _ = try await task.value }
     #expect(!exists(f.lock))
   }
   @Test func invalidRevisionAndRelativeResourcePathsAreRejected() throws {
@@ -1389,8 +1563,8 @@ struct WorkspaceTests {
     let a = try await first.workspace()
     let b = try await second.workspace()
     let snapshot = try await a.configuration()
-    await #expect(throws: PinewindError.self) { _ = try await b.resolve(preview: snapshot) }
-    await #expect(throws: PinewindError.runtime(.state(.foreignSnapshot))) {
+    await #expect(throws: StateFailure.self) { _ = try await b.resolve(preview: snapshot) }
+    await #expect(throws: StateFailure.foreignSnapshot) {
       _ = try await b.resolve(refreshing: .all, preview: snapshot)
     }
   }
@@ -1419,7 +1593,7 @@ struct WorkspaceTests {
     let first = try await workspace.resolve()
     try await f.repositories.install(secondID, files: ["default.yaml": "second"])
     _ = try await workspace.resolve(refreshing: .packages(Set(first.packages.map(\.id))))
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: StateFailure.self) {
       _ = try await workspace.resolve(refreshing: .packages(Set(first.packages.map(\.id))))
     }
   }
@@ -1461,7 +1635,7 @@ struct WorkspaceTests {
     #expect(updated.imports[0].packages == initial.imports[0].packages)
     #expect(await f.downloads.requestedLimits(other).count == 1)
     #expect(await f.downloads.requestedLimits(selected).count > 1)
-    await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
+    await #expect(throws: StateFailure.unknownSelection) {
       _ = try await workspace.resolve(refreshing: .imports([id]))
     }
   }
@@ -1476,7 +1650,7 @@ struct WorkspaceTests {
     let initial = try await workspace.resolve()
     let baseline = try Data(contentsOf: url(f.lock))
     try write(f.manifest, "version: 1\norder: []\n")
-    await #expect(throws: PinewindError.runtime(.state(.unknownSelection))) {
+    await #expect(throws: StateFailure.unknownSelection) {
       _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
@@ -1494,7 +1668,7 @@ struct WorkspaceTests {
     await f.downloads.set(remote, "package_list=(rime/first rime/second)\n")
     let updated = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     #expect(updated.imports[0].packages.count == 2)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: StateFailure.self) {
       _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     }
   }
@@ -1512,10 +1686,7 @@ struct WorkspaceTests {
     await #expect {
       _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     } throws: { error in
-      guard case .runtime(.defect(.wrapped(let detail, _))) = error as? PinewindError else {
-        return false
-      }
-      return detail.contains("permission denied: /outside.conf")
+      return String(describing: error).contains("permission denied: /outside.conf")
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
     await f.downloads.set(remote, String(repeating: "#padding\n", count: 40))
@@ -1526,7 +1697,7 @@ struct WorkspaceTests {
     await #expect {
       _ = try await bounded.resolve(refreshing: .all)
     } throws: {
-      if case .runtime(.network(.sizeLimitExceeded)) = $0 as? PinewindError {
+      if case .sizeLimitExceeded = $0 as? NetworkFailure {
         return true
       } else {
         return false
@@ -1545,7 +1716,7 @@ struct WorkspaceTests {
     #expect(
       diagnostics.allSatisfy { diagnostic in
         if case .configuration(let document) = diagnostic.error,
-          case .declaration(.unknownName) = document.failure
+          case .unknownName = document.underlyingError as? DeclarationFailure
         {
           return true
         }

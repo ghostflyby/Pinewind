@@ -9,7 +9,7 @@ import SystemPackage
 
 /// A diagnostic in an edited configuration. Operation indices are zero-based;
 /// field names locate form controls, never fabricated YAML line numbers.
-public struct ConfigurationDiagnostic: Hashable, Sendable, CustomStringConvertible {
+public struct ConfigurationDiagnostic: Sendable, CustomStringConvertible {
   public let operationIndex: Int?
   public let packageName: String?
   public let field: String?
@@ -18,11 +18,17 @@ public struct ConfigurationDiagnostic: Hashable, Sendable, CustomStringConvertib
     let label = [packageName, field].compactMap { $0 }.joined(separator: ".")
     return label.isEmpty ? error.description : "\(label): \(error)"
   }
+  func hasSameIdentity(as other: Self) -> Bool {
+    operationIndex == other.operationIndex && packageName == other.packageName
+      && field == other.field
+      && sameError(error, other.error)
+  }
+
 }
 
 /// The apply operation was rejected before acquisition or persistence.
 /// Each item retains the same PinewindError vocabulary used by single failures.
-public struct ConfigurationValidationError: PinewindErrorProtocol, Hashable {
+public struct ConfigurationValidationError: PinewindErrorProtocol {
   public let diagnostics: [ConfigurationDiagnostic]
   public var description: String {
     diagnostics.map(\.description).joined(separator: "\n")
@@ -229,7 +235,8 @@ extension ConfigurationSnapshot {
   public func validate(scope: ConfigurationScope? = nil) -> [ConfigurationDiagnostic] {
     guard let scope else {
       var diagnostics = validate(scope: .shared)
-      for diagnostic in validate(scope: .effective) where !diagnostics.contains(diagnostic) {
+      for diagnostic in validate(scope: .effective)
+      where !diagnostics.contains(where: { $0.hasSameIdentity(as: diagnostic) }) {
         diagnostics.append(diagnostic)
       }
       return diagnostics
@@ -251,11 +258,10 @@ extension ConfigurationSnapshot {
       _ name: String?, _ fields: PackageFields, local: Bool = false, checkingName: Bool = true
     ) -> Bool {
       let before = result.count
-      if checkingName, let name, name.isEmpty {
-        append(DeclarationFailure.emptyName, name: name, field: "name", local: local)
-      }
-      if checkingName, name == "self" {
-        append(DeclarationFailure.reservedName("self"), name: name, field: "name", local: local)
+      if checkingName, let name {
+        do { try ConfigurationEvaluator.validateName(name) } catch {
+          append(error, name: name, field: "name", local: local)
+        }
       }
       for problem in fields.problems() {
         append(problem.failure, name: name, field: problem.field, local: local)
@@ -332,8 +338,7 @@ extension ConfigurationSnapshot {
 }
 
 private func configurationError(_ error: any Error) -> PinewindError {
-  if let normalized = ErrorBoundary.normalize(error) as? PinewindError { return normalized }
-  return .runtime(.defect(.wrapped(detail: String(describing: error), origin: Origin())))
+  (error as? PinewindError) ?? .runtime(error)
 }
 
 private enum PackageLocator {

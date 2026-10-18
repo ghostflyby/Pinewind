@@ -45,7 +45,7 @@ struct InputBinding: Sendable {
       try ConfigurationStore.read(urls[1]) == lockBytes,
       try urls.count < 3 || ConfigurationStore.read(urls[2]) == snapshot.baseline.local
     else {
-      throw PinewindError.runtime(.state(.staleInputs))
+      throw StateFailure.staleInputs
     }
   }
 }
@@ -77,7 +77,7 @@ public actor Workspace {
       options.imports.maximumTotalBytes > 0, options.imports.timeout > .zero,
       options.maximumResourceBytes > 0
     else {
-      throw PinewindError.runtime(.state(.invalidOptions))
+      throw StateFailure.invalidOptions
     }
     return Workspace(locations: locations, services: services, options: options)
   }
@@ -121,7 +121,7 @@ public actor Workspace {
       var selected = Set<PackageRequest>()
       for name in names {
         guard snapshot.manifest.names[name] != nil else {
-          throw PinewindError.runtime(.declaration(.unknownName(name)))
+          throw DeclarationFailure.unknownName(name)
         }
         var found = false
         for (entry, declaration) in zip(snapshot.manifest.order, declarations.entries) {
@@ -132,7 +132,7 @@ public actor Workspace {
             found = true
           }
         }
-        guard found else { throw PinewindError.runtime(.state(.unknownSelection)) }
+        guard found else { throw StateFailure.unknownSelection }
       }
       return try await resolveSnapshot(
         snapshot, preview: false, update: .packages([]), progress: progress,
@@ -151,7 +151,7 @@ public actor Workspace {
   }
   private func check(_ snapshot: ConfigurationSnapshot) throws {
     guard snapshot.locations == locations else {
-      throw PinewindError.runtime(.state(.foreignSnapshot))
+      throw StateFailure.foreignSnapshot
     }
   }
 
@@ -314,7 +314,7 @@ public actor Workspace {
         return false
       })
     else {
-      throw PinewindError.runtime(.lock(.resolveRequired))
+      throw LockFailure.resolveRequired
     }
     return try Resolution(
       declarations: manifest, expanded: manifest, packages: [], snapshot: snapshot, preview: false)
@@ -345,7 +345,7 @@ public actor Workspace {
           let imported = resolution.imports.first(where: {
             $0.id.index == index && $0.id.request == request
           })
-        else { throw PinewindError.runtime(.lock(.importUnresolved)) }
+        else { throw LockFailure.importUnresolved }
         expanded = imported.packages.map(ManifestEntry.package)
       } else {
         expanded = [entry]
@@ -379,7 +379,7 @@ public actor Workspace {
             identity = try SourceIdentity(url: repository.url, commit: locked.commit)
           } else {
             guard mode == .development, network else {
-              throw PinewindError.runtime(.declaration(.developmentRequired))
+              throw DeclarationFailure.developmentRequired
             }
             if let cached = identities[repository.key] {
               identity = cached
@@ -410,7 +410,7 @@ public actor Workspace {
             pins.append(old)
           } else {
             guard network, mode == .development else {
-              throw PinewindError.runtime(.declaration(.developmentRequired))
+              throw DeclarationFailure.developmentRequired
             }
             pins.append(try await resources.pin(download.url, target: path))
           }
@@ -467,8 +467,8 @@ public actor Workspace {
           let resource = cache.appending("resources/" + pin.sha256)
           let actual = try SnapshotFiles.sha256(resource)
           guard actual == pin.sha256 else {
-            throw PinewindError.runtime(
-              .cache(.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual)))
+            throw
+              CacheFailure.checksumMismatch(url: pin.url, expected: pin.sha256, actual: actual)
           }
           let file = try SafePath.file(pin.path, in: destination)
           try FileManager.default.createDirectory(
@@ -515,7 +515,7 @@ public actor Workspace {
       ]
     for path in protected {
       if try SafePath.overlaps(output, path) {
-        throw PinewindError.runtime(.file(.overlappingPaths(output, path)))
+        throw FileSystemFailure.overlappingPaths(output, path)
       }
     }
     progress?(.started(.composing))
@@ -573,34 +573,31 @@ public actor Workspace {
         return true
       }()
     else {
-      throw PinewindError.runtime(
-        .defect(
-          .invariant(
-            detail: "repository provider returned an unrelated source identity", origin: Origin())))
+      throw
+        Defect.invariant(
+          detail: "repository provider returned an unrelated source identity", origin: Origin())
     }
   }
   private func source(_ identity: SourceIdentity, network: Bool) async throws -> SourceSnapshot {
     let cache = locations.cacheRoot
     let key = GitKitRepositoryProvider.cacheKey(try SourceIdentity.normalize(identity.url))
-    let target = cache.appending("sources/" + key + "/" + identity.commit.string)
-    let marker = target.removingLastComponent().appending(identity.commit.string + ".complete")
-    let expected = Data(
-      (try SourceIdentity.normalize(identity.url).absoluteString + "\n" + identity.commit.string)
-        .utf8)
+    let target = try SourceCache.directory(identity, cacheRoot: cache)
+    let marker = SourceCache.marker(target)
+    let expected = try SourceCache.contents(identity)
     if FileManager.default.fileExists(atPath: target.string),
       (try? Data(contentsOf: marker)) == expected
     {
       return try SourceSnapshot(identity: identity, directory: target)
     }
     guard network else {
-      throw PinewindError.runtime(.cache(.contentMissing(identity.url)))
+      throw CacheFailure.contentMissing(identity.url)
     }
     let supplied = try await services.repositories.prepareSource(identity, cacheRoot: cache)
     guard supplied.identity.commit == identity.commit,
       try SourceIdentity.normalize(supplied.identity.url) == SourceIdentity.normalize(identity.url)
     else {
-      throw PinewindError.runtime(
-        .defect(.invariant(detail: "provider snapshot identity mismatch", origin: Origin())))
+      throw
+        Defect.invariant(detail: "provider snapshot identity mismatch", origin: Origin())
     }
     try await BlockingIO.run {
       try NativeLock.withLock(cache.appending("locks/source-" + key + ".lock")) {
@@ -610,7 +607,7 @@ public actor Workspace {
           return
         }
         guard try !SafePath.overlaps(supplied.directory, target) else {
-          throw PinewindError.runtime(.file(.overlappingPaths(supplied.directory, target)))
+          throw FileSystemFailure.overlappingPaths(supplied.directory, target)
         }
         _ = try SafePath.files(in: supplied.directory)
         let candidate = target.removingLastComponent().appending(".candidate-" + UUID().uuidString)
@@ -638,7 +635,16 @@ public actor Workspace {
       guard snapshot.baseline.shared != nil,
         let context = try? DocumentContext(path: snapshot.locations.configuration.manifest.filePath)
       else { throw ErrorBoundary.normalize(error) }
-      throw ErrorBoundary.attribute(error, to: context, as: attribution)
+      // This boundary knows which Git outcomes indict the requested reference.
+      // Transport and authentication remain incidents, even during shared resolution.
+      let observed: DocumentAttribution
+      switch error as? GitFailure {
+      case .referenceNotFound, .ambiguousReference, .defaultBranchIndeterminate,
+        .commitUnavailable, .unsupportedSourceURL, .malformedRepositoryURL, .treeEntryInvalid:
+        observed = attribution
+      default: observed = .incident
+      }
+      throw ErrorBoundary.attribute(error, to: context, as: observed)
     }
   }
 
@@ -662,7 +668,7 @@ public actor Workspace {
         pins = []
       } else if let url = URL(string: request.source), url.scheme?.lowercased() == "https" {
         guard !url.lastPathComponent.isEmpty else {
-          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
+          throw DeclarationFailure.invalidImportSource(request.source)
         }
         let view = try await BlockingIO.run {
           try CompositionSnapshot(root: self.locations.cacheRoot.appending("imports"))
@@ -677,11 +683,11 @@ public actor Workspace {
         pins = await capture.resources()
       } else {
         guard !request.source.contains("://") else {
-          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
+          throw DeclarationFailure.invalidImportSource(request.source)
         }
         let manifest = try snapshot.locations.configuration.manifest.url
         guard let path = request.localPath else {
-          throw PinewindError.runtime(.declaration(.invalidImportSource(request.source)))
+          throw DeclarationFailure.invalidImportSource(request.source)
         }
         let source = try SafePath.file(
           path, in: NativePath.from(manifest.deletingLastPathComponent()))
@@ -756,7 +762,7 @@ public actor Workspace {
     default: valid = true
     }
     guard valid else {
-      throw PinewindError.runtime(.state(.unknownSelection))
+      throw StateFailure.unknownSelection
     }
   }
 }
@@ -774,7 +780,7 @@ public struct ConfigurationApplication: Sendable {
 /// Cancellation remains CancellationError; inspect configuration() after cancelling.
 public struct PreparationFailure: PinewindErrorProtocol {
   public let resolution: Resolution
-  public let cause: PinewindError
+  public let cause: any Error
   public var description: String {
     "\(cause)\nDependency declarations and lock are retained."
   }
@@ -782,7 +788,7 @@ public struct PreparationFailure: PinewindErrorProtocol {
 
 public enum InputReadiness: Sendable {
   case ready
-  case unavailable(PinewindError)
+  case unavailable(any Error)
 }
 
 public struct WorkspaceStatus: Sendable {
@@ -813,7 +819,7 @@ extension Workspace {
       resolution = try await currentResolution(configuration)
       _ = try await cachedInputs(resolution)
       return WorkspaceStatus(configuration: configuration, resolution: resolution, inputs: .ready)
-    } catch is CancellationError { throw CancellationError() } catch let error as PinewindError {
+    } catch is CancellationError { throw CancellationError() } catch {
       return WorkspaceStatus(
         configuration: configuration, resolution: resolution, inputs: .unavailable(error))
     }
@@ -860,7 +866,7 @@ extension Workspace {
     do {
       try Task.checkCancellation()
       return try await fetch(resolution, progress: progress)
-    } catch is CancellationError { throw CancellationError() } catch let error as PinewindError {
+    } catch is CancellationError { throw CancellationError() } catch {
       throw PreparationFailure(resolution: resolution, cause: error)
     }
   }
@@ -898,10 +904,22 @@ extension Workspace {
       guard let first = parts.first,
         !["build", "sync", "trash", "installation.yaml", "user.yaml"].contains(first),
         !parts.contains(where: { $0.hasSuffix(".userdb") || $0.contains(".userdb.") })
-      else { throw PinewindError.runtime(.state(.runtimeOutputPath(path))) }
+      else { throw StateFailure.runtimeOutputPath(path) }
     }
     return try await compose(
       plan, to: output, publication: .managedFiles(overwriteUnmanaged: overwriteUnmanaged),
       progress: progress)
+  }
+}
+
+extension Workspace {
+  /// Checks original YAML using available local information; never resolves or downloads.
+  public func lint() async throws -> LintReport {
+    let maximumResourceBytes = options.maximumResourceBytes
+    return try await store.coordinated(intents: store.documentLocations.map { _ in .read }) {
+      urls, _ in
+      try YAMLLinter().run(
+        locations: self.locations, urls: urls, maximumResourceBytes: maximumResourceBytes)
+    }
   }
 }

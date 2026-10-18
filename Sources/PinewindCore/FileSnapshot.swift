@@ -25,25 +25,25 @@ final class CompositionSnapshot: Sendable {
 enum SnapshotFiles {
   private static let chunkSize = 65_536
 
-  static func byteCount(_ file: FilePath) throws(FileSystemFailure) -> UInt64 {
+  static func byteCount(_ file: FilePath) throws -> UInt64 {
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
-      throw FileSystemFailure.operationFailed(
-        FileOperationFailure(operation: .open, paths: [file], error: error))
+      throw
+        FileOperationFailure(operation: .open, paths: [file], error: error)
     }
     do {
       return try descriptor.closeAfter { UInt64(try descriptor.seek(offset: 0, from: .end)) }
     } catch {
-      throw FileSystemFailure.operationFailed(
-        FileOperationFailure(operation: .inspect, paths: [file], error: error))
+      throw
+        FileOperationFailure(operation: .inspect, paths: [file], error: error)
     }
   }
 
   static func sha256(_ file: FilePath) throws -> String {
     let descriptor: FileDescriptor
     do { descriptor = try FileDescriptor.open(file, .readOnly) } catch {
-      throw FileSystemFailure.operationFailed(
-        FileOperationFailure(operation: .open, paths: [file], error: error))
+      throw
+        FileOperationFailure(operation: .open, paths: [file], error: error)
     }
     return try FileIO.perform(.read, paths: [file]) {
       try descriptor.closeAfter {

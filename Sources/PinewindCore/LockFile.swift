@@ -329,17 +329,17 @@ enum ResolutionCodec {
     let packages: [Package]
     let imports: [Import]
   }
-  static func signature(_ manifest: Manifest) throws(Failure) -> Data {
+  static func signature(_ manifest: Manifest) throws -> Data {
     try signature(manifest.entries.enumerated().map { Entry($0.element, index: $0.offset) })
   }
-  private static func signature(_ entries: [Entry]) throws(Failure) -> Data {
+  private static func signature(_ entries: [Entry]) throws -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = .sortedKeys
     do { return try encoder.encode(entries) } catch {
-      throw .defect(.wrapped(detail: String(describing: error), origin: Origin()))
+      throw Defect.wrapped(detail: String(describing: error), origin: Origin())
     }
   }
-  static func encode(_ resolution: Resolution) throws(Failure) -> Data {
+  static func encode(_ resolution: Resolution) throws -> Data {
     let entries = resolution.expanded.entries.enumerated().map { index, entry -> Entry in
       var record = Entry(entry, index: index)
       if case .package(let request) = entry, request.url.isFileURL {
@@ -365,7 +365,7 @@ enum ResolutionCodec {
           }, packages: $0.packages.map(Request.init), resources: $0.resources.map(Resource.init))
       })
     do { return magic + (try PropertyListEncoder().encode(payload)) } catch {
-      throw Failure.defect(.wrapped(detail: String(describing: error), origin: Origin()))
+      throw Defect.wrapped(detail: String(describing: error), origin: Origin())
     }
   }
   static func reusable(_ bytes: Data) throws(LockFailure) -> (
@@ -433,7 +433,8 @@ enum ResolutionCodec {
       throw PinewindError.configuration(
         DocumentError(
           context: lock,
-          failure: .lock(.incompatible(detail: "unrecognized lock format; run resolve to rebuild")))
+          failure: LockFailure.incompatible(
+            detail: "unrecognized lock format; run resolve to rebuild"))
       )
     }
     do {
@@ -476,19 +477,16 @@ enum ResolutionCodec {
         expanded: Manifest(entries: payload.expanded.map { try $0.decode(shared: declarations) }),
         packages: packages, imports: imports, snapshot: snapshot, preview: false, lockBytes: bytes)
     } catch let failure as LockFailure {
-      throw PinewindError.configuration(DocumentError(context: lock, failure: .lock(failure)))
+      throw PinewindError.configuration(DocumentError(context: lock, failure: failure))
     } catch let pinned as PinewindError {
       throw pinned
-    } catch let failure as Failure {
-      if case .defect = failure { throw PinewindError.runtime(failure) }
-      throw PinewindError.configuration(
-        DocumentError(context: lock, failure: .lock(.malformed(detail: failure.description))))
     } catch let failure as DeclarationFailure {
       throw PinewindError.configuration(
-        DocumentError(context: lock, failure: .lock(.malformed(detail: failure.description))))
+        DocumentError(context: lock, failure: LockFailure.malformed(detail: failure.description)))
     } catch let error as DecodingError {
       throw PinewindError.configuration(
-        DocumentError(context: lock, failure: .lock(.malformed(detail: String(describing: error)))))
+        DocumentError(
+          context: lock, failure: LockFailure.malformed(detail: String(describing: error))))
     } catch { throw ErrorBoundary.normalize(error) }
   }
 }

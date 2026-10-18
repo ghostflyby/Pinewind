@@ -76,8 +76,8 @@ struct GitKitRepositoryProvider: RepositoryProvider {
               url: Self.remoteURL(url), repository: repository, commit: identity.commit.string)
           }
           guard try transport.containsCommit(identity.commit.string, repository: repository) else {
-            throw PinewindError.runtime(
-              .git(.commitUnavailable(commit: identity.commit.string, repository: identity.url)))
+            throw
+              GitFailure.commitUnavailable(commit: identity.commit.string, repository: identity.url)
           }
           try fm.createDirectory(
             at: directory.removingLastComponent(), withIntermediateDirectories: true)
@@ -133,12 +133,12 @@ struct GitKitRepositoryProvider: RepositoryProvider {
     guard !source.isFileURL, !source.path.isEmpty, !source.path.contains("\0"),
       !source.path.split(separator: "/").contains("..")
     else {
-      throw PinewindError.runtime(.git(.unsupportedSourceURL(source)))
+      throw GitFailure.unsupportedSourceURL(source)
     }
     if source.host == "github.com" {
       let parts = source.path.split(separator: "/", omittingEmptySubsequences: false)
       guard parts.count == 3, parts[0].isEmpty, !parts[1].isEmpty, !parts[2].isEmpty else {
-        throw PinewindError.runtime(.git(.malformedRepositoryURL(source)))
+        throw GitFailure.malformedRepositoryURL(source)
       }
     }
     return source
@@ -158,7 +158,7 @@ struct HTTPSResourceDownloader: ResourceDownloader {
   public func download(_ url: URL, to destination: FilePath, maximumBytes: Int?) async throws {
     do {
       guard url.scheme?.lowercased() == "https", url.host != nil else {
-        throw PinewindError.runtime(.network(.insecureScheme(url)))
+        throw NetworkFailure.insecureScheme(url)
       }
       let destination = try NativePath.absolute(destination)
       try Task.checkCancellation()
@@ -227,11 +227,11 @@ struct HTTPSResourceDownloader: ResourceDownloader {
     guard let response = response as? HTTPURLResponse,
       response.url?.scheme?.lowercased() == "https"
     else {
-      throw PinewindError.runtime(.network(.insecureScheme(url)))
+      throw NetworkFailure.insecureScheme(url)
     }
     guard (200..<300).contains(response.statusCode) else {
-      throw PinewindError.runtime(
-        .network(.rejected(status: response.statusCode, url: url)))
+      throw
+        NetworkFailure.rejected(status: response.statusCode, url: url)
     }
     return response
   }
@@ -239,12 +239,13 @@ struct HTTPSResourceDownloader: ResourceDownloader {
   private func transportFailure(_ error: any Error, url: URL) -> any Error {
     if error is CancellationError { return error }
     if let error = error as? PinewindError { return error }
-    if let failure = Failure.recognizing(error) { return PinewindError.runtime(failure) }
-    if (error as? URLError)?.code == .cancelled { return CancellationError() }
-    return PinewindError.runtime(
-      .network(
-        .transportFailed(
-          url: url, reason: TransportFailureReason(error), detail: String(describing: error))))
+    if let transport = error as? URLError {
+      if transport.code == .cancelled { return CancellationError() }
+      return ResourceTransferFailure(url: url, cause: transport)
+    }
+    if error is any PinewindErrorProtocol { return error }
+    func wrap<E: Error>(_ cause: E) -> any Error { ResourceTransferFailure(url: url, cause: cause) }
+    return wrap(error)
   }
 }
 // Corelibs routes native transport callbacks through the session delegate, so
@@ -445,7 +446,7 @@ struct RemoteReferences {
     let head = values.first { $0.name == "HEAD" }
     let candidates = values.filter { $0.name.hasPrefix("refs/heads/") && $0.commit == head?.commit }
     guard candidates.count == 1, let branch = candidates.first else {
-      throw PinewindError.runtime(.git(.defaultBranchIndeterminate(url)))
+      throw GitFailure.defaultBranchIndeterminate(url)
     }
     return branch.name
   }
@@ -456,8 +457,8 @@ struct RemoteReferences {
     let matches = names.compactMap { name in values.first { $0.name == name } }
     guard matches.count == 1, let found = matches.first else {
       throw matches.isEmpty
-        ? PinewindError.runtime(.git(.referenceNotFound(ref)))
-        : PinewindError.runtime(.git(.ambiguousReference(ref)))
+        ? GitFailure.referenceNotFound(ref)
+        : GitFailure.ambiguousReference(ref)
     }
     let peeled = values.first { $0.name == found.name + "^{}" }
     let commit = (peeled ?? found).commit

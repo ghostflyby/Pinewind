@@ -20,7 +20,7 @@ enum BuiltinPackageLists {
     case ":preset": return preset
     case ":extra": return extra
     case ":all": return preset + extra
-    default: throw PinewindError.runtime(.interpreter(.unknownBuiltIn(source)))
+    default: throw InterpreterFailure.unknownBuiltIn(source)
     }
   }
 }

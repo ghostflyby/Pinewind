@@ -12,7 +12,7 @@ enum PatchRenderer {
     let text: String
     if let bytes {
       guard let decoded = String(data: bytes, encoding: .utf8) else {
-        throw PinewindError.runtime(.declaration(.undecodablePatchTarget))
+        throw DeclarationFailure.undecodablePatchTarget
       }
       text = decoded
     } else {
@@ -28,7 +28,7 @@ enum PatchRenderer {
     var removing = false
     for line in lines {
       if line == start {
-        guard !removing else { throw PinewindError.runtime(.declaration(.nestedRxMarker(rx))) }
+        guard !removing else { throw DeclarationFailure.nestedRxMarker(rx) }
         removing = true
       } else if removing && line == "# }" {
         removing = false
@@ -36,14 +36,14 @@ enum PatchRenderer {
         kept.append(line)
       }
     }
-    guard !removing else { throw PinewindError.runtime(.declaration(.unterminatedRxMarker(rx))) }
+    guard !removing else { throw DeclarationFailure.unterminatedRxMarker(rx) }
     lines = kept
     let textWithoutBlock = lines.joined(separator: "\n")
     let reader = YAMLReader(source: "patch target")
     if !textWithoutBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       let mapping = try reader.mapping(reader.document(textWithoutBlock))
       if let patch = mapping["__patch"], patch.tag != Tag(.null), patch.sequence == nil {
-        throw PinewindError.runtime(.declaration(.patchNotASequence))
+        throw DeclarationFailure.patchNotASequence
       }
     }
     let headers = lines.indices.filter {
@@ -55,7 +55,7 @@ enum PatchRenderer {
       header = found
     } else {
       if lines.contains(where: { $0.hasPrefix("__patch:") }) {
-        throw PinewindError.runtime(.declaration(.patchRequiresBlockStyle))
+        throw DeclarationFailure.patchRequiresBlockStyle
       }
       lines.append("__patch:")
       header = lines.count - 1
@@ -73,8 +73,8 @@ enum PatchRenderer {
     let output = lines.joined(separator: newline) + newline
     let mapping = try reader.mapping(reader.document(output))
     guard mapping["__patch"]?.sequence != nil else {
-      throw PinewindError.runtime(
-        .defect(.invariant(detail: "patch produced invalid __patch data", origin: Origin())))
+      throw
+        Defect.invariant(detail: "patch produced invalid __patch data", origin: Origin())
     }
     return Data(output.utf8)
   }

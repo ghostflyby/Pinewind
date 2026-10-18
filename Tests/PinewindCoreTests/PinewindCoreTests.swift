@@ -27,7 +27,7 @@ private struct Fixture {
     do {
       if let name {
         guard let fixtures = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
-          throw PinewindError.runtime(.file(.notFound(FilePath("Fixtures"))))
+          throw FileSystemFailure.notFound(FilePath("Fixtures"))
         }
         let source = fixtures.appendingPathComponent(name)
         for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
@@ -66,7 +66,7 @@ private struct Fixture {
 struct ConfigurationTests {
   @Test func missingPackageDefinitionCannotBeEvaluated() throws {
     let document = try ManifestDocument.parse("version: 1\norder: [missing]")
-    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
+    #expect(throws: DeclarationFailure.self) { _ = try document.evaluate() }
   }
 
   @Test func mergesFieldsAndClearsWithoutDeepMergingOptions() throws {
@@ -148,7 +148,7 @@ struct ConfigurationTests {
     let f = try Fixture()
     defer { f.remove() }
     let value = key == "ref" ? "master" : String(repeating: "a", count: 40)
-    #expect(throws: Failure.self) {
+    #expect(throws: DeclarationFailure.self) {
       try PackageRequest(
         url: f.a, revision: key == "ref" ? .reference(value) : .commit(CommitID(value)))
     }
@@ -173,7 +173,11 @@ struct ConfigurationTests {
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
-      #expect(throws: PinewindError.self) { try ManifestDocument.parse(yaml).evaluate() }
+      #expect { try ManifestDocument.parse(yaml).evaluate() } throws: { error in
+        if let direct = error as? DeclarationFailure { return direct == .revisionWithFileSource }
+        guard case .configuration(let document) = error as? PinewindError else { return false }
+        return document.underlyingError as? DeclarationFailure == .revisionWithFileSource
+      }
     }
     #expect(throws: PinewindError.self) {
       try ManifestDocument.parse(remote).evaluate(
@@ -302,7 +306,7 @@ struct CompositionTests {
         try Template.expand("${value:-default}", options: options, declared: ["value"]) == "default"
       )
     }
-    #expect(throws: Failure.declaration(.optionValueMissing("value"))) {
+    #expect(throws: DeclarationFailure.optionValueMissing("value")) {
       try Template.expand("${value}", options: [:], declared: ["value"])
     }
   }
@@ -606,7 +610,7 @@ struct CompositionTests {
     let old = try f.read("luna_pinyin.custom.yaml")
     try f.write("luna_pinyin.custom.yaml", "__patch: wrong", in: f.input)
     try f.write("recipe.yaml", "patch_files:\n  luna_pinyin.custom.yaml:\n    - new: true", in: f.a)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await composer.compose(
         f.plan([.userFiles(FileFilter()), .package(f.request(f.a))]), inputRoot: f.input,
         outputRoot: f.output)
@@ -731,9 +735,8 @@ struct CompositionTests {
     } throws: { error in
       if error is FileSystemFailure || error is DeclarationFailure { return true }
       switch error as? PinewindError {
-      case .runtime(.file): return true
       case .configuration(let document):
-        if case .file = document.failure { return true }
+        if document.underlyingError is FileSystemFailure { return true }
         return false
       default: return false
       }
@@ -753,9 +756,9 @@ struct CompositionTests {
         request: f.request(f.a), directory: native(f.a), read: { try Data(contentsOf: $0) })
     } throws: { error in
       guard case .configuration(let document) = error as? PinewindError else { return false }
-      switch document.failure {
-      case .declaration(.duplicateTarget): return true
-      case .declaration(.syntaxError(let detail)): return detail.contains("targets must be unique")
+      switch document.underlyingError as? DeclarationFailure {
+      case .duplicateTarget: return true
+      case .syntaxError(let detail): return detail.contains("targets must be unique")
       default: return false
       }
     }
@@ -801,7 +804,7 @@ struct ConfTests {
 
   @Test(arguments: ["u/", "/repo", "u//repo", "/", "repo@", "@branch"])
   func descriptorsRejectEmptySourceSegments(_ descriptor: String) {
-    #expect(throws: Failure.self) { try PlumImporter.package(descriptor) }
+    #expect(throws: InterpreterFailure.self) { try PlumImporter.package(descriptor) }
   }
 
   @Test(.timeLimit(.minutes(1))) func longLoopsTimeOutAndCancelInterpreter() async throws {
@@ -817,7 +820,7 @@ struct ConfTests {
         Issue.record("\(error)")
         return
       }
-      guard case .interpreter(.timedOut) = document.failure else {
+      guard case .timedOut = document.underlyingError as? InterpreterFailure else {
         Issue.record("\(error)")
         return
       }
@@ -873,7 +876,7 @@ struct ConfTests {
       ])
     #expect(extra.count == 14)
     #expect(all == preset + extra)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: InterpreterFailure.self) {
       try await importer.evaluate(ConfImport(source: ":unknown"), inputRoot: f.input)
     }
     let request = try PlumImporter.package("emoji@master:customize:schema=terra_pinyin")
@@ -891,7 +894,8 @@ struct ConfTests {
       try await importer.evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
-      guard case .interpreter(.evaluationFailed(let detail)) = document.failure else {
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else {
         return false
       }
       return detail.contains("/conf/stolen: Permission denied")
@@ -948,7 +952,7 @@ struct LockTests {
       try ResolutionCodec.decode(bytes, snapshot: changedSnapshot)
     } throws: {
       guard case .configuration(let document) = $0 as? PinewindError else { return false }
-      if case .lock(.declarationChanged) = document.failure { return true }
+      if case .declarationChanged = document.underlyingError as? LockFailure { return true }
       return false
     }
   }
@@ -965,7 +969,7 @@ struct LockTests {
       try ResolutionCodec.decode(Data("not a lock".utf8), snapshot: snapshot)
     } throws: { error in
       guard case .configuration(let document) = error as? PinewindError else { return false }
-      if case .lock(.incompatible) = document.failure { return true }
+      if case .incompatible = document.underlyingError as? LockFailure { return true }
       return false
     }
   }

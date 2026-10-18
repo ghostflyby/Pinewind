@@ -165,28 +165,23 @@ struct CompositionPlanner: Sendable {
         var selected: [(RelativePath, FilePath)] = []
         if let patterns = recipe?.patterns {
           for pattern in patterns {
-            if pattern.hasPrefix("../") {
-              let segments = pattern.split(separator: "/", maxSplits: 2).map(String.init)
-              guard segments.count == 3, segments[0] == ".." else {
-                throw DeclarationFailure.invalidPattern(
-                  pattern: pattern,
-                  detail: "cross-package pattern must be ../<package>/<pattern>")
-              }
+            let selection = try Recipe.sourcePattern(pattern)
+            if let name = selection.package {
               let candidates = try available.filter {
                 let sibling = try SourceIdentity.normalize($0.request.url)
                 return sibling.deletingLastPathComponent()
                   == source.deletingLastPathComponent()
                   && Self.compatibilityName(sibling)
-                    == segments[1]
+                    == name
               }
               let versions = try Dictionary(grouping: candidates) {
                 SourceVersion(url: try SourceIdentity.normalize($0.request.url), commit: $0.commit)
               }
               guard versions.count == 1, let sibling = versions.values.first?.first else {
-                throw DeclarationFailure.crossPackageSourceUnresolved(String(segments[1]))
+                throw DeclarationFailure.crossPackageSourceUnresolved(name)
               }
               roots.append(sibling.directory)
-              let glob = try Glob.compile(segments[2])
+              let glob = try Glob.compile(selection.glob)
               let matched = try snapshot.files(in: sibling.directory).filter {
                 glob.match($0.string)
               }
@@ -197,7 +192,7 @@ struct CompositionPlanner: Sendable {
                 selected.append((path, try SafePath.file(path, in: sibling.directory)))
               }
             } else {
-              let glob = try Glob.compile(pattern)
+              let glob = try Glob.compile(selection.glob)
               let matched = candidates.filter { glob.match($0.string) }
               guard !matched.isEmpty else {
                 throw DeclarationFailure.unmatchedPattern(pattern)

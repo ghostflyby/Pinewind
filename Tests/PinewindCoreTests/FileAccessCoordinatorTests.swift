@@ -64,7 +64,7 @@ private actor ControlledCoordinator: FileAccessCoordinating {
     }
     if writing && failNext {
       failNext = false
-      throw PinewindError.runtime(.file(.lockFailed(detail: "test coordination failure")))
+      throw FileSystemFailure.lockFailed(detail: "test coordination failure")
     }
     return try await base.coordinate(requests, accessor: accessor)
   }
@@ -156,7 +156,7 @@ struct FileAccessCoordinatorTests {
     let save = Task { _ = try await configuration.save(.shared) }
     await coordinator.waitForWrite()
     await coordinator.releaseWrite()
-    await #expect(throws: PinewindError.self) { try await save.value }
+    await #expect(throws: FileSystemFailure.self) { try await save.value }
     #expect(
       !FileManager.default.fileExists(atPath: f.input.appendingPathComponent("pinewind.yaml").path))
     _ = try await configuration.save(.shared)
@@ -177,7 +177,7 @@ struct FileAccessCoordinatorTests {
             _ = try await configuration.save(.shared)
             return true
           } catch {
-            guard case .runtime(.state(.externallyModified)) = error as? PinewindError else {
+            guard case .externallyModified = error as? StateFailure else {
               Issue.record("unexpected error: \(error)")
               return false
             }

@@ -41,7 +41,7 @@ struct ConfigurationDraft: Hashable, Sendable {
   }
   mutating func renamePackage(_ old: String, to new: String) throws {
     guard old == new || localOverrides?.names[new] == nil else {
-      throw PinewindError.runtime(.declaration(.duplicateName(new)))
+      throw DeclarationFailure.duplicateName(new)
     }
     try manifest.renamePackage(old, to: new)
     if old != new, let fields = localOverrides?.names.removeValue(forKey: old) {
@@ -50,7 +50,7 @@ struct ConfigurationDraft: Hashable, Sendable {
   }
   mutating func removePackage(_ name: String) throws {
     guard manifest.names[name] != nil else {
-      throw PinewindError.runtime(.declaration(.unknownName(name)))
+      throw DeclarationFailure.unknownName(name)
     }
     manifest.order.removeAll {
       if case .named(let reference, _) = $0 { return reference == name }
@@ -63,13 +63,13 @@ struct ConfigurationDraft: Hashable, Sendable {
     throws
   {
     guard manifest.names[name] != nil else {
-      throw PinewindError.runtime(.declaration(.unknownName(name)))
+      throw DeclarationFailure.unknownName(name)
     }
     if localOverrides == nil { localOverrides = LocalOverridesDocument() }
     var fields = localOverrides?.names[name] ?? PackageFields()
     do {
       fields.url = .value(try location.resolved(relativeTo: relativeTo).url)
-    } catch { throw PinewindError.runtime(.file(error)) }
+    } catch { throw error }
     fields.revision = .reset
     localOverrides?.names[name] = fields
   }
@@ -159,10 +159,9 @@ struct ConfigurationStore: Sendable {
       switch try await access(recovering: true) {
       case .value(let value): return value
       case .recoveryRequired:
-        throw PinewindError.runtime(
-          .defect(
-            .invariant(
-              detail: "configuration recovery did not finish", origin: Origin())))
+        throw
+          Defect.invariant(
+            detail: "configuration recovery did not finish", origin: Origin())
       }
     }
   }
@@ -173,7 +172,7 @@ struct ConfigurationStore: Sendable {
     }
     func text(_ bytes: Data, location: FileLocation) throws -> String {
       guard let value = String(data: bytes, encoding: .utf8) else {
-        throw PinewindError.runtime(.file(.undecodableText(try location.filePath)))
+        throw FileSystemFailure.undecodableText(try location.filePath)
       }
       return value
     }
@@ -203,7 +202,7 @@ struct ConfigurationStore: Sendable {
         values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus != .current,
         values.ubiquitousItemDownloadingStatus != .downloaded
       {
-        throw PinewindError.runtime(.cache(.contentMissing(url)))
+        throw CacheFailure.contentMissing(url)
       }
     #endif
     let path = try NativePath.from(url)
@@ -220,7 +219,7 @@ struct ConfigurationStore: Sendable {
     let current = try read(url)
     if allowIdenticalReplacement && current == bytes { return }
     guard current == expected else {
-      throw PinewindError.runtime(.state(.externallyModified))
+      throw StateFailure.externallyModified
     }
     if bytes == expected { return }
     let path = try NativePath.from(url)
@@ -241,7 +240,7 @@ struct ConfigurationStore: Sendable {
       guard try Self.read(urls[0]) == expected.shared,
         try urls.count < 3 || Self.read(urls[2]) == expected.local
       else {
-        throw PinewindError.runtime(.state(.staleInputs))
+        throw StateFailure.staleInputs
       }
       try Self.replace(
         bytes, at: urls[1], expected: expected.lock, allowIdenticalReplacement: true)
@@ -271,7 +270,7 @@ struct ConfigurationStore: Sendable {
     let identities = try documentLocations.map { try $0.url.absoluteString }
     try await coordinated(intents: intents) { urls, journal in
       guard try urls.map(Self.read) == before else {
-        throw PinewindError.runtime(.state(.externallyModified))
+        throw StateFailure.externallyModified
       }
       try Cancellation.check()
       // Journal order follows document order: shared, lock, local. All readers
@@ -341,7 +340,7 @@ actor ConfigurationSession {
         revision = sharedRevision
       case .local:
         guard let configured = store.locations.configuration.localOverrides else {
-          throw PinewindError.runtime(.state(.overridesDisabled))
+          throw StateFailure.overridesDisabled
         }
         if captured.localOverrides != nil {
           _ = try captured.manifest.evaluate(localOverrides: captured.localOverrides)
@@ -373,13 +372,13 @@ actor ConfigurationSession {
       await acquire()
       defer { release() }
       guard draft == saved else {
-        throw PinewindError.runtime(.state(.staleSnapshot))
+        throw StateFailure.staleSnapshot
       }
       let capturedShared = sharedRevision
       let capturedLocal = localRevision
       let loaded = try await store.load()
       guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-        throw PinewindError.runtime(.state(.staleSnapshot))
+        throw StateFailure.staleSnapshot
       }
       apply(loaded)
 
@@ -393,7 +392,7 @@ actor ConfigurationSession {
       let capturedLocal = localRevision
       let loaded = try await store.load()
       guard sharedRevision == capturedShared, localRevision == capturedLocal else {
-        throw PinewindError.runtime(.state(.staleSnapshot))
+        throw StateFailure.staleSnapshot
       }
       apply(loaded)
 

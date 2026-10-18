@@ -77,12 +77,12 @@ public struct RepositoryRequest: Hashable, Sendable {
   public let revision: GitRevision
   let canonicalURL: URL
   var key: RepositoryKey { RepositoryKey(url: canonicalURL, revision: revision) }
-  public init(url: URL, revision: GitRevision = .defaultBranch) throws(Failure) {
+  public init(url: URL, revision: GitRevision = .defaultBranch) throws {
     let normalized = try SourceIdentity.normalize(url, preservingGitSuffix: true)
     guard !normalized.isFileURL else {
-      throw Failure.git(.unsupportedSourceURL(normalized))
+      throw GitFailure.unsupportedSourceURL(normalized)
     }
-    do { try revision.validate() } catch { throw Failure.declaration(error) }
+    try revision.validate()
     self.url = normalized
     self.canonicalURL = try SourceIdentity.normalize(normalized)
     self.revision = revision
@@ -114,25 +114,19 @@ public struct PackageRequest: Hashable, Sendable {
   public init(
     source: PackageSource, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter(), relativeTo: FilePath? = nil
-  ) throws(Failure) {
+  ) throws {
     if let recipe, recipe.contains("\0") || recipe.contains("\\") {
-      throw Failure.file(.notPortable(FilePath(recipe)))
+      throw FileSystemFailure.notPortable(FilePath(recipe))
     }
-    let recipePath: RelativePath
-    do {
-      recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
-    } catch { throw Failure.file(error) }
-    do { try filter.validate() } catch { throw Failure.declaration(error) }
+    let recipePath = try RelativePath(FilePath(recipe.map { $0 + ".recipe.yaml" } ?? "recipe.yaml"))
+    try filter.validate()
     switch source {
     case .git(let repository):
       self.url = repository.url
       self.source = source
     case .directory(let location):
-      let resolved: FileLocation
-      do { resolved = try location.resolved(relativeTo: relativeTo) } catch {
-        throw Failure.file(error)
-      }
-      do { self.url = try resolved.url } catch { throw Failure.file(error) }
+      let resolved = try location.resolved(relativeTo: relativeTo)
+      self.url = try resolved.url
       self.source = .directory(resolved)
     }
     self.recipe = recipe.map { _ in String(recipePath.string.dropLast(".recipe.yaml".count)) }
@@ -143,10 +137,10 @@ public struct PackageRequest: Hashable, Sendable {
   init(
     url: URL, revision: GitRevision? = nil, recipe: String? = nil, options: [String: String] = [:],
     filter: FileFilter = FileFilter()
-  ) throws(Failure) {
+  ) throws {
     if url.isFileURL {
       guard revision == nil else {
-        throw Failure.declaration(.revisionWithFileSource)
+        throw DeclarationFailure.revisionWithFileSource
       }
       try self.init(
         source: .directory(.fileURL(url)), recipe: recipe, options: options, filter: filter)
@@ -162,23 +156,32 @@ public struct ConfImport: Hashable, Sendable {
   public let source: String
   public let variables: [String: String]
   let localPath: RelativePath?
-  public init(source: String, variables: [String: String] = [:]) throws(Failure) {
+  public init(source: String, variables: [String: String] = [:]) throws {
     guard variables["root_dir"] == nil else {
-      throw Failure.declaration(.reservedVariable("root_dir"))
+      throw DeclarationFailure.reservedVariable("root_dir")
     }
     guard !source.isEmpty else {
-      throw Failure.declaration(.importSourceRequired)
+      throw DeclarationFailure.importSourceRequired
     }
     guard !source.contains("\0") else {
-      throw Failure.file(.notPortable(FilePath(source)))
+      throw FileSystemFailure.notPortable(FilePath(source))
     }
     if source.hasPrefix(":") || source.contains("://") {
       localPath = nil
     } else {
       guard !source.contains("\\") else {
-        throw Failure.file(.notPortable(FilePath(source)))
+        throw FileSystemFailure.notPortable(FilePath(source))
       }
-      do { localPath = try RelativePath(FilePath(source)) } catch { throw Failure.file(error) }
+      localPath = try RelativePath(FilePath(source))
+    }
+    if source.hasPrefix(":") {
+      _ = try BuiltinPackageLists.descriptors(for: source)
+    } else if source.contains("://") {
+      guard let url = URL(string: source), url.scheme?.lowercased() == "https",
+        url.host != nil, !url.lastPathComponent.isEmpty
+      else {
+        throw DeclarationFailure.invalidImportSource(source)
+      }
     }
     self.source = localPath?.string ?? source
     self.variables = variables
@@ -197,21 +200,20 @@ typealias Manifest = EvaluatedManifest
 public struct SourceIdentity: Hashable, Sendable {
   public let url: URL
   public let commit: CommitID
-  public init(url: URL, commit: CommitID) throws(Failure) {
+  public init(url: URL, commit: CommitID) throws {
     self.url = try Self.normalize(url, preservingGitSuffix: true)
     guard !url.isFileURL else {
-      throw Failure.git(.unsupportedSourceURL(url))
+      throw GitFailure.unsupportedSourceURL(url)
     }
     self.commit = commit
   }
-  init(url: URL, commit: String) throws(Failure) {
-    let id: CommitID
-    do { id = try CommitID(commit) } catch { throw Failure.declaration(error) }
+  init(url: URL, commit: String) throws {
+    let id = try CommitID(commit)
     try self.init(url: url, commit: id)
   }
-  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws(Failure) -> URL {
+  static func normalize(_ url: URL, preservingGitSuffix: Bool = false) throws -> URL {
     if url.isFileURL {
-      do { _ = try NativePath.from(url) } catch { throw Failure.file(error) }
+      _ = try NativePath.from(url)
       // File URL spelling carries authority and provider information. Filesystem
       // identity checks use NativePath/SafePath rather than URL normalization.
       return url
@@ -219,7 +221,7 @@ public struct SourceIdentity: Hashable, Sendable {
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
       parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
       parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil
-    else { throw Failure.declaration(.unsupportedSourceURL(url)) }
+    else { throw DeclarationFailure.unsupportedSourceURL(url) }
     parts.scheme = "https"
     parts.host = host.lowercased()
     if parts.port == 443 { parts.port = nil }
@@ -229,7 +231,7 @@ public struct SourceIdentity: Hashable, Sendable {
     }
     if host.lowercased() == "github.com" { parts.path = parts.path.lowercased() }
     guard let normalized = parts.url else {
-      throw Failure.git(.malformedRepositoryURL(url))
+      throw GitFailure.malformedRepositoryURL(url)
     }
     return normalized
   }
