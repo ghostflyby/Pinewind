@@ -94,7 +94,7 @@ jobs:
           path: .build
           key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
-        run: swift test --no-parallel
+        run: swift test --no-parallel --verbose
       - name: Preserve Windows build cache after failure
         if: failure() && steps.windows-swiftpm-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6

@@ -67,6 +67,22 @@
 
   @Suite("Command-line consumer", .timeLimit(.minutes(1)))
   struct CLITests {
+    @Test func addReportsInvalidCommitSourceAndFilterTogether() throws {
+      let f = try CommandFixture()
+      defer { f.remove() }
+      let result = try f.run(
+        [
+          "add", "http://example.com/repo", "--name", "bad", "--commit", "invalid",
+          "--include", "../escape",
+        ] + f.options)
+      #expect(result.status != 0)
+      for field in ["revision", "url", "include"] {
+        #expect(result.output.contains("bad." + field))
+      }
+      #expect(!FileManager.default.fileExists(atPath: f.manifest.path))
+      #expect(!FileManager.default.fileExists(atPath: f.lock.path))
+    }
+
     @Test func buildProtectsUnmanagedFilesAndReportsForcedReplacementAndRecordRecovery() throws {
       let f = try CommandFixture()
       defer { f.remove() }

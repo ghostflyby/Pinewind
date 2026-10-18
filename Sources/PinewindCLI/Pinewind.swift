@@ -83,8 +83,6 @@ struct Add: AsyncParsableCommand {
       selection = .tag(tag)
     } else if let ref {
       selection = .reference(ref)
-    } else if let commit {
-      selection = .commit(try CommitID(commit))
     } else {
       selection = nil
     }
@@ -100,11 +98,18 @@ struct Add: AsyncParsableCommand {
     let name = name
     let source = source
     let recipe = recipe
+    let commit = commit
     let filter = FileFilter(include: include.isEmpty ? nil : include, exclude: exclude)
     _ = try await workspace.update {
-      $0.addPackage(
-        name, source: source, revision: dependency.revision,
-        recipe: recipe, options: dependency.options, filter: filter, insertion: insertion)
+      if let commit {
+        $0.addPackage(
+          name, source: source, commit: commit,
+          recipe: recipe, options: dependency.options, filter: filter, insertion: insertion)
+      } else {
+        $0.addPackage(
+          name, source: source, revision: dependency.revision,
+          recipe: recipe, options: dependency.options, filter: filter, insertion: insertion)
+      }
     }
     print("Added and prepared \(name ?? source). Run 'pinewind build' to apply configuration.")
   }

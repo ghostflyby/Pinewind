@@ -143,7 +143,7 @@ let refreshed = try await workspace.refresh(packagesNamed: ["emoji"])
 let built = try await workspace.build(to: rimeDirectory)
 ```
 
-编辑器方法只修改临时候选,失败的修改不覆盖已有值并保留诊断。`addPackage` 可直接接受来源简写,或接受允许不完整的 `PackageFields`;无需先构造可能抛错的 PackageRequest。名称推导、来源简写和相对路径解析由 Core 负责,本地来源以工作区固定基准定位。此用户输入入口展开 `~`,底层路径类型不展开。
+编辑器方法只修改临时候选,失败的修改不覆盖已有值并保留诊断。`addPackage` 可直接接受来源简写,或接受允许不完整的 `PackageFields`;无需先构造可能抛错的 PackageRequest。表单中的原始 commit 文本可通过 `commit: String` 添加重载提交,无效 commit 与其他字段问题一起收集。名称推导、来源简写和相对路径解析由 Core 负责,本地来源以工作区固定基准定位。此用户输入入口展开 `~`,底层路径类型不展开。
 
 `validate(editing:)` 返回 `[ConfigurationDiagnostic]`,不联网、不提交本次变更。每条诊断包含原有 `PinewindError`、可选操作序号(从 0 开始)、包名和字段。字段用于表单定位,不伪造 YAML 行号。独立字段错误一次收集,前置错误导致无法判断的派生问题跳过。`update` 在联网解析前执行同一校验,有错误时整体抛出 `ConfigurationValidationError`。
 

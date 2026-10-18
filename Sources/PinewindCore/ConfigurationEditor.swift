@@ -151,6 +151,34 @@ public struct ConfigurationEditor: Sendable {
     }
   }
 
+  /// Accepts the raw commit text from a form without requiring a throwing
+  /// CommitID initializer before the rest of the candidate can be validated.
+  public mutating func addPackage(
+    _ name: String? = nil, source: String, commit: String,
+    recipe: String? = nil, options: [String: String] = [:], filter: FileFilter = FileFilter(),
+    insertion: PackageInsertion = .beforeUserFiles
+  ) {
+    let index = operationIndex
+    let revision: GitRevision?
+    let failure: PinewindError?
+    do {
+      revision = .commit(try CommitID(commit))
+      failure = nil
+    } catch {
+      revision = nil
+      failure = configurationError(error)
+    }
+    addPackage(
+      name, source: source, revision: revision, recipe: recipe,
+      options: options, filter: filter, insertion: insertion)
+    if let failure {
+      diagnostics.append(
+        ConfigurationDiagnostic(
+          operationIndex: index, packageName: name ?? origins.first { $0.value == index }?.key,
+          field: "revision", error: failure))
+    }
+  }
+
   public mutating func renamePackage(_ old: String, to new: String) {
     let before = diagnostics.count
     edit(package: old, field: "name") { draft in

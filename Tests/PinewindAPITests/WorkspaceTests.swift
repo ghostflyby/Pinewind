@@ -204,6 +204,36 @@ struct WorkspaceTests {
       ])
   }
 
+  @Test func rawCommitInputIsValidatedAlongsideTheOtherFormFields() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(firstID, files: ["default.yaml": "pinned"])
+    let workspace = try await f.workspace()
+    let candidate = try await workspace.configuration {
+      $0.addPackage(
+        "bad", source: "http://example.com/repo", commit: "invalid",
+        recipe: "../recipe", filter: FileFilter(include: ["../escape"]))
+    }
+    let diagnostics = candidate.validate()
+    #expect(diagnostics.count == 4)
+    #expect(Set(diagnostics.compactMap(\.field)) == ["url", "revision", "recipe", "include"])
+    #expect(diagnostics.allSatisfy { $0.operationIndex == 0 && $0.packageName == "bad" })
+    await #expect(throws: ConfigurationValidationError.self) {
+      _ = try await workspace.apply(candidate)
+    }
+    #expect(!exists(f.lock) && !exists(f.manifest))
+    let valid = try await workspace.configuration {
+      $0.addPackage(source: "team/repo", commit: firstID)
+    }
+    #expect(valid.validate().isEmpty)
+    #expect(valid.manifest.names["repo"]?.revision == .value(.commit(try CommitID(firstID))))
+    let applied = try await workspace.update {
+      $0.addPackage("pinned", source: endpoint.absoluteString, commit: firstID)
+    }
+    #expect(applied.inputs != nil)
+    #expect(applied.resolution.packages[0].commit.string == firstID)
+  }
+
   @Test func singleAndBatchUpdatesPrepareInputsWithoutPublishing() async throws {
     let f = try Fixture()
     defer { f.remove() }
