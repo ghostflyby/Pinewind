@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import Foundation
 import SystemPackage
 
 #if os(Windows)
@@ -14,6 +15,21 @@ import SystemPackage
 #endif
 
 extension FileDescriptor {
+  /// Flush file contents before publication metadata is committed.
+  func synchronize() throws {
+    #if os(Windows)
+      let native = ucrt._get_osfhandle(rawValue)
+      guard native != -1, let handle = UnsafeMutableRawPointer(bitPattern: native) else {
+        throw Errno.badFileDescriptor
+      }
+      guard FlushFileBuffers(handle) else {
+        throw NSError(domain: "NSWin32ErrorDomain", code: Int(GetLastError()))
+      }
+    #else
+      let status = pinewind_sync_file(rawValue)
+      guard status == 0 else { throw Errno(rawValue: status) }
+    #endif
+  }
   /// Opens a stable, regular lock file. Closing the descriptor releases its lock;
   /// the file itself is retained so every contender locks the same file identity.
   static func openLockFile(_ path: FilePath) throws(FileSystemFailure) -> Self {

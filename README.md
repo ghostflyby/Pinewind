@@ -1,8 +1,52 @@
 # 松风 / Pinewind
 
-Pinewind 是 Rime 包管理与配置组合的 Swift 库,提供 `PinewindCore` product。用户文件、共享声明、本地覆写、解析锁与受管缓存分别定位,按声明次序生成组合目录,供调用方交给输入法引擎部署。
+Pinewind 是 Rime 包管理与配置组合工具,提供 `pinewind` 命令和 `PinewindCore` Swift 库。安装准备依赖,构建按声明次序生成配置,输出到对应 Rime 实现的用户配置目录。
 
 支持 macOS 15 / iOS 16 及以上版本、Linux 和 Windows。需要 Swift 6.2 或更高版本;Windows 使用 Swift 6.3.1 或更高版本。
+
+## 命令行
+
+CLI 使用 swift-argument-parser,通过普通 `import PinewindCore` 消费公开 API。CLI 支持 macOS、Linux 和 Windows;库同时支持 iOS。
+
+```sh
+swift run pinewind --help
+swift run pinewind paths
+swift run pinewind add emoji
+swift run pinewind add owner/repository --branch main --name example
+swift run pinewind add ./local-package --name local
+swift run pinewind install
+swift run pinewind install --locked
+swift run pinewind update emoji
+swift run pinewind update
+swift run pinewind remove emoji
+swift run pinewind build --frontend squirrel
+```
+
+`add` 接受 HTTPS Git URL、`owner/repository`、Rime 包名(`emoji` 展开为 `rime/rime-emoji`)或本地目录。默认插入第一个 `self` 之前,没有 `self` 则追加;`--before NAME` / `--after NAME` 指定唯一位置。可以指定 `--branch`、`--tag`、`--ref` 或 `--commit`,以及 `--recipe`、重复的 `--option KEY=VALUE`、`--include`、`--exclude`。
+
+`add` 先解析,成功后保存声明和 lock,再准备文件。解析失败保留原声明和 lock;后续准备失败返回非零状态,保留已保存的声明和 lock,用 `install` 重试。`remove` 删除命名依赖的全部 order 引用及对应本地覆写,更新 lock,保留共享缓存。`install` 保留匹配的锁定版本;`--locked` 要求现有 lock 匹配,不改锁。只有 `update` 主动刷新浮动版本;指定名称只更新选中的远程命名依赖。
+
+`build` 完全离线,读取匹配 lock、缓存及实时本地来源。它先完成渲染,然后逐个更新生成文件,保留 Rime 目录本身、用户词库和其他运行文件。已不再生成的旧文件仅在内容仍匹配发布记录时删除;外部修改过的旧文件保留并报告。多文件发布中断后可重新 `build` 完成恢复。此命令生成配置,不触发 Rime 引擎重新部署。
+
+**首次构建不会静默覆盖已有个人配置。** 已存在但不受 Pinewind 管理的同名文件若与生成内容不同,`build` 会列出全部冲突并在写入任何生成文件之前失败。先将个人配置备份并整理到 `paths` 显示的个人来源目录;确认覆盖清单后才使用 `build --force`。与生成内容完全相同的文件可直接复用并纳入管理。`--force` 仅授权覆盖这些配置冲突,不允许写入词库或运行状态路径;实际覆盖与保留清单输出到 stderr。
+
+发布意图先同步落盘再修改输出。损坏的 pending 记录会被保守丢弃并发出警告,无法证明所有权的文件仍按未受管文件保护。已提交的发布记录损坏时停止构建:恢复可信备份,或将错误信息指出的记录移到别处重置所有权,再重新构建并审核冲突;这不会自动删除既有输出。
+
+Windows 的按文件发布要求输出末级是普通目录,拒绝 junction;可用 `--output` 指定实际目录。它与整目录发布共用入口锁,避免混用两种模式时写入即将淘汰的代次。
+
+CLI 不以当前目录作为项目根。默认位置如下:
+
+| 平台 | 配置目录 | 机器状态目录 | 缓存目录 |
+| --- | --- | --- | --- |
+| macOS | `~/Library/Application Support/Pinewind` | 配置目录下 `State` | `~/Library/Caches/Pinewind` |
+| Windows | `%APPDATA%\Pinewind` | `%LOCALAPPDATA%\Pinewind\State` | `%LOCALAPPDATA%\Pinewind\Cache` |
+| Linux | `$XDG_CONFIG_HOME/pinewind` | `$XDG_STATE_HOME/pinewind` | `$XDG_CACHE_HOME/pinewind` |
+
+Linux 的 XDG 基目录默认分别为 `~/.config`、`~/.local/state`、`~/.cache`,相对环境变量值被忽略。配置目录保存 `pinewind.yaml`、`pinewind.lock` 和个人来源 `user/`;机器状态目录保存 `pinewind.local.yaml`,其 `managed/` 子目录保存受管状态及发布记录。
+
+输出默认选择已存在的 Rime 用户目录。macOS 支持 Squirrel(`~/Library/Rime`)和 fcitx5;Windows 支持 Weasel(优先读取其注册表配置,否则 `%APPDATA%\Rime`);Linux 支持 fcitx5(`$XDG_DATA_HOME/fcitx5/rime`)、fcitx(`$XDG_CONFIG_HOME/fcitx/rime`)和 ibus(`$XDG_CONFIG_HOME/ibus/rime`)。发现多个目录时要求 `--frontend` 或 `--output`;没有现存目录时 macOS/Windows 使用默认前端,Linux 要求显式选择。
+
+`paths` 只显示位置,不创建目录。各命令支持 `--config-directory`、`--state-directory`、`--cache-directory`、`--user-files`;`build` / `paths` 支持 `--frontend` 与 `--output`。`--maximum-resource-bytes` 调整每个下载资源的上限,默认 64 MiB。显式相对路径以命令启动位置为基准。
 
 ## 接入
 
@@ -60,7 +104,7 @@ let result = try await workspace.compose(to: outputPath)
 
 `CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:只接受 `FilePath` 初始化,通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。这些路径从文件枚举到发布一直保留类型,不会在阶段间转回字符串重复校验。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
-Windows 的输出目录必须不存在、为空或为 Pinewind 管理的 junction。所有平台均要求所在文件系统支持对应的原子发布与锁操作;不支持时明确失败,保留旧输出。
+默认 `publication: .directory` 原子替换完整目录。该模式在 Windows 上要求输出目录不存在、为空或为 Pinewind 管理的 junction。向现存 Rime 用户目录发布时使用 `publication: .managedFiles()`,只修改生成路径,并通过 `preservedPaths` 报告保留的外部修改文件。未受管同名文件冲突报告为 `StateFailure.unmanagedOutputFiles`;明确授权时使用 `.managedFiles(overwriteUnmanaged: true)`,结果中的 `overwrittenUnmanagedPaths` 列出实际覆盖的路径,`warnings` 报告损坏 pending 的恢复。此模式逐文件原子更新,将发布意图和所有权记录保存在状态目录;中断后下一次构建恢复,不承诺多文件整体原子性。所有平台均要求所在文件系统支持对应的原子发布与锁操作。
 
 ## 清单与本地覆写
 
@@ -103,6 +147,10 @@ let receipt = try await session.save(.shared)
 
 `reload()` 拒绝丢弃未保存编辑;明确放弃使用 `discardChangesAndReload()`。保存保持 YAML 语义,不保留注释、引号和排版。两个文件分别保存,不构成跨文件同步事务。
 
+`workspace.resolve(editing:)` 在内存中编辑草稿,完整解析成功后才保存配置及 lock。它预检所有文件基线,逐个原子写入,最后提交 lock;中途 I/O 失败或进程中断可能留下需重新 resolve 的声明。返回结果可直接用于 `fetch`;准备失败不回滚声明。`ConfigurationDraft.addPackage` 默认插入第一个 `self` 前,支持 `PackageInsertion` 指定位置。草稿层的 `removePackage` 同时删除 order 引用和本地覆写;直接调用 `ManifestDocument.removePackage` 仍拒绝删除被引用的名称。
+
+工作区创建的草稿在 `redirectPackage` 中按工作区的 `relativeTo` 解析相对路径,保存、重载和 resolve 编辑使用同一基准;独立创建的 `ConfigurationDraft` 在初始化时捕获当前目录。
+
 工作区默认忽略未保存草稿。显式预览:
 
 ```swift
@@ -123,6 +171,7 @@ let result = try await workspace.compose(plan, to: previewOutputPath)
 let updated = try await workspace.update(.packages(Set(resolution.packages.map(\.id))))
 let resources = Set(updated.packages.flatMap(\.resourceIDs))
 let refreshed = try await workspace.update(.resources(resources))
+let named = try await workspace.update(packagesNamed: ["emoji"])
 ```
 
 过期或不属于当前锁的标识会被拒绝。明确 commit 不随 update 前进。recipe 下载资源以 URL、相对路径和实际字节的 SHA-256 固定;缓存丢失后的下载若与固定校验值不同会失败,不会接受新内容或自动改锁。

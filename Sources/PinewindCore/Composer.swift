@@ -17,6 +17,46 @@ public struct CompositionResult: Sendable {
   public let changedPaths: [RelativePath]
   public let removedPaths: [RelativePath]
   public let reusedPaths: [RelativePath]
+  /// Formerly managed files kept because they were modified outside Pinewind.
+  public let preservedPaths: [RelativePath]
+  public let overwrittenUnmanagedPaths: [RelativePath]
+  public let warnings: [PublicationWarning]
+
+  init(
+    directory: FilePath, paths: [RelativePath], changedPaths: [RelativePath],
+    removedPaths: [RelativePath], reusedPaths: [RelativePath], preservedPaths: [RelativePath] = [],
+    overwrittenUnmanagedPaths: [RelativePath] = [], warnings: [PublicationWarning] = []
+  ) {
+    self.directory = directory
+    self.paths = paths
+    self.changedPaths = changedPaths
+    self.removedPaths = removedPaths
+    self.reusedPaths = reusedPaths
+    self.preservedPaths = preservedPaths
+    self.overwrittenUnmanagedPaths = overwrittenUnmanagedPaths
+    self.warnings = warnings
+  }
+}
+
+public enum PublicationWarning: Sendable, CustomStringConvertible {
+  case discardedPendingRecord(FilePath)
+  public var description: String {
+    switch self {
+    case .discardedPendingRecord(let path):
+      return
+        "Discarded corrupt pending publication record: \(path.string). Unproven files remain protected as unmanaged."
+    }
+  }
+}
+
+public enum PublicationMode: Sendable {
+  /// Atomically replace a complete directory generation.
+  case directory
+  /// Update only generated files, preserving unrelated input-method data.
+  /// Individual files are atomic; an interrupted multi-file update is recovered
+  /// by a subsequent build using the persisted publication intent.
+  /// Existing unmanaged files with different bytes require explicit approval.
+  case managedFiles(overwriteUnmanaged: Bool = false)
 }
 
 /// Renders a candidate generation and atomically publishes it as the active

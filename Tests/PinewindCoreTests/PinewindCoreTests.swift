@@ -526,6 +526,12 @@ struct CompositionTests {
       _ = try await Composer().compose(plan, inputRoot: f.input, outputRoot: f.output)
       let active = try #require(try WindowsDirectoryPublisher.currentTarget(f.output))
       let alias = f.root.appendingPathComponent("parent-alias")
+      let logical = try WindowsDirectoryPublisher.publicationPath(NativePath.from(f.output))
+      #expect(logical.lastComponent?.string == f.output.lastPathComponent)
+      #expect(
+        try SafePath.canonical(logical.removingLastComponent())
+          == SafePath.canonical(NativePath.from(f.root)))
+      #expect(try WindowsDirectoryPublisher.currentTarget(logical) == active)
       try FileManager.default.createDirectory(at: alias, withIntermediateDirectories: false)
       try WindowsDirectoryPublisher.redirect(alias, to: f.root)
       defer { try? FileManager.default.removeItem(at: alias) }

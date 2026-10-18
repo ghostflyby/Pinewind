@@ -86,7 +86,7 @@ public struct Resolution: Sendable {
     declarations: Manifest, expanded: Manifest, packages: [LockedPackage],
     imports: [ResolvedImport] = [],
     snapshot: ConfigurationSnapshot, preview: Bool, lockBytes: Data? = nil
-  ) throws {
+  ) throws(LockFailure) {
     guard
       !expanded.entries.contains(where: {
         if case .importConf = $0 { return true }

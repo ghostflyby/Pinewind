@@ -16,4 +16,10 @@ int pinewind_exchange_directories(const char *candidate, const char *output);
 // Nonblocking flock for an already-open descriptor. Returns zero or native errno.
 int pinewind_try_lock_exclusive(int descriptor);
 
+// Atomic file replacement and non-recursive removal. Returns zero or errno.
+int pinewind_replace_file(const char *source, const char *destination);
+int pinewind_remove_file(const char *path);
+// Flush an open descriptor to storage. Returns zero or errno.
+int pinewind_sync_file(int descriptor);
+
 #endif
