@@ -71,6 +71,10 @@ final class YAMLLinter {
     diagnostics.append(document)
   }
   private func record<E: Error>(_ failure: E, at context: DocumentContext?) throws {
+    if let failure = failure as? PinewindError {
+      try record(failure)
+      return
+    }
     // Imported Plum descriptors can select a recipe without a YAML selector.
     // Such failures use the operation channel, like other unpositioned I/O errors.
     guard let context else { throw failure }
@@ -328,8 +332,14 @@ final class YAMLLinter {
     let shared = try document(bytes[0], path: NativePath.from(urls[0]), local: false)
     let local =
       try urls.count > 2 ? document(bytes[2], path: NativePath.from(urls[2]), local: true) : nil
-    var all = try requests(shared, local: nil)
-    if let local { all += try requests(shared, local: local) }
+    let declared = try requests(shared, local: nil)
+    var all = declared
+    if let local {
+      // Shared Git requests still participate in lock resolution. Local file
+      // evidence belongs to the effective configuration on this machine.
+      all = declared.filter { !$0.value.url.isFileURL }
+      all += try requests(shared, local: local)
+    }
     // A lock is optional evidence, not a requirement to install before linting.
     // Invalid/stale binary records cannot establish a YAML verdict.
     let locked = bytes[1].flatMap { try? ResolutionCodec.reusable($0) }

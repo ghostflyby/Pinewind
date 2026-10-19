@@ -184,7 +184,7 @@ pinewind lint
 pinewind lint --format json
 ```
 
-lint 始终检查共享 YAML 与本地覆写的结构和内部一致性,尽量收集具有真实原文位置的配置问题。显式本地来源不存在或不是目录时,诊断指向 URL 节点。若本机已有 lock、远端源码或缓存,也检查可用的 recipe 和校验和匹配的 YAML 资源;缺少这些可选信息不报错,不联网补全,也不执行 conf 或构建。
+lint 始终检查共享 YAML 与本地覆写的结构和内部一致性,尽量收集具有真实原文位置的配置问题。本地路径及其 recipe 的文件检查以最终生效配置为准;被覆写的共享本地值不读取。生效本地来源不存在或不是目录时,诊断指向 URL 节点。共享远端依赖作为 lock 输入,其已有源码和资源也会检查。缺少 lock、远端源码或缓存不报错,不联网补全,也不执行 conf 或构建。
 
 Core 的 `workspace.lint()` 返回 LintReport,CLI/GUI 共用检查规则。文本复用错误的 description;JSON 输出 version 和原结构的 diagnostics。有诊断或执行失败时退出非零;不可编码的诊断导致明确的输出失败,不会丢项或留下半份 JSON。运行态故障通过正常错误通道报告,不伪造 YAML 位置。
 

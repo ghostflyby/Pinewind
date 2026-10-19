@@ -356,17 +356,98 @@ struct WorkspaceTests {
       })
     #expect(report.diagnostics.last?.underlyingError as? FileSystemFailure == .notADirectory(file))
     _ = try JSONEncoder().encode(report)
-    // Named definitions and both override layers retain the URL's own origin.
+    // Only the effective local URL supplies filesystem evidence; keep its origin.
     try write(
       f.manifest,
-      "version: 1\nnames:\n  pkg: {url: \(url(missing).absoluteString)}\norder:\n  - pkg\n  - {name: pkg, url: \(url(file).absoluteString)}\n"
+      "version: 1\nnames:\n  pkg: {url: \(url(missing).absoluteString)}\norder: [pkg]\n"
     )
-    try write(f.overrides, "version: 1\nnames:\n  pkg: {url: \(url(missing).absoluteString)}\n")
+    try write(f.overrides, "version: 1\nnames:\n  pkg: {url: \(url(file).absoluteString)}\n")
     let layered = try await workspace.lint()
-    #expect(layered.diagnostics.count == 3)
-    #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
-    #expect(layered.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
+    #expect(layered.diagnostics.count == 1)
+    #expect(layered.diagnostics.first?.context.path == f.overrides)
+    #expect(
+      layered.diagnostics.first?.underlyingError as? FileSystemFailure == .notADirectory(file))
     #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+  }
+
+  @Test func lintUsesEffectiveLocalFilesWhileValidatingBothAuthoredDocuments() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let missing = url(f.root.appending("other machine")).absoluteString
+    let local = url(f.input).absoluteString
+    try write(
+      f.manifest,
+      "version: 1\nnames: {pkg: {url: \(missing), recipe: shared}}\norder: [pkg]\n")
+    try write(
+      f.overrides,
+      "version: 1\nnames: {pkg: {url: \(local), recipe: null}}\n")
+    let workspace = try await f.workspace()
+    #expect(try await workspace.lint().isValid)
+    _ = try await workspace.install()
+    // Keep the shared source but clear its missing recipe on this machine.
+    try write(
+      f.manifest,
+      "version: 1\nnames: {pkg: {url: \(local), recipe: shared}}\norder: [pkg]\n")
+    try write(f.overrides, "version: 1\nnames: {pkg: {recipe: null}}\n")
+    #expect(try await workspace.lint().isValid)
+    _ = try await workspace.install()
+    // An entry's null also clears a recipe selected by the local document.
+    try write(f.overrides, "version: 1\nnames: {pkg: {recipe: machine}}\n")
+    try write(
+      f.manifest,
+      "version: 1\nnames: {pkg: {url: \(local), recipe: shared}}\norder: [{name: pkg, recipe: null}]\n"
+    )
+    #expect(try await workspace.lint().isValid)
+    _ = try await workspace.install()
+    // Pure declaration errors still belong to the authored shared document,
+    // even when an override replaces the faulty field in the effective value.
+    try write(
+      f.manifest,
+      "version: 1\nnames: {pkg: {url: \(local), include: [../invalid]}}\norder: [pkg]\n")
+    try write(f.overrides, "version: 1\nnames: {pkg: {include: []}}\n")
+    let invalid = try await workspace.lint()
+    #expect(invalid.diagnostics.count == 1)
+    #expect(invalid.diagnostics.first?.context.path == f.manifest)
+    guard case .invalidPattern = invalid.diagnostics.first?.underlyingError as? DeclarationFailure
+    else {
+      Issue.record("expected the shared glob diagnostic")
+      return
+    }
+    _ = try JSONEncoder().encode(invalid)
+    #expect(await f.repositories.counts().0 == 0)
+    #expect(await f.downloads.count() == 0)
+  }
+
+  @Test func lintRetainsSharedRemoteRecipeEvidenceAfterALocalSourceOverride() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try await f.repositories.install(
+      firstID, files: ["shared.recipe.yaml": "recipe: {Rx: shared}\ninstall_files: []\n"])
+    try f.remote(recipe: "shared")
+    let workspace = try await f.workspace()
+    _ = try await workspace.resolve()
+    let calls = await f.repositories.counts()
+    let cache = url(f.locations.cacheRoot.appending("sources"))
+    let key = try #require(
+      FileManager.default.contentsOfDirectory(at: cache, includingPropertiesForKeys: nil).first)
+    try FileManager.default.removeItem(
+      at: key.appendingPathComponent(firstID + "/shared.recipe.yaml"))
+    try write(
+      f.overrides,
+      "version: 1\nnames: {package: {url: \(url(f.input).absoluteString), recipe: null}}\n")
+    let report = try await workspace.lint()
+    #expect(report.diagnostics.count == 1)
+    #expect(report.diagnostics.first?.context.path == f.manifest)
+    #expect(report.diagnostics.first?.context.placement?.line == 6)
+    guard case .notFound(let path) = report.diagnostics.first?.underlyingError as? FileSystemFailure
+    else {
+      Issue.record("expected the shared repository recipe diagnostic")
+      return
+    }
+    #expect(path.lastComponent?.string == "shared.recipe.yaml")
+    #expect(await f.repositories.counts().0 == calls.0)
+    #expect(await f.repositories.counts().1 == calls.1)
     #expect(await f.downloads.count() == 0)
   }
 
@@ -428,20 +509,20 @@ struct WorkspaceTests {
       #expect(try read(path.removingLastComponent().appending("default.yaml")) == "schema: {}\n")
     }
     _ = try JSONEncoder().encode(report)
-    // Check shared, local, and entry-level recipe origins independently.
+    // Check the effective recipe's local and entry-level origins.
     try write(
       f.manifest,
       "version: 1\nnames:\n  pkg: {url: \(source), recipe: shared}\norder:\n  - pkg\n  - {name: pkg, recipe: entry}\n"
     )
     try write(f.overrides, "version: 1\nnames:\n  pkg: {recipe: local}\n")
     let layered = try await workspace.lint()
-    #expect(layered.diagnostics.count == 3)
+    #expect(layered.diagnostics.count == 2)
     #expect(layered.diagnostics.filter { $0.context.path == f.overrides }.count == 1)
-    #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 2)
+    #expect(layered.diagnostics.filter { $0.context.path == f.manifest }.count == 1)
     // Null clears an inherited explicit selector; unavailable remote sources remain optional.
     try write(f.overrides, "version: 1\nnames:\n  pkg: {recipe: null}\n")
     let reset = try await workspace.lint()
-    #expect(reset.diagnostics.count == 2)
+    #expect(reset.diagnostics.count == 1)
     #expect(reset.diagnostics.allSatisfy { $0.context.path == f.manifest })
     try write(
       f.manifest,
