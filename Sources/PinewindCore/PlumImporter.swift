@@ -38,10 +38,9 @@ struct PlumImporter: Sendable {
     // Remote conf imports are dispatched by the acquisition layer; the local
     // evaluator must never see them.
     guard let path = request.localPath else {
-      throw Failure.defect(
-        .invariant(
-          detail: "remote conf requires the HTTP resource preparation layer",
-          origin: Origin()))
+      throw Defect.invariant(
+        detail: "remote conf requires the HTTP resource preparation layer",
+        origin: Origin())
     }
     let file = try SafePath.file(path, in: inputRoot)
     return try await evaluate(
@@ -94,30 +93,29 @@ struct PlumImporter: Sendable {
           throw PinewindError.incident(
             DocumentError(
               context: context,
-              failure: .interpreter(
-                .evaluationFailed(
-                  detail: message.trimmingCharacters(in: .whitespacesAndNewlines)))))
+              failure: InterpreterFailure.evaluationFailed(
+                detail: message.trimmingCharacters(in: .whitespacesAndNewlines))))
         }
         guard shell.environment.associativeArrays["package_list"] == nil else {
           throw PinewindError.configuration(
             DocumentError(
               context: context,
-              failure: .interpreter(
-                .evaluationFailed(detail: "package_list must be an indexed array"))))
+              failure: InterpreterFailure.evaluationFailed(
+                detail: "package_list must be an indexed array")))
         }
         if shell.environment.variables["package_list"] != nil {
           throw PinewindError.configuration(
             DocumentError(
               context: context,
-              failure: .interpreter(
-                .evaluationFailed(detail: "package_list must be an indexed array"))))
+              failure: InterpreterFailure.evaluationFailed(
+                detail: "package_list must be an indexed array")))
         }
         return shell.environment.arrays["package_list"]?.elementsInOrder ?? []
       }
       group.addTask {
         try await Task.sleep(for: timeout)
         throw PinewindError.incident(
-          DocumentError(context: context, failure: .interpreter(.timedOut)))
+          DocumentError(context: context, failure: InterpreterFailure.timedOut))
       }
       defer { group.cancelAll() }
       guard let first = try await group.next() else {
@@ -131,7 +129,7 @@ struct PlumImporter: Sendable {
     let sections = descriptor.split(separator: ":", omittingEmptySubsequences: false).map(
       String.init)
     guard !sections[0].isEmpty else {
-      throw Failure.interpreter(.evaluationFailed(detail: "empty plum package descriptor"))
+      throw InterpreterFailure.evaluationFailed(detail: "empty plum package descriptor")
     }
     let source = sections[0].split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
       .map(String.init)
@@ -140,21 +138,21 @@ struct PlumImporter: Sendable {
     guard segments.count == 1 || segments.count == 2, segments.allSatisfy({ !$0.isEmpty }),
       source.count == 1 || !source[1].isEmpty
     else {
-      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum package descriptor"))
+      throw InterpreterFailure.evaluationFailed(detail: "invalid plum package descriptor")
     }
     let owner = segments.count == 2 ? segments[0] : "rime"
     let repository =
       segments.count == 2
       ? segments[1] : (segments[0].hasPrefix("rime-") ? segments[0] : "rime-" + segments[0])
     guard let url = URL(string: "https://github.com/\(owner)/\(repository)") else {
-      throw Failure.interpreter(.evaluationFailed(detail: "invalid plum repository"))
+      throw InterpreterFailure.evaluationFailed(detail: "invalid plum repository")
     }
     var options: [String: String] = [:]
     for token in sections.dropFirst(2).flatMap({ $0.split(separator: ",").map(String.init) }) {
       let pair = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
       guard pair.count == 2, !pair[0].isEmpty, options[String(pair[0])] == nil else {
-        throw Failure.interpreter(
-          .evaluationFailed(detail: "plum options must be unique key=value literals"))
+        throw InterpreterFailure.evaluationFailed(
+          detail: "plum options must be unique key=value literals")
       }
       options[String(pair[0])] = String(pair[1])
     }

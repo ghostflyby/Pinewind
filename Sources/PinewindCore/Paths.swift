@@ -8,7 +8,7 @@ import Foundation
 import SystemPackage
 
 /// A normalized relative resource or output path backed by the host's FilePath.
-public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConvertible {
+public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConvertible, Codable {
   public let filePath: FilePath
 
   public init(_ path: FilePath) throws(FileSystemFailure) {
@@ -22,6 +22,19 @@ public struct RelativePath: Hashable, Sendable, Comparable, CustomStringConverti
       normalized.components.allSatisfy({ $0.kind == .regular })
     else { throw FileSystemFailure.unsafeRelative(path) }
     filePath = normalized
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    let value = try container.decode(String.self)
+    do { try self.init(FilePath(value)) } catch {
+      throw DecodingError.dataCorruptedError(
+        in: container, debugDescription: String(describing: error))
+    }
+  }
+  public func encode(to encoder: any Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(string)
   }
 
   /// Platform-independent spelling used in documents and inspection results.

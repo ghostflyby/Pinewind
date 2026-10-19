@@ -32,18 +32,27 @@ struct Recipe {
         throw PinewindError.configuration(
           DocumentError(
             context: DocumentContext(path: file, url: request.url),
-            failure: .file(.notFound(file))))
+            failure: FileSystemFailure.notFound(file)))
       }
       return nil
     }
     let bytes = try read(file)
-    let reader = YAMLReader(source: file.string, text: String(data: bytes, encoding: .utf8))
+    var reader = YAMLReader(source: file.string, text: String(data: bytes, encoding: .utf8))
     guard let text = reader.text else {
-      throw reader.fail(.file(.undecodableText(file)))
+      throw reader.fail(FileSystemFailure.undecodableText(file))
     }
+    let document = try reader.document(text)
+    reader.anchor = document
     let root = try reader.mapping(
-      reader.document(text),
+      document,
       allowed: ["recipe", "download_files", "install_files", "patch_files"])
+    return try decode(request: request, file: file, reader: reader, root: root)
+  }
+
+  static func decode(
+    request: PackageRequest, file: FilePath, reader: YAMLReader,
+    root: [String: Node]
+  ) throws -> Recipe {
     let info = try root["recipe"].map { try reader.mapping($0) } ?? [:]
     if let explicit = request.recipe {
       guard let value = info["Rx"], try reader.string(value) == explicit else {
@@ -75,6 +84,14 @@ struct Recipe {
       }
     }
     let patterns = try root["install_files"].map(list) ?? []
+    for (index, pattern) in patterns.enumerated() {
+      do { _ = try sourcePattern(pattern) } catch {
+        let anchor =
+          root["install_files"]?.sequence.flatMap { $0.indices.contains(index) ? $0[index] : nil }
+          ?? root["install_files"]
+        throw ErrorBoundary.attribute(error, to: reader.context(at: anchor), as: .configuration)
+      }
+    }
     let downloads = try root["download_files"].map(list) ?? []
     let resources = try downloads.map { text -> Download in
       let parts = text.components(separatedBy: "::")
@@ -117,7 +134,7 @@ struct Recipe {
               throw ErrorBoundary.attribute(error, to: reader.context(at: key), as: .configuration)
             }
             guard patchTargets.insert(target).inserted else {
-              throw reader.fail(.declaration(.duplicateTarget(target.string)), at: body)
+              throw reader.fail(DeclarationFailure.duplicateTarget(target.string), at: body)
             }
             guard body.sequence != nil else {
               throw reader.error("patch body must be a YAML sequence", at: body)
@@ -137,7 +154,7 @@ struct Recipe {
             } catch {
               // Expanded YAML has generated positions; point at the authored template instead.
               if let error = error as? PinewindError, case .configuration(let document) = error {
-                throw reader.fail(document.failure, at: body)
+                throw reader.fail(document.underlyingError, at: body)
               }
               throw error
             }
@@ -149,11 +166,27 @@ struct Recipe {
       } ?? []
     return Recipe(patterns: patterns, patches: patches, downloads: resources)
   }
+  static func sourcePattern(_ value: String) throws(DeclarationFailure) -> (
+    package: String?, glob: String
+  ) {
+    if value.hasPrefix("../") {
+      let parts = value.split(separator: "/", maxSplits: 2).map(String.init)
+      guard parts.count == 3, parts[0] == ".." else {
+        throw .invalidPattern(
+          pattern: value, detail: "cross-package pattern must be ../<package>/<pattern>")
+      }
+      _ = try Glob.compile(parts[2])
+      return (parts[1], parts[2])
+    }
+    _ = try Glob.compile(value)
+    return (nil, value)
+  }
+
 }
 
 enum Template {
   static func expand(_ text: String, options: [String: String], declared: Set<String>)
-    throws(Failure)
+    throws
     -> String
   {
     let expression: NSRegularExpression
@@ -161,8 +194,7 @@ enum Template {
       expression = try NSRegularExpression(
         pattern: #"\$\{([A-Za-z_][A-Za-z_0-9]*)(?::-(.*?))?\}|\$([A-Za-z_][A-Za-z_0-9]*)"#)
     } catch {
-      throw Failure.defect(
-        .invariant(detail: "invalid template replacement range", origin: Origin()))
+      throw Defect.invariant(detail: "invalid template replacement range", origin: Origin())
     }
     var result = text
     for match in expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
@@ -173,7 +205,7 @@ enum Template {
       }
       let key = capture(1) ?? capture(3) ?? ""
       guard declared.contains(key) else {
-        throw Failure.declaration(.undeclaredOption(key))
+        throw DeclarationFailure.undeclaredOption(key)
       }
       let fallback = capture(2)
       let value: String
@@ -182,11 +214,10 @@ enum Template {
       } else if let fallback {
         value = fallback
       } else {
-        throw Failure.declaration(.optionValueMissing(key))
+        throw DeclarationFailure.optionValueMissing(key)
       }
       guard let range = Range(match.range, in: result) else {
-        throw Failure.defect(
-          .invariant(detail: "invalid template replacement range", origin: Origin()))
+        throw Defect.invariant(detail: "invalid template replacement range", origin: Origin())
       }
       // Literal replacement: substituted values are never reparsed as shell code.
       result.replaceSubrange(range, with: value)

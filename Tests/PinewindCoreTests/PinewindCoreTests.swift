@@ -27,7 +27,7 @@ private struct Fixture {
     do {
       if let name {
         guard let fixtures = Bundle.module.url(forResource: "Fixtures", withExtension: nil) else {
-          throw PinewindError.runtime(.file(.notFound(FilePath("Fixtures"))))
+          throw FileSystemFailure.notFound(FilePath("Fixtures"))
         }
         let source = fixtures.appendingPathComponent(name)
         for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
@@ -66,7 +66,7 @@ private struct Fixture {
 struct ConfigurationTests {
   @Test func missingPackageDefinitionCannotBeEvaluated() throws {
     let document = try ManifestDocument.parse("version: 1\norder: [missing]")
-    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
+    #expect(throws: DeclarationFailure.self) { _ = try document.evaluate() }
   }
 
   @Test func mergesFieldsAndClearsWithoutDeepMergingOptions() throws {
@@ -148,7 +148,7 @@ struct ConfigurationTests {
     let f = try Fixture()
     defer { f.remove() }
     let value = key == "ref" ? "master" : String(repeating: "a", count: 40)
-    #expect(throws: Failure.self) {
+    #expect(throws: DeclarationFailure.self) {
       try PackageRequest(
         url: f.a, revision: key == "ref" ? .reference(value) : .commit(CommitID(value)))
     }
@@ -173,7 +173,11 @@ struct ConfigurationTests {
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString), revision: {\(key): \(value)}}}\norder: [dev]",
       "version: 1\nnames: {dev: {url: \(f.a.absoluteString)}}\norder: [{name: dev, revision: {\(key): \(value)}}]",
     ] {
-      #expect(throws: PinewindError.self) { try ManifestDocument.parse(yaml).evaluate() }
+      #expect { try ManifestDocument.parse(yaml).evaluate() } throws: { error in
+        if let direct = error as? DeclarationFailure { return direct == .revisionWithFileSource }
+        guard case .configuration(let document) = error as? PinewindError else { return false }
+        return document.underlyingError as? DeclarationFailure == .revisionWithFileSource
+      }
     }
     #expect(throws: PinewindError.self) {
       try ManifestDocument.parse(remote).evaluate(
@@ -207,7 +211,7 @@ struct ConfigurationTests {
 
 @Suite("Pinewind composition")
 struct CompositionTests {
-  @Test func plansFreezeFilesAndRecipesAndReleaseDiskSnapshots() async throws {
+  @Test func plansFreezeFilesAndRecipesAndReleaseDiskSnapshots() throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("words.txt", "before", in: f.a)
@@ -215,30 +219,37 @@ struct CompositionTests {
       "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: before}]}",
       in: f.a)
     let entries: [ManifestEntry] = [.package(try f.request(f.a)), .package(try f.request(f.a))]
-    var plan: CompositionPlan? = try f.plan(entries)
-    let operations = try #require(plan?.files[RelativePath("words.txt")])
-    guard case .write(let frozen) = operations[0].action,
-      case .write(let repeated) = operations[1].action
-    else {
-      Issue.record("expected frozen file references")
-      return
-    }
-    #expect(frozen == repeated)
-    #expect(operations[0].source == f.a.appendingPathComponent("words.txt"))
-    // Mutate the original inode: an unsafe hard-link snapshot would also change.
-    let handle = try FileHandle(forWritingTo: f.a.appendingPathComponent("words.txt"))
-    try handle.write(contentsOf: Data("after!".utf8))
-    try handle.close()
-    try f.write(
-      "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: after}]}",
-      in: f.a)
     let composer = Composer()
-    _ = try await composer.compose(try #require(plan), inputRoot: f.input, outputRoot: f.output)
-    #expect(try f.read("words.txt") == "before")
-    #expect(try f.read("custom.yaml").contains("value: before"))
-    plan = nil
+    func composeFrozenPlan() throws -> FilePath? {
+      let plan = try f.plan(entries)
+      let operations = try #require(plan.files[RelativePath("words.txt")])
+      guard case .write(let frozen) = operations[0].action,
+        case .write(let repeated) = operations[1].action
+      else {
+        Issue.record("expected frozen file references")
+        return nil
+      }
+      #expect(frozen == repeated)
+      #expect(operations[0].source == f.a.appendingPathComponent("words.txt"))
+      // Mutate the original inode: an unsafe hard-link snapshot would also change.
+      let handle = try FileHandle(forWritingTo: f.a.appendingPathComponent("words.txt"))
+      try handle.write(contentsOf: Data("after!".utf8))
+      try handle.close()
+      try f.write(
+        "recipe.yaml", "install_files: [words.txt]\npatch_files: {custom.yaml: [{value: after}]}",
+        in: f.a)
+      _ = try composer.compose(plan, inputRoot: native(f.input), outputRoot: native(f.output))
+      #expect(try f.read("words.txt") == "before")
+      #expect(try f.read("custom.yaml").contains("value: before"))
+      return frozen
+    }
+    // Use the synchronous core entry point: the async fixture adapter's queue
+    // closure can retain the plan after resuming its caller. End all plan copies'
+    // scope before checking last-owner cleanup.
+    let frozen = try #require(try composeFrozenPlan())
     #expect(!FileManager.default.fileExists(atPath: frozen.removingLastComponent().string))
-    _ = try await composer.compose(f.plan(entries), inputRoot: f.input, outputRoot: f.output)
+    _ = try composer.compose(
+      f.plan(entries), inputRoot: native(f.input), outputRoot: native(f.output))
     #expect(try f.read("words.txt") == "after!")
     #expect(try f.read("custom.yaml").contains("value: after"))
   }
@@ -302,7 +313,7 @@ struct CompositionTests {
         try Template.expand("${value:-default}", options: options, declared: ["value"]) == "default"
       )
     }
-    #expect(throws: Failure.declaration(.optionValueMissing("value"))) {
+    #expect(throws: DeclarationFailure.optionValueMissing("value")) {
       try Template.expand("${value}", options: [:], declared: ["value"])
     }
   }
@@ -606,7 +617,7 @@ struct CompositionTests {
     let old = try f.read("luna_pinyin.custom.yaml")
     try f.write("luna_pinyin.custom.yaml", "__patch: wrong", in: f.input)
     try f.write("recipe.yaml", "patch_files:\n  luna_pinyin.custom.yaml:\n    - new: true", in: f.a)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await composer.compose(
         f.plan([.userFiles(FileFilter()), .package(f.request(f.a))]), inputRoot: f.input,
         outputRoot: f.output)
@@ -731,9 +742,8 @@ struct CompositionTests {
     } throws: { error in
       if error is FileSystemFailure || error is DeclarationFailure { return true }
       switch error as? PinewindError {
-      case .runtime(.file): return true
       case .configuration(let document):
-        if case .file = document.failure { return true }
+        if document.underlyingError is FileSystemFailure { return true }
         return false
       default: return false
       }
@@ -753,9 +763,9 @@ struct CompositionTests {
         request: f.request(f.a), directory: native(f.a), read: { try Data(contentsOf: $0) })
     } throws: { error in
       guard case .configuration(let document) = error as? PinewindError else { return false }
-      switch document.failure {
-      case .declaration(.duplicateTarget): return true
-      case .declaration(.syntaxError(let detail)): return detail.contains("targets must be unique")
+      switch document.underlyingError as? DeclarationFailure {
+      case .duplicateTarget: return true
+      case .syntaxError(let detail): return detail.contains("targets must be unique")
       default: return false
       }
     }
@@ -801,7 +811,7 @@ struct ConfTests {
 
   @Test(arguments: ["u/", "/repo", "u//repo", "/", "repo@", "@branch"])
   func descriptorsRejectEmptySourceSegments(_ descriptor: String) {
-    #expect(throws: Failure.self) { try PlumImporter.package(descriptor) }
+    #expect(throws: InterpreterFailure.self) { try PlumImporter.package(descriptor) }
   }
 
   @Test(.timeLimit(.minutes(1))) func longLoopsTimeOutAndCancelInterpreter() async throws {
@@ -817,7 +827,7 @@ struct ConfTests {
         Issue.record("\(error)")
         return
       }
-      guard case .interpreter(.timedOut) = document.failure else {
+      guard case .timedOut = document.underlyingError as? InterpreterFailure else {
         Issue.record("\(error)")
         return
       }
@@ -873,7 +883,7 @@ struct ConfTests {
       ])
     #expect(extra.count == 14)
     #expect(all == preset + extra)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: InterpreterFailure.self) {
       try await importer.evaluate(ConfImport(source: ":unknown"), inputRoot: f.input)
     }
     let request = try PlumImporter.package("emoji@master:customize:schema=terra_pinyin")
@@ -891,7 +901,8 @@ struct ConfTests {
       try await importer.evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
-      guard case .interpreter(.evaluationFailed(let detail)) = document.failure else {
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else {
         return false
       }
       return detail.contains("/conf/stolen: Permission denied")
@@ -948,7 +959,7 @@ struct LockTests {
       try ResolutionCodec.decode(bytes, snapshot: changedSnapshot)
     } throws: {
       guard case .configuration(let document) = $0 as? PinewindError else { return false }
-      if case .lock(.declarationChanged) = document.failure { return true }
+      if case .declarationChanged = document.underlyingError as? LockFailure { return true }
       return false
     }
   }
@@ -965,7 +976,7 @@ struct LockTests {
       try ResolutionCodec.decode(Data("not a lock".utf8), snapshot: snapshot)
     } throws: { error in
       guard case .configuration(let document) = error as? PinewindError else { return false }
-      if case .lock(.incompatible) = document.failure { return true }
+      if case .incompatible = document.underlyingError as? LockFailure { return true }
       return false
     }
   }

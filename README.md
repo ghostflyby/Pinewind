@@ -165,9 +165,9 @@ let applied = try await workspace.apply(valid)
 
 候选不改变工作区的已保存状态。`apply` 检查整个配置与 lock 的基线,不自动重放编辑闭包;发生外部修改则整批拒绝。校验或解析失败不提交。本次批量的声明、本地覆写和 lock 由持久化重做日志协调提交,Core 读者先恢复未完成事务再读取;日志持久化后即进入提交阶段,不再响应取消。I/O 故障可能返回错误并留下待恢复日志,下一次访问完成同一事务。它不保证其他程序或云同步逐个读取这些文件时的跨文件原子可见性。
 
-Core 自定义的公共错误统一遵循 `PinewindErrorProtocol` (`Error`、`Sendable`、`CustomStringConvertible`),CLI/GUI 可统一捕获后按具体类型处理;取消仍是标准库的 `CancellationError`。
+错误处理采用开放的 `PinewindErrorProtocol` (`Error`、`Sendable`、`CustomStringConvertible`),按需接入外部错误,保留具体原因。`CodablePinewindError` 只是协议与 Codable 的组合;泛型 `DocumentError<E>`、`FileOperationFailure<E>`、`ResourceTransferFailure<E>` 按原因的能力分别支持编码/解码。未知错误不自动转成 Defect,取消仍是 `CancellationError`。归因容器保留 configuration / incident / runtime 的区分,不再通过 Failure 总枚举穷举领域。
 
-默认应用后准备依赖。提交后的准备失败抛出 `PreparationFailure`,提供已提交的 `resolution` 和原始 `cause: PinewindError`;声明与 lock 保留,可用 `install(locked: true)` 重试。取消始终保持 `CancellationError`,取消后可重新查询状态。只提交并解析、不准备文件时使用 `preparation: .deferred`,例如移除包。
+默认应用后准备依赖。提交后的准备失败抛出 `PreparationFailure`,提供已提交的 `resolution` 和原始 `cause: any Error`;声明与 lock 保留,可用 `install(locked: true)` 重试。取消始终保持 `CancellationError`,取消后可重新查询状态。只提交并解析、不准备文件时使用 `preparation: .deferred`,例如移除包。
 
 `workspace.status()` 只读返回配置、可用的解析结果和输入准备状态,不自动解析或下载;损坏或缺失的 lock/cache 通过类型化状态原因展示。配置读取会恢复此前已提交的事务。构建使用 `build(to:)`,在 Core 内统一执行离线构建和 Rime 运行时文件保护;底层 `compose` 仍提供通用发布能力。
 
@@ -176,6 +176,19 @@ Core 自定义的公共错误统一遵循 `PinewindErrorProtocol` (`Error`、`Se
 正常发布前检查配置与 lock 基线,拒绝过期计划。预览不提交配置或 lock,但可下载和缓存输入。本地文件内容在规划时捕获,规划完成后的编辑只影响下一次规划。
 
 公开面只保留调用参数、只读产物、编辑和预览能力、后端协议与错误载荷。Session、内部草稿、保存回执、具体 Git/HTTP 后端、Glob 和归因辅助方法不再公开;PinnedResource 的构造器与文档上重复的修改方法也收回内部。
+
+## 检查配置
+
+```sh
+pinewind lint
+pinewind lint --format json
+```
+
+lint 始终检查共享 YAML 与本地覆写的结构和内部一致性,尽量收集具有真实原文位置的配置问题。本地路径及其 recipe 的文件检查以最终生效配置为准;被覆写的共享本地值不读取。生效本地来源不存在或不是目录时,诊断指向 URL 节点。共享远端依赖作为 lock 输入,其已有源码和资源也会检查。缺少 lock、远端源码或缓存不报错,不联网补全,也不执行 conf 或构建。
+
+Core 的 `workspace.lint()` 返回 LintReport,CLI/GUI 共用检查规则。文本复用错误的 description;JSON 输出 version 和原结构的 diagnostics。有诊断或执行失败时退出非零;不可编码的诊断导致明确的输出失败,不会丢项或留下半份 JSON。运行态故障通过正常错误通道报告,不伪造 YAML 位置。
+
+lint 不提交新配置或 lock,不创建个人源码目录;正常文件协调仍可能创建协作锁或恢复先前已提交的事务。完整边界见 [错误处理设计](Docs/Error-System-Design.md)。
 
 ## 版本更新、开发模式与后端
 

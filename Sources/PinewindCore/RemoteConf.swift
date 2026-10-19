@@ -45,10 +45,10 @@ actor RemoteConfCapture: ConfResourceCapture {
     try Task.checkCancellation()
     if pins[relative] != nil { return }
     guard pins.count < limits.maximumSources else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.sources)))
+      throw InterpreterFailure.budgetExceeded(.sources)
     }
     guard totalBytes < limits.maximumTotalBytes else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
+      throw InterpreterFailure.budgetExceeded(.totalBytes)
     }
     let endpoint =
       relative.string == url.lastPathComponent
@@ -57,7 +57,7 @@ actor RemoteConfCapture: ConfResourceCapture {
     let dataPath = store.path(pin)
     let size = try SnapshotFiles.byteCount(dataPath)
     guard totalBytes + size <= limits.maximumTotalBytes else {
-      throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
+      throw InterpreterFailure.budgetExceeded(.totalBytes)
     }
     let destination = try SafePath.file(relative, in: directory)
     try FileManager.default.createDirectory(
@@ -89,15 +89,12 @@ struct RemoteConfFileSystem: FileSystem {
     do {
       try await capture.ensure(resourcePath(path))
       return try await mounted.metadata(path)
-    } catch let error as PinewindError {
-      if case .runtime(.cache(.contentMissing)) = error { return nil }
-      throw error
-    }
+    } catch CacheFailure.contentMissing { return nil }
   }
 
   func list(_ path: String) async throws -> [FileEntry] {
     if let original { return try await original.list(path) }
-    throw PinewindError.runtime(.interpreter(.enumerationUnsupported))
+    throw InterpreterFailure.enumerationUnsupported
   }
   func canonicalize(_ path: String, allowMissing: Bool) async throws -> String {
     // SourceCommand ultimately reads through readData; do not interpret metadata as a remote listing.
@@ -189,10 +186,10 @@ actor LocalConfCapture: ConfResourceCapture {
       let source = try NativePath.from(urls[0])
       let size = try SnapshotFiles.byteCount(source)
       guard size <= maximum else {
-        throw PinewindError.runtime(.interpreter(.budgetExceeded(.fileBytes)))
+        throw InterpreterFailure.budgetExceeded(.fileBytes)
       }
       guard size <= remaining else {
-        throw PinewindError.runtime(.interpreter(.budgetExceeded(.totalBytes)))
+        throw InterpreterFailure.budgetExceeded(.totalBytes)
       }
       try FileManager.default.createDirectory(
         at: destination.removingLastComponent(), withIntermediateDirectories: true)

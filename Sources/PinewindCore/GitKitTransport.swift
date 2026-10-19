@@ -145,7 +145,7 @@ struct GitKitTransport: GitTransport {
 
   private func makeRemote(url: URL, repository: OpaquePointer? = nil) throws -> OpaquePointer {
     guard url.scheme?.lowercased() == "https" || url.isFileURL else {
-      throw PinewindError.runtime(.git(.unsupportedSourceURL(url)))
+      throw GitFailure.unsupportedSourceURL(url)
     }
     var options = git_remote_create_options()
     try check(
@@ -158,8 +158,8 @@ struct GitKitTransport: GitTransport {
     var remote: OpaquePointer?
     try check(git_remote_create_with_opts(&remote, url.absoluteString, &options), repository: url)
     guard let remote else {
-      throw PinewindError.runtime(
-        .defect(.invariant(detail: "Git remote could not be created", origin: Origin())))
+      throw
+        Defect.invariant(detail: "Git remote could not be created", origin: Origin())
     }
     return remote
   }
@@ -171,11 +171,11 @@ struct GitKitTransport: GitTransport {
       try Cancellation.check()
       guard let entry = git_tree_entry_byindex(tree, index), let name = git_tree_entry_name(entry)
       else {
-        throw PinewindError.runtime(
-          .defect(.invariant(detail: "Git tree contains an invalid entry", origin: Origin())))
+        throw
+          Defect.invariant(detail: "Git tree contains an invalid entry", origin: Origin())
       }
       guard let component = String(validatingCString: name) else {
-        throw PinewindError.runtime(.git(.treeEntryInvalid(.undecodableName)))
+        throw GitFailure.treeEntryInvalid(.undecodableName)
       }
       let path = prefix + component
       // Tree entries are individual names, not expressions to normalize before checkout.
@@ -183,13 +183,13 @@ struct GitKitTransport: GitTransport {
         relative.filePath.components.count == 1,
         relative.string.utf8.elementsEqual(component.utf8)
       else {
-        throw PinewindError.runtime(.git(.treeEntryInvalid(.notASingleComponent(path))))
+        throw GitFailure.treeEntryInvalid(.notASingleComponent(path))
       }
       guard component != ".git" else {
-        throw PinewindError.runtime(.git(.treeEntryInvalid(.reservedMetadata(path))))
+        throw GitFailure.treeEntryInvalid(.reservedMetadata(path))
       }
       guard git_tree_entry_filemode(entry) != GIT_FILEMODE_LINK else {
-        throw PinewindError.runtime(.git(.treeEntryInvalid(.symbolicLink(path))))
+        throw GitFailure.treeEntryInvalid(.symbolicLink(path))
       }
       if git_tree_entry_type(entry) == GIT_OBJECT_TREE {
         var subtree: OpaquePointer?
@@ -210,10 +210,9 @@ struct GitKitTransport: GitTransport {
     let url = URL(fileURLWithPath: directory.string)
     try check(git_repository_open(&repository, directory.string), repository: url)
     guard let repository else {
-      throw PinewindError.runtime(
-        .defect(
-          .invariant(
-            detail: "Git repository could not be opened: \(directory.string)", origin: Origin())))
+      throw
+        Defect.invariant(
+          detail: "Git repository could not be opened: \(directory.string)", origin: Origin())
     }
     defer { git_repository_free(repository) }
     return try body(repository)
@@ -294,12 +293,11 @@ struct GitKitTransport: GitTransport {
       if status == GIT_EAUTH.rawValue
         || (status == GIT_EUSER.rawValue && context?.credentialsDeclined == true)
       {
-        throw PinewindError.runtime(.git(.authenticationRequired(repository)))
+        throw GitFailure.authenticationRequired(repository)
       }
-      throw PinewindError.runtime(
-        .git(
-          .operationFailed(
-            repository: repository, operation: operation, status: status, detail: message)))
+      throw
+        GitFailure.operationFailed(
+          repository: repository, operation: operation, status: status, detail: message)
     }
   }
 }

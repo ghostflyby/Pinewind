@@ -28,13 +28,11 @@ struct ConfigurationDocumentTests {
     try? FileManager.default.removeItem(at: localStateRoot(root))
   }
 
-  private func diagnostic(_ operation: () throws -> Void) -> PinewindError? {
+  private func diagnostic(_ operation: () throws -> Void) -> (any Error)? {
     do {
       try operation()
       Issue.record("expected a configuration diagnostic")
-    } catch let error as PinewindError {
-      return error
-    } catch { Issue.record("unexpected error: \(error)") }
+    } catch { return error }
     return nil
   }
 
@@ -83,7 +81,7 @@ struct ConfigurationDocumentTests {
     let local = LocalOverridesDocument(names: ["emoji": PackageFields(url: .value(directory))])
     let effective = try document.evaluate(localOverrides: local)
     #expect(effective.entries == [.package(try PackageRequest(url: directory))])
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try document.evaluate(
         localOverrides: LocalOverridesDocument(names: [
           "emoji": PackageFields(url: .value(directory), revision: .value(.reference("main")))
@@ -98,11 +96,11 @@ struct ConfigurationDocumentTests {
       names: {emoji: {revision: {ref: main}}}
       order: [emoji]
       """)
-    #expect(throws: PinewindError.self) { try document.evaluate() }
+    #expect(throws: DeclarationFailure.self) { try document.evaluate() }
     #expect(try ManifestDocument.parse(document.yaml()) == document)
     document.names["emoji"]?.url = .value(remote)
     #expect(try document.evaluate().entries.count == 1)
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) {
       try ManifestDocument(order: [.named("emoji", overrides: PackageFields(url: .value(remote)))])
         .yaml()
     }
@@ -117,9 +115,9 @@ struct ConfigurationDocumentTests {
   ])
   func invalidDraftFieldsAreRejectedConsistently(_ fields: PackageFields) {
     let document = ManifestDocument(names: ["unused": fields], order: [])
-    #expect(throws: PinewindError.self) { _ = try document.evaluate() }
-    #expect(throws: PinewindError.self) { _ = try document.yaml() }
-    #expect(throws: PinewindError.self) {
+    #expect(throws: DeclarationFailure.self) { _ = try document.evaluate() }
+    #expect(throws: DeclarationFailure.self) { _ = try document.yaml() }
+    #expect(throws: DeclarationFailure.self) {
       _ = try LocalOverridesDocument(names: ["unused": fields]).yaml()
     }
   }
@@ -159,7 +157,7 @@ struct ConfigurationDocumentTests {
       """
     let document = try ManifestDocument.parse(text, source: "original.yaml")
     let evaluated = try #require(diagnostic { _ = try document.evaluate() })
-    guard case .runtime(.declaration(.unknownName)) = evaluated else {
+    guard case .unknownName = evaluated as? DeclarationFailure else {
       Issue.record("\(evaluated)")
       return
     }
@@ -172,8 +170,8 @@ struct ConfigurationDocumentTests {
     do {
       _ = try await configuration.snapshot().evaluate(.shared)
       Issue.record("expected evaluation error")
-    } catch let error as PinewindError {
-      guard case .runtime(.declaration(.unknownName)) = error else {
+    } catch let error as DeclarationFailure {
+      guard case .unknownName = error else {
         Issue.record("\(error)")
         return
       }
@@ -185,8 +183,8 @@ struct ConfigurationDocumentTests {
     do {
       _ = try await configuration.snapshot().evaluate(.effective)
       Issue.record("expected local evaluation error")
-    } catch let error as PinewindError {
-      guard case .runtime(.declaration(.reservedName)) = error else {
+    } catch let error as DeclarationFailure {
+      guard case .reservedName = error else {
         Issue.record("\(error)")
         return
       }
@@ -201,14 +199,14 @@ struct ConfigurationDocumentTests {
     await configuration.edit { draft in draft.localOverrides = LocalOverridesDocument() }
     _ = try await configuration.save(.local)
     await configuration.edit { draft in draft.manifest.order = [.named("unfinished")] }
-    await #expect(throws: PinewindError.self) { _ = try await configuration.save(.local) }
+    await #expect(throws: DeclarationFailure.self) { _ = try await configuration.save(.local) }
     await configuration.edit { draft in draft.localOverrides = nil }
     _ = try await configuration.save(.local)
     #expect(
       !FileManager.default.fileExists(
         atPath: localStateRoot(root).appendingPathComponent("pinewind.local.yaml").path))
     _ = try await configuration.save(.local)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await configuration.snapshot().evaluate(.shared)
     }
     #expect(
@@ -237,20 +235,20 @@ struct ConfigurationDocumentTests {
     #expect(renamed.localOverrides?.names["new"]?.revision == .value(.reference("dev")))
     #expect(renamed.manifest.order[0] == .named("new"))
     #expect(renamed.manifest.order[2] == .named("new", overrides: PackageFields(recipe: .reset)))
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await configuration.edit { try $0.manifest.removePackage("new") }
     }
     try await configuration.edit { draft in try draft.manifest.moveEntry(from: 2, to: 0) }
     let moved = await configuration.snapshot()
     #expect(moved.manifest.order[0] == .named("new", overrides: PackageFields(recipe: .reset)))
     await configuration.edit { draft in draft.localOverrides?.names["taken"] = PackageFields() }
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await configuration.edit { try $0.renamePackage("new", to: "taken") }
     }
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await configuration.edit { try $0.renamePackage("new", to: "self") }
     }
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: DeclarationFailure.self) {
       try await configuration.edit { draft in try draft.manifest.moveEntry(from: -1, to: 0) }
     }
     let unchanged = await configuration.snapshot()
@@ -320,15 +318,15 @@ struct ConfigurationDocumentTests {
     var first = try await loadConfiguration(inputRoot: root, localStateRoot: localStateRoot(root))
     var stale = try await loadConfiguration(inputRoot: root, localStateRoot: localStateRoot(root))
     _ = try await first.save(.shared)
-    await #expect(throws: PinewindError.self) { _ = try await stale.save(.shared) }
+    await #expect(throws: StateFailure.self) { _ = try await stale.save(.shared) }
     stale = try await loadConfiguration(inputRoot: root, localStateRoot: localStateRoot(root))
     let external = Data("version: 1\norder: []\n".utf8)
     try external.write(to: root.appendingPathComponent("pinewind.yaml"))
-    await #expect(throws: PinewindError.self) { _ = try await stale.save(.shared) }
+    await #expect(throws: StateFailure.self) { _ = try await stale.save(.shared) }
     #expect(try Data(contentsOf: root.appendingPathComponent("pinewind.yaml")) == external)
     stale = try await loadConfiguration(inputRoot: root, localStateRoot: localStateRoot(root))
     try FileManager.default.removeItem(at: root.appendingPathComponent("pinewind.yaml"))
-    await #expect(throws: PinewindError.self) { _ = try await stale.save(.shared) }
+    await #expect(throws: StateFailure.self) { _ = try await stale.save(.shared) }
     first = try await loadConfiguration(inputRoot: root, localStateRoot: localStateRoot(root))
     await first.edit { draft in draft.localOverrides = LocalOverridesDocument() }
     _ = try await first.save(.local)
@@ -336,7 +334,7 @@ struct ConfigurationDocumentTests {
     try Data("version: 1\nnames: {new: {revision: {ref: dev}}}\n".utf8).write(
       to: localStateRoot(root).appendingPathComponent("pinewind.local.yaml"))
     await stale.edit { draft in draft.localOverrides = nil }
-    await #expect(throws: PinewindError.self) { _ = try await stale.save(.local) }
+    await #expect(throws: StateFailure.self) { _ = try await stale.save(.local) }
   }
 
   @Test func invalidEditsNeverReplaceSavedConfiguration() async throws {
@@ -348,7 +346,7 @@ struct ConfigurationDocumentTests {
     let file = root.appendingPathComponent("pinewind.yaml")
     let original = try Data(contentsOf: file)
     await configuration.edit { draft in draft.manifest.order = [.named("missing")] }
-    await #expect(throws: PinewindError.self) { _ = try await configuration.save(.shared) }
+    await #expect(throws: DeclarationFailure.self) { _ = try await configuration.save(.shared) }
     #expect(try Data(contentsOf: file) == original)
   }
 
@@ -383,12 +381,12 @@ struct ConfigurationDocumentTests {
     let configuration = try await loadConfiguration(
       inputRoot: root, localStateRoot: localStateRoot(root))
     let before = await configuration.snapshot()
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: Defect.self) {
       try await configuration.edit { draft in
         draft.manifest.order = []
         draft.localOverrides = LocalOverridesDocument()
-        throw PinewindError.runtime(
-          .defect(.wrapped(detail: "abort edit", origin: Origin())))
+        throw
+          Defect.wrapped(detail: "abort edit", origin: Origin())
       }
     }
     let after = await configuration.snapshot()

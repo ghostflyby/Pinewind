@@ -7,6 +7,7 @@
 import Foundation
 import SystemPackage
 import Testing
+import Yams
 
 @testable import PinewindCore
 
@@ -14,51 +15,42 @@ import Testing
 struct ErrorBoundaryTests {
   private let endpoint = URL(string: "https://example.test/package")!
 
-  @Test func domainErrorsRetainFactsAndNormalizationIsIdempotent() throws {
-    let cases: [(any Error, Failure)] = [
-      (GitFailure.authenticationRequired(endpoint), .git(.authenticationRequired(endpoint))),
-      (FileSystemFailure.notFound("missing"), .file(.notFound("missing"))),
-      (
-        NetworkFailure.rejected(status: 404, url: endpoint),
-        .network(.rejected(status: 404, url: endpoint))
-      ),
-      (InterpreterFailure.timedOut, .interpreter(.timedOut)),
-      (DeclarationFailure.unknownName("package"), .declaration(.unknownName("package"))),
-      (LockFailure.resolveRequired, .lock(.resolveRequired)),
-      (StateFailure.staleInputs, .state(.staleInputs)),
-      (CacheFailure.contentMissing(endpoint), .cache(.contentMissing(endpoint))),
-      (
-        Defect.invariant(detail: "probe", origin: Origin(file: "probe", line: 7)),
-        .defect(.invariant(detail: "probe", origin: Origin(file: "probe", line: 7)))
-      ),
-      (Failure.declaration(.unknownName("boxed")), .declaration(.unknownName("boxed"))),
-    ]
-    for (input, expected) in cases {
-      let error = try #require(ErrorBoundary.normalize(input) as? PinewindError)
-      #expect(error == .runtime(expected))
-      #expect(ErrorBoundary.normalize(error) as? PinewindError == error)
-    }
+  @Test func concreteErrorsRemainConcreteAndNormalizationIsIdempotent() throws {
+    let original = GitFailure.authenticationRequired(endpoint)
+    let once = ErrorBoundary.normalize(original)
+    #expect(once as? GitFailure == original)
+    #expect(ErrorBoundary.normalize(once) as? GitFailure == original)
+    let native = Errno.permissionDenied
+    #expect(ErrorBoundary.normalize(native) as? Errno == native)
   }
 
-  @Test func unknownFailuresCaptureTheCallerAndKeepTheirFirstOrigin() throws {
+  @Test func unknownFailuresKeepTheirOriginalTypeAndIdentity() throws {
+    let original = NSError(domain: "foreign", code: 9, userInfo: ["extra": "original"])
+    #expect(ErrorBoundary.normalize(original) as NSError === original)
     enum Foreign: Error, Equatable { case unexpected }
-    let line = UInt(#line + 1)
-    let error = try #require(ErrorBoundary.normalize(Foreign.unexpected) as? PinewindError)
-    guard case .runtime(.defect(.wrapped(_, let origin))) = error else {
-      Issue.record("expected a boundary defect")
-      return
-    }
-    #expect(origin == Origin(file: #fileID, line: line))
-    #expect(ErrorBoundary.normalize(error) as? PinewindError == error)
-    let context = try DocumentContext(path: "declaration.yaml")
-    let attributionLine = UInt(#line + 1)
-    let attributed = ErrorBoundary.attribute(Foreign.unexpected, to: context, as: .configuration)
-    guard case .runtime(.defect(.wrapped(_, let attributedOrigin))) = attributed as? PinewindError
-    else {
-      Issue.record("defect was attributed to a document")
-      return
-    }
-    #expect(attributedOrigin == Origin(file: #fileID, line: attributionLine))
+    #expect(ErrorBoundary.normalize(Foreign.unexpected) as? Foreign == .unexpected)
+  }
+
+  @Test func documentWrappersPreserveConcreteCodableCauses() throws {
+    let context = try DocumentContext(
+      path: "declaration.yaml", placement: Placement(line: 3, column: 7))
+    let original = DocumentError(context: context, failure: DeclarationFailure.unknownName("x"))
+    let erased: any DocumentErrorProtocol = original
+    #expect(erased.underlyingError as? DeclarationFailure == .unknownName("x"))
+    let serializable: any CodablePinewindError = original
+    let encoded = try JSONEncoder().encode(serializable)
+    #expect(
+      try JSONDecoder().decode(DocumentError<DeclarationFailure>.self, from: encoded) == original)
+    enum Foreign: Error { case opaque }
+    let opaque: any DocumentErrorProtocol = DocumentError(context: context, failure: Foreign.opaque)
+    #expect(!(opaque is any Encodable))
+  }
+
+  @Test func reportRejectsOpaqueCausesRatherThanLosingTheirStructure() throws {
+    enum Opaque: Error { case value }
+    let context = try DocumentContext(path: "actual.yaml", placement: Placement(line: 1, column: 1))
+    let report = LintReport(diagnostics: [DocumentError(context: context, failure: Opaque.value)])
+    #expect(throws: EncodingError.self) { _ = try JSONEncoder().encode(report) }
   }
 
   @Test func cancellationBypassesNormalizationAttributionAndHashing() throws {
@@ -75,26 +67,21 @@ struct ErrorBoundaryTests {
     }
   }
 
-  @Test func machineFailuresCannotBecomeDocumentVerdicts() throws {
+  @Test func attributionIsAnExplicitDecisionAtTheOperationBoundary() throws {
     let context = try DocumentContext(
       path: "declaration.yaml", placement: Placement(line: 3, column: 7))
-    let machineFacts: [Failure] = [
-      .git(.authenticationRequired(endpoint)), .network(.rejected(status: 404, url: endpoint)),
-      .state(.staleInputs), .cache(.contentMissing(endpoint)),
-      .file(.unwritable(path: "output", detail: "permission denied")),
-    ]
-    for fact in machineFacts {
-      #expect(
-        PinewindError.runtime(fact).attributed(to: context, as: .configuration)
-          == .incident(DocumentError(context: context, failure: fact)))
+    let cause = GitFailure.referenceNotFound("missing")
+    guard
+      case .configuration(let verdict) = ErrorBoundary.attribute(
+        cause, to: context, as: .configuration) as? PinewindError,
+      case .incident(let observation) = ErrorBoundary.attribute(cause, to: context, as: .incident)
+        as? PinewindError
+    else {
+      Issue.record("lost explicit attribution")
+      return
     }
-    let missing = Failure.git(.referenceNotFound("missing"))
-    #expect(
-      PinewindError.runtime(missing).attributed(to: context, as: .configuration)
-        == .configuration(DocumentError(context: context, failure: missing)))
-    #expect(
-      PinewindError.runtime(missing).attributed(to: context, as: .incident)
-        == .incident(DocumentError(context: context, failure: missing)))
+    #expect(verdict.underlyingError as? GitFailure == cause)
+    #expect(observation.underlyingError as? GitFailure == cause)
   }
 
   @Test func enclosingFramesKeepThePrimaryLocationAndTheirOrder() throws {
@@ -102,9 +89,9 @@ struct ErrorBoundaryTests {
     let middle = try DocumentContext(path: "import.conf", placement: Placement(line: 4, column: 1))
     let outer = try DocumentContext(path: "manifest.yaml", placement: Placement(line: 6, column: 3))
     let original = PinewindError.configuration(
-      DocumentError(context: inner, failure: .declaration(.unknownName("x"))))
-    #expect(ErrorBoundary.normalize(original) as? PinewindError == original)
-    #expect(original.attributed(to: outer, as: .incident) == original)
+      DocumentError(context: inner, failure: DeclarationFailure.unknownName("x")))
+    #expect(sameError(try #require(ErrorBoundary.normalize(original) as? PinewindError), original))
+    #expect(sameError(original.attributed(to: outer, as: .incident), original))
     let error = original.addingDerivation(middle).addingDerivation(outer)
     guard case .configuration(let document) = error else {
       Issue.record("lost verdict")
@@ -127,14 +114,13 @@ struct ErrorBoundaryTests {
     do {
       try FileIO.perform(.write, paths: [file]) { throw Errno.permissionDenied }
       Issue.record("expected a file failure")
-    } catch let failure as FileSystemFailure {
-      guard case .operationFailed(let failure) = failure else {
-        Issue.record("lost operation")
-        return
-      }
+    } catch let failure as FileOperationFailure<Errno> {
       #expect(failure.operation == .write)
       #expect(failure.paths == [file])
-      #expect(failure.cause == .posix(Errno.permissionDenied.rawValue))
+      #expect(failure.cause == Errno.permissionDenied)
+      let encoded = try JSONEncoder().encode(failure)
+      let decoded = try JSONDecoder().decode(FileOperationFailure<Errno>.self, from: encoded)
+      #expect(decoded.cause == failure.cause && decoded.paths == failure.paths)
     }
     enum Foreign: Error, Equatable { case unexpected }
     #expect(throws: Foreign.unexpected) {
@@ -176,7 +162,9 @@ struct ErrorBoundaryTests {
         Issue.record("lost verdict")
         return
       }
-      #expect(document.failure == .declaration(.invalidCommitID("invalid")))
+      #expect(
+        (document.underlyingError as? DeclarationFailure)
+          == DeclarationFailure.invalidCommitID("invalid"))
       let prefix = String(line[..<line.range(of: "invalid")!.lowerBound])
       #expect(document.context.placement == Placement(line: 2, column: prefix.utf16.count + 1))
     }
@@ -198,10 +186,16 @@ struct ErrorBoundaryTests {
       #expect(document.context.path == directory.appending("recipe.yaml"))
       #expect(document.context.placement?.line == (name == "RecipeTarget" ? 2 : 5))
       switch name {
-      case "RecipeTarget": #expect(document.failure == .declaration(.undeclaredOption("missing")))
-      case "RecipeOption": #expect(document.failure == .declaration(.optionValueMissing("schema")))
+      case "RecipeTarget":
+        #expect(
+          (document.underlyingError as? DeclarationFailure)
+            == DeclarationFailure.undeclaredOption("missing"))
+      case "RecipeOption":
+        #expect(
+          (document.underlyingError as? DeclarationFailure)
+            == DeclarationFailure.optionValueMissing("schema"))
       default:
-        guard case .declaration(.syntaxError) = document.failure else {
+        guard document.underlyingError is YamlError else {
           Issue.record("lost YAML syntax failure")
           return
         }
@@ -227,7 +221,8 @@ struct ErrorBoundaryTests {
         _ = try ResolutionCodec.decode(bytes, snapshot: snapshot)
         Issue.record("expected a malformed lock")
       } catch let error as PinewindError {
-        guard case .configuration(let document) = error, case .lock(.malformed) = document.failure
+        guard case .configuration(let document) = error,
+          case .malformed = document.underlyingError as? LockFailure
         else {
           Issue.record("lost lock attribution: \(error)")
           return
@@ -282,7 +277,8 @@ struct ErrorBoundaryTests {
         return
       }
       #expect(document.context.path == manifest)
-      #expect(document.failure == .git(.authenticationRequired(endpoint)))
+      #expect(
+        (document.underlyingError as? GitFailure) == GitFailure.authenticationRequired(endpoint))
     }
   }
 

@@ -43,21 +43,16 @@ public struct PackageFields: Hashable, Sendable {
     self.exclude = exclude
   }
 
-  func validate() throws(Failure) {
+  func validate() throws {
     if let first = problems().first { throw first.failure }
   }
 
   /// Shared by fail-fast evaluation and collecting editor validation.
-  func problems() -> [(field: String, failure: Failure)] {
-    var result: [(field: String, failure: Failure)] = []
+  func problems() -> [(field: String, failure: any Error)] {
+    var result: [(field: String, failure: any Error)] = []
     func attempt(_ field: String, _ operation: () throws -> Void) {
       do { try operation() } catch {
-        if let failure = Failure.recognizing(error) {
-          result.append((field, failure))
-        } else {
-          result.append(
-            (field, .defect(.wrapped(detail: String(describing: error), origin: Origin()))))
-        }
+        result.append((field, error))
       }
     }
     if let url = url.value {
@@ -68,7 +63,7 @@ public struct PackageFields: Hashable, Sendable {
     }
     attempt("revision") { try revision.value?.validate() }
     if url.value?.isFileURL == true, revision.value != nil {
-      result.append(("revision", .declaration(.revisionWithFileSource)))
+      result.append(("revision", DeclarationFailure.revisionWithFileSource))
     }
     if let recipe = recipe.value {
       attempt("recipe") {
@@ -133,11 +128,11 @@ public struct ManifestDocument: Hashable, Sendable {
 
   mutating func renamePackage(_ old: String, to new: String) throws {
     guard let fields = names[old] else {
-      throw PinewindError.runtime(.declaration(.unknownName(old)))
+      throw DeclarationFailure.unknownName(old)
     }
     if old == new { return }
-    guard new != "self" else { throw PinewindError.runtime(.declaration(.reservedName("self"))) }
-    guard names[new] == nil else { throw PinewindError.runtime(.declaration(.duplicateName(new))) }
+    guard new != "self" else { throw DeclarationFailure.reservedName("self") }
+    guard names[new] == nil else { throw DeclarationFailure.duplicateName(new) }
     names.removeValue(forKey: old)
     names[new] = fields
     order = order.map {
@@ -149,20 +144,20 @@ public struct ManifestDocument: Hashable, Sendable {
   }
 
   mutating func removePackage(_ name: String) throws {
-    guard names[name] != nil else { throw PinewindError.runtime(.declaration(.unknownName(name))) }
+    guard names[name] != nil else { throw DeclarationFailure.unknownName(name) }
     guard
       !order.contains(where: {
         if case .named(let reference, _) = $0 { return reference == name }
         return false
       })
-    else { throw PinewindError.runtime(.declaration(.nameStillReferenced(name))) }
+    else { throw DeclarationFailure.nameStillReferenced(name) }
     names.removeValue(forKey: name)
   }
 
   /// Destination is the final index after moving; duplicate entries remain distinct positions.
   mutating func moveEntry(from: Int, to: Int) throws {
     guard order.indices.contains(from), order.indices.contains(to) else {
-      throw PinewindError.runtime(.declaration(.orderIndexOutOfBounds))
+      throw DeclarationFailure.orderIndexOutOfBounds
     }
     order.insert(order.remove(at: from), at: to)
   }
@@ -221,7 +216,7 @@ enum DocumentCodec {
     var result: [String: PackageFields] = [:]
     for (name, value) in try reader.mapping(node) {
       guard name != "self" else {
-        throw reader.fail(.declaration(.reservedName("self")), at: value)
+        throw reader.fail(DeclarationFailure.reservedName("self"), at: value)
       }
       result[name] = try package(
         reader.mapping(value, allowed: ConfigurationParser.packageKeys), reader: reader,
@@ -231,7 +226,7 @@ enum DocumentCodec {
   }
 
   static func package(
-    _ fields: [String: Node], reader: YAMLReader, anchor: Node? = nil
+    _ fields: [String: Node], reader: YAMLReader, anchor: Node? = nil, validating: Bool = true
   ) throws -> PackageFields {
     func field<T>(_ key: String, _ decode: (Node) throws -> T) throws
       -> FieldOverride<T>
@@ -253,7 +248,7 @@ enum DocumentCodec {
         revision: field("revision") { try revision($0, reader: reader) },
         recipe: field("recipe", reader.string), options: field("options", reader.stringMap),
         include: field("include", reader.strings), exclude: field("exclude", reader.strings))
-      try result.validate()
+      if validating { try result.validate() }
       return result
     } catch {
       throw ErrorBoundary.attribute(error, to: reader.context(at: anchor), as: .configuration)
@@ -274,7 +269,7 @@ enum DocumentCodec {
     case "ref": result = .reference(text)
     default:
       do { result = .commit(try CommitID(text)) } catch {
-        throw reader.fail(.declaration(error), at: value)
+        throw reader.fail(error, at: value)
       }
     }
     return result
@@ -336,7 +331,7 @@ enum DocumentCodec {
           mapping(
             try names.sorted { $0.key < $1.key }.map { name, fields in
               guard name != "self" else {
-                throw PinewindError.runtime(.declaration(.reservedName("self")))
+                throw DeclarationFailure.reservedName("self")
               }
               return (name, mapping(try packageNode(fields)))
             })
@@ -348,12 +343,12 @@ enum DocumentCodec {
         case .userFiles(let filter): return mapping([("self", try filterNode(filter))])
         case .named(let name, let overrides):
           guard case .inherit = overrides.url else {
-            throw PinewindError.runtime(.declaration(.namedURLForbidden))
+            throw DeclarationFailure.namedURLForbidden
           }
           return mapping([("name", string(name))] + (try packageNode(overrides)))
         case .package(let package):
           if case .inherit = package.url {
-            throw PinewindError.runtime(.declaration(.inlineURLRequired))
+            throw DeclarationFailure.inlineURLRequired
           }
           return mapping(try packageNode(package))
         case .importConf(let conf):

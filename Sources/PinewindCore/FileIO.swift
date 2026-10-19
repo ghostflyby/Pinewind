@@ -7,78 +7,61 @@
 import Foundation
 import SystemPackage
 
-/// Native status captured at an I/O edge, without retaining a foreign error object.
-public enum SystemErrorCode: Sendable, Hashable {
-  case posix(Int32)
-  case cocoa(Int)
-  case windows(UInt32)
-  case other(domain: String, code: Int)
-
-  init(_ error: any Error) {
-    if let error = error as? Errno {
-      self = .posix(error.rawValue)
-      return
-    }
-    let error = error as NSError
-    switch error.domain {
-    case NSPOSIXErrorDomain:
-      if let code = Int32(exactly: error.code) {
-        self = .posix(code)
-      } else {
-        self = .other(domain: error.domain, code: error.code)
-      }
-    case NSCocoaErrorDomain: self = .cocoa(error.code)
-    case "NSWin32ErrorDomain": self = .windows(UInt32(truncatingIfNeeded: error.code))
-    default: self = .other(domain: error.domain, code: error.code)
-    }
-  }
-}
-
-public enum FileOperation: String, Sendable, Hashable {
+public enum FileOperation: String, Codable, Sendable, Hashable {
   case open, read, write, inspect, enumerate, createDirectory, copy, move, remove, coordinate
 }
 
-public struct FileOperationFailure: Sendable, Hashable, CustomStringConvertible {
+/// Operation metadata adds information absent from the original error, without mirroring it.
+public protocol FileOperationErrorProtocol: PinewindErrorProtocol {
+  var operation: FileOperation { get }
+  var paths: [FilePath] { get }
+  var underlyingError: any Error { get }
+}
+public struct FileOperationFailure<E: Error>: FileOperationErrorProtocol {
   public let operation: FileOperation
-  /// For copy/move, the source comes before the destination. Coordination lists all requests.
   public let paths: [FilePath]
-  public let cause: SystemErrorCode
-  public let detail: String
-
-  public init(operation: FileOperation, paths: [FilePath], cause: SystemErrorCode, detail: String) {
+  public let cause: E
+  public var underlyingError: any Error { cause }
+  public init(operation: FileOperation, paths: [FilePath], error: E) {
     self.operation = operation
     self.paths = paths
-    self.cause = cause
-    self.detail = detail
+    self.cause = error
   }
-
-  init(operation: FileOperation, paths: [FilePath], error: any Error) {
-    self.init(
-      operation: operation, paths: paths, cause: SystemErrorCode(error),
-      detail: String(describing: error))
-  }
-
   public var description: String {
-    "cannot \(operation.rawValue) \(paths.map(\.string).joined(separator: ", ")): \(detail)"
+    "cannot \(operation.rawValue) \(paths.map(\.string).joined(separator: ", ")): \(cause)"
   }
 }
+extension FileOperationFailure: Encodable where E: Encodable {}
+extension FileOperationFailure: Decodable where E: Decodable {}
+
+/// URL and the original transport error remain separately inspectable.
+public struct ResourceTransferFailure<E: Error>: PinewindErrorProtocol {
+  public let url: URL
+  public let cause: E
+  public init(url: URL, cause: E) {
+    self.url = url
+    self.cause = cause
+  }
+  public var description: String { "download failed: \(url.absoluteString): \(cause)" }
+}
+extension ResourceTransferFailure: Encodable where E: Encodable {}
+extension ResourceTransferFailure: Decodable where E: Decodable {}
 
 enum FileIO {
-  /// Translate native file errors where the operation and its objects are still known.
   static func perform<T>(
     _ operation: FileOperation, paths: [FilePath], _ body: () throws -> T
   ) throws -> T {
     do { return try body() } catch {
-      if error is CancellationError || error is PinewindError || Failure.recognizing(error) != nil {
-        throw error
-      }
+      if error is CancellationError { throw error }
       let domain = (error as NSError).domain
       guard
         error is Errno
           || [NSPOSIXErrorDomain, NSCocoaErrorDomain, "NSWin32ErrorDomain"].contains(domain)
       else { throw error }
-      throw FileSystemFailure.operationFailed(
-        FileOperationFailure(operation: operation, paths: paths, error: error))
+      func wrap<E: Error>(_ cause: E) -> any Error {
+        FileOperationFailure(operation: operation, paths: paths, error: cause)
+      }
+      throw wrap(error)
     }
   }
 }

@@ -1,136 +1,104 @@
-# 松风 / Pinewind:错误系统设计
+# 松风 / Pinewind: 错误处理与诊断
 
-状态:2026-10-18 包管理编辑入口版。顶层结构与类型命名已实现;标注"到实现中验证"的条目留待后续裁决。本文是错误面的唯一权威,与《Package-Management-Design》(工作区与存储契约)并列。
+状态: 2026-10-18,开放错误协议与本地 lint。
 
-## 1. 服务对象与总原则
+## 1. 开放错误类型
 
-错误系统为"配置解析 → 依赖获取验证 → 部署"这条管线服务。事实词表的域枚举的是**管线的题材**(文档、依赖、内容、部署目标的世界),不是管线的**执行装置**(锁、队列、协调机制)。
+`PinewindErrorProtocol: Error, Sendable, CustomStringConvertible` 是可选的公共能力,不要求所有外部错误加入封闭词表。人类可读输出复用 `description`;具体类型也可按需遵循 `LocalizedError`,不另设描述转换协议。
 
-一个错误事件包含三个正交关注点,错误值同时回答:
+```swift
+public typealias CodablePinewindError = PinewindErrorProtocol & Codable
+```
 
-- **事实**(什么发生了):单一事实词表,按域分组;
-- **归因**(处理者去哪行动):文档锚点 / 无锚点;
-- **因果**(为何):由事实类型的结构化字段承载,类型化、稀疏,禁止 `any Error` 万能口子。
+Codable 是具体类型的能力,不要求基础协议可编码。编码直接保留原类型结构,不经过统一的诊断 DTO,不使用 Mirror,不通过错误文本猜测类型。
 
-消费者三类——文档修复者、环境修复者、库开发者——各取所需,载荷按此配置。
+`Failure` 总枚举已删除。单域函数可以继续使用具体 typed throws;涉及不同原因的函数使用普通 throws,不为统一签名复制外部错误分类。
 
-## 2. 顶层结构
+业务规则仍有自己的类型,例如 DeclarationFailure、InterpreterFailure、LockFailure、StateFailure、CacheFailure。文件路径约束、Git 引用和资源限额等 Pinewind 自己识别的事实仍保留。它们不必替外部库穷举所有可能错误。
 
-所有 PinewindCore 自定义的可抛出公共错误类型统一遵循 `PinewindErrorProtocol: Error, Sendable, CustomStringConvertible`。消费者可通过该协议统一捕获,再按具体类型访问事实、配置诊断或已提交的解析结果。该协议不改变错误归一化规则,不要求 `Hashable` 或统一的 `Failure` 属性。`CancellationError` 保持标准库类型,不属于该协议;`DocumentError`、`FileOperationFailure` 和 `ConfigurationDiagnostic` 仍只是载荷,不因此变为可抛出错误。
+## 2. 原始原因与操作上下文
+
+错误值保存真正缺少的信息:
+
+- `FileOperationFailure<E>` 保存 operation、paths、原始 cause;`FileOperationErrorProtocol` 提供不依赖 E 的只读检查入口。
+- `ResourceTransferFailure<E>` 保存 URL 和原始传输错误。URLError 的 code/userInfo 等信息仍在原值中。
+- `DocumentError<E>` 保存 DocumentContext 和具体 failure。`DocumentErrorProtocol` 提供 context 和 underlyingError,供 GUI、lint 和异构集合检查。
+
+泛型包装器分别条件遵循 Encodable/Decodable,条件来自其原因类型;可比较性也只是具体类型的可选能力。不存在把任意错误强制变成 Codable 或 Hashable 的存在容器。
+
+Errno、URLError、Yams.YamlError、SwiftBash.FileSystemError 按需遵循公共协议,不复制成另一组一一对应的枚举。Errno 保持原有 Codable。Yams 的原始错误、Context、Mark 获得原字段的 Encodable 实现;Context 没有公开构造入口,因此不声称支持 Decodable。不提供任意外部错误类型的自动恢复注册表。
+
+URLError 的 CustomStringConvertible 和 Yams 类型的 Encodable 属于外部类型对外部协议的追溯符合。上游以后加入相同符合时可能发生冲突,升级依赖或工具链时需要检查并移除对应适配。Yams 解析错误的关联位置编码为 `mark`,包含 `line`、`column`。
+
+文件操作不再压平为 SystemErrorCode;网络传输不再压平为 TransportFailureReason。显式识别的 HTTP 拒绝、HTTPS 约束和资源上限仍是 Pinewind 的业务事实。
+
+## 3. 归因与位置
+
+`PinewindError` 只表达三种归因,不穷尽底层类型:
 
 ```swift
 enum PinewindError {
-  case configuration(DocumentError)  // 裁决:文档有错,位置是事实主体
-  case incident(DocumentError)       // 事件:处理途中发生,归因未判,位置是目击锚点
-  case runtime(Failure)              // 无文档锚点的机器失败
-}
-
-struct DocumentError {
-  let context: DocumentContext       // 文档身份与定位(§4)
-  let failure: Failure               // 单一事实词表(§5)
+  case configuration(any DocumentErrorProtocol)
+  case incident(any DocumentErrorProtocol)
+  case runtime(any Error)
 }
 ```
 
-- **configuration**:对声明内容的裁决。"order 第 2 项引用了未定义的名字"中,位置与违规是同一事实,拆开即不成立。包含 schema 级检查(字段有效性、结构、命名、约束)与经执行才得知的裁决(ref 不存在、声明的文件缺失)。归因准则:修复动作发生在文档 ⇒ configuration。
-- **incident**:处理某声明的途中发生的失败,位置可指但不能(确定)归为文档错误——认证失败(对内容零蕴含)、下载 404(归因现场不可判定)。位置在此是**目击锚点**而非裁决对象。对归因不可判定的 kind,case 承载失败点的现场归因决定;该 case 由此不是 payload 可推导的冗余 tag。
-- **runtime**:无文档锚点的机器失败(如部署目标目录不可写)。
+configuration 是对声明内容的裁决;incident 是处理声明途中观察到的事件;runtime 没有文档锚点。归因由拥有操作上下文的边界明确赋予,不由错误类型全局决定。例如 Git 引用不存在可以归因于所请求的声明;认证或传输失败只能是观察到的事件。
 
-两条属性纪律:
+DocumentContext 保留本机 path、来源 URL、可选 placement 和推导链。位置来自原文节点或解析器位置,行列从 1 开始,列按 UTF-16 计算。URL 采用绝对身份,编码路径使用可表示的 Unicode 文本,解码不重新读取当前目录。不能无损表示的路径明确编码失败。
 
-- 事实 kind 的**内容关联性是静态属性**:"ref 不存在"蕴含"声明的 revision 无法满足";"认证失败"对内容零蕴含。零蕴含者永不构成 configuration 裁决,也永不进入其他事实的因果位。处理者对机器事实的分类(瞬态/永久、凭据/名字/网络)据此只写一次。
-- **位置附着是动态属性**:同一认证失败,解析某条 revision 途中发生则带锚点,部署阶段发生则裸奔为 runtime。附着与否由失败点上什么在途决定,事实类型不变。
+没有原文位置时不能伪造行列。配置编辑的表单字段与操作序号属于 ConfigurationDiagnostic,不是 YAML 位置。模板生成内容的错误重新归因到原始模板节点,原始原因仍保留。
 
-## 3. 定位进错误,无平行验证通道
+由于归因容器持有开放存在值,`PinewindError` 不冒充 Codable 或普遍 Equatable。需要结构化输出时编码其中保留具体类型的文档包装器。
 
-YAML/conf 定位信息是错误载荷的一部分,不设独立 validation 通道:
+## 4. 边界规则
 
-- 语义错误只在真实求值/准备逻辑执行到相应位置时才显形,前置静态校验要么漏报,要么复抄一遍求值逻辑;
-- 定位随求值逐层累积(解析点取节点 mark,求值层路过自己的条目时当场附着),只有错误值能承载这种沿途累积;
-- "收集不中断"与"立即中断"是同一错误值的两种消费姿态。
+- 未识别的外部错误保留原值和身份,不自动变为 Defect。
+- Defect 只由明确发现内部不变量或实现错误的代码构造,保留开发者 origin。
+- 取消保持 CancellationError;URLSession 的取消在传输边界转换,不成为 lint 诊断。
+- 已有主归因不被后续边界覆盖;推导链按外到内附加。
+- 当前机械归一化保持原值、保持幂等。没有转换需求的类型无需实现归一化方法;以后如需引入转换,也只在有语义的边界进行。
+- 不要求所有错误 Hashable。诊断仅在具体原因支持比较时去重;不以 description 充当错误身份。
 
-诊断不设平行事实词表。内存配置编辑通过 ConfigurationDiagnostic 包装同一个 PinewindError,附带可选操作序号、包名与表单字段;这些定位不进入 DocumentContext,也不伪造文本行号。
+## 5. 编辑和提交
 
-## 4. 文档上下文(DocumentContext)
+`Workspace.validate(editing:)` 与 `ConfigurationSnapshot.validate()` 继续用于内存候选检查,返回 `[ConfigurationDiagnostic]`。字段检查与真正求值共用规则,每条诊断保留操作序号、包名、表单字段和归因错误,不生成假的 YAML 行列。
 
-- **双身份**:本机 `FilePath`(服务此刻的修复者,编辑器直接打开)+ `URL`(本机 file URL 或远程身份,服务跨机器审计与同步——报告随 lock 同步到他机后本机路径失效,URL 身份仍在)。锚点纪律:**有本机文档可开才锚;凡锚定,双身份齐备**(锚定远端 conf 时本机路径为捕获快照路径)。
-- **定位**:行/列/范围,IDE 惯例,直接指向文档内文本。**无字段路径**——字段路径复原为文本位置必须重过解析器,违背位置的存在意义。文档级失败(外部修改、格式不兼容)只锚身份、不带定位;定位存在时行列必填,范围尽力而为(容器节点的结束位置未必可靠,可空);行列均从 1 开始,列按 UTF-16 code unit 计数;Yams 的 Unicode scalar 列在解析边缘转换。消费 LSP 时行列分别减 1。语法错误直接提取 Yams mark,展开后 YAML 的错误归回原始模板节点,不暴露生成位置。
-- **正向附着**:位置在解析时从节点 mark 取得,求值层路过自己的条目时当场附着;废除事后按字段名回查节点重建行号的机制。
-- **推导链**:include/import 链是一次归因的**嵌套路径**,不是并列归因——context 含主定位 + 可选的推导帧序列(外→内,每帧为真实行列),跳到中间帧即可移除引入点。推导链与下条的单定位不变量不冲突。
-- **单定位不变量**:一个错误至多一个主定位。并列的多处归因(约束涉及两个文档)拆成多个错误对象各自锚定,即使语义相关、即使丢失关联标识。
-- incident 与 configuration 复用同一 context 类型:字段路径废除后,身份 + 定位对"在途声明"全部有效,无需变体。
-- 事实与 context 的边界:context 答"何处"(文档身份与定位),fact 答"什么"(含违规值本身——`unknownName` 的名字是事实载荷,不是 context)。
+ConfigurationValidationError 表示整批候选在配置预检中被拒绝,携带 diagnostics。编辑器方法不抛配置错误,失败编辑保留诊断,独立编辑继续检查。配置错误或解析失败不提交。
 
-## 5. 事实词表(Failure)
+PreparationFailure 保留已提交的 Resolution 和原始 `cause: any Error`,只表示提交后的准备失败。它不为了序列化而删除恢复所需的运行时信息,也不声称支持 Codable。调用者可通过 install 重试。取消后可查询 configuration/status 判断已提交状态。
 
-单一词表。enum,case = 领域,各领域 payload 类型自理(struct 或内嵌 kind enum 按需决定):
+声明、本地覆写和 lock 的持久化事务契约见 Package-Management-Design。错误协议调整不改变协作读者的恢复规则或外部修改保护。
 
-| 领域 | 收纳(例) |
-|---|---|
-| git | ref 不存在/歧义、认证失败、commit 不可用、传输失败、tree 条目非法(非 UTF-8/路径逃逸/符号链接) |
-| file | 缺失、权限、类型不符、符号链接越界、原子交换不支持、Windows 发布/junction 机制错误 |
-| network | 资源下载:HTTP 状态拒绝、传输失败、非 HTTPS、下载超限 |
-| interpreter | conf 求值失败、超时、include 预算超限、不支持的结构 |
-| declaration | 保留名、未知名、URL/commit/revision 形态、schema 结构违规、重复目标、约束冲突 |
-| lock | lock 文档编解码:格式不兼容、记录损坏、声明已变需重解析 |
-| state | 会话协调:文档被外部修改、输入陈旧、发布竞争 |
-| cache | 资源缓存:内容缺失、校验和不符 |
+## 6. lint
 
-纪律:
+`Workspace.lint()` 使用本机已有信息,返回 `LintReport`。它不解析 Git 引用、不下载包、不执行 conf、不准备文件、不构建输出。
 
-- 词表对归因无感知——不得为某个顶层 case 定制领域变体;同一事实跨 case 复用(认证失败在 incident 带锚点、在 runtime 裸奔)由单一词表天然保证。
-- **深层直接抛事实**:单域函数抛领域类型,跨域纯函数抛 `Failure`;到归因边缘再构造 `PinewindError`。`runtime` 主要表达没有文档锚点的结果,避免依赖中间层先装箱再补归因。
-- **归因显式选择**:`attributed(to:as:)` 区分 `.configuration` 裁决与 `.incident` 目击。领域事实的 `allowsConfiguration` 只表示裁决资格,不自动选择归因;认证、网络、协调、缓存和文件操作失败即便请求裁决也只附为 incident,defect 保持 runtime。已有主定位原样保留;外层通过 `addingDerivation(_:)` 单独加入引入帧,外层在前。
-- 限额不立独立域,按主题归域:下载超限进 network(携带上限值字段),include 预算进 interpreter。
-- 待实现验证的归属:进程锁装置损坏(锁工件非常规/打不开)归 file 还是独立协调域;lock 编解码独立还是并入 declaration;cache 独立还是并入 file。裁决依据:到实现中看调用层次是否需要转换关系。
+始终检查共享声明和本地覆写的 YAML 结构及内部语义,包括被更高层覆写的字段。原始节点与值在同一收集过程保留;字段、选择器、名称、导入来源与求值共用现有规则。独立字段、条目、文档和 recipe 部分继续检查;前置问题使后续无法判断时跳过依赖检查。
 
-## 6. 渲染
+只有带真实 YAML 位置的 configuration 裁决进入 diagnostics。内存编辑的字段问题、网络、认证、缓存损坏和协调故障不被强行附到 YAML 上。读取等操作性故障通过正常 throws 报告,此时不返回部分 LintReport,即使先前已收集了配置诊断。
 
-无 message 字段。每个类型的 `description` 由结构化字段推导(CustomStringConvertible),措辞是该类型自己的排版职责。承载 origin 的类型渲染 origin——它的读者本就是开发者。
+本机信息的使用规则:
 
-## 7. 宏 origin(#fileID/#line)
+- 缺少 lock、远端源码或缓存不是 lint 错误。
+- 本地 file: 来源及其 recipe 的文件证据只按本地覆写、条目覆盖后的最终生效值检查。被替换的共享本地路径与 recipe 不进行存在性或内容检查,也不会因为另一台机器的路径而报错。生效路径不存在或不是目录时,诊断指向该 URL 的原文节点;跳过依赖此目录的 recipe 检查,避免级联误报。
+- 共享远端依赖仍是 resolve/lock 的输入。即使本地覆写改用其他来源或 recipe,也保留共享远端请求的已有源码、recipe 和锁定资源检查;缺少远端证据时仍跳过。
+- 已有 lock 可以提供已知 commit 和 import 展开;陈旧、不兼容或损坏的二进制记录不能建立 YAML 裁决,不据此误报配置。
+- 已有本地源码和受管源码快照中的 recipe 会被检查。远端源码尚未取得时跳过;源码已存在而显式指定的 recipe 缺失时,诊断指向原声明的 recipe 节点。未指定的默认 recipe 可以缺省。
+- Plum 描述符已经支持 `包名:recipe:选项`,lock 会保留 recipe。仅由 lock 展开、没有原始 YAML recipe 节点的缺失不是不可达情况,目前通过正常 throws 报告,不伪造位置。若以后需要同时返回这些操作失败和已收集的配置诊断,应为报告设计独立的操作失败集合及完整性标志,而不是把无位置错误混入 diagnostics;本版不提供部分报告。
+- 已有锁定 YAML 资源仅在字节符合校验和时检查语法。损坏缓存不被误判为作者的 YAML 错误。
+- 不扫描与当前声明无关的缓存条目,不因缺少其他包而猜测依赖错误。
 
-判据(默认启发):**可行动消费者是库开发者的错误才承载 origin**——内部不变量/一致性失败(不该发生的分支被命中)、边界包装兜底(外来错误进入词表的关口)。按裁决放宽:每个具体错误类型自行决定是否承载;边界函数直接声明 `fileID: String = #fileID, line: UInt = #line`,再构造 `Origin(file:line:)`;转调辅助函数时显式转传这两个参数。不得使用嵌套的 `origin: Origin = Origin()` 默认表达式,否则位置会固定在辅助函数声明处。已归一化的错误保持首次 origin。
+CLI:
 
-世界事实的站点可区分性义务由结构化字段承担(操作身份、对象身份)——同一 kind 多站点分不清时补字段,不撒 origin。
+```sh
+pinewind lint
+pinewind lint --format json
+```
 
-外来错误兜底装 `String(describing:)`:有损但自包含、可跨边界;不留 `any Error` 万能深挖口子,需要结构化时按需增设专属 kind。(倾向记录,随实现定。)
+成功且没有诊断返回 0;存在诊断或操作/输出失败返回非零。取消沿用 130。
 
-## 8. 层次与边界翻译
+LintReport 只承诺 Encodable。JSON 外层有 version 和 diagnostics,每个错误保留自己的编码结构。文本复用 description。JSON 在内存中完整编码成功后才写 stdout;不可编码的错误明确导致输出失败,不静默遗漏,不降级成描述字符串。错误写 stderr。
 
-- 执行装置的内部机制细节(获取策略、重试记账、队列状态)不进词表——装置失败说的不是"题材世界怎么了"。
-- **竞争不是错误**:非阻塞获取 + 轮询等待的装置,竞争以等待与取消语义收场,不产生错误值。
-- 每个抽象层拥有自己的错误类型,内部子系统的错误类型不逃逸;在依赖边缘被**显式翻译**成上层词表的题材事实。翻译允许有损,低于上层分辨率的细节有意丢弃;翻不出的装置语义以取消/中断收场。
-- 装置损坏若构成题材陈述(受管锁工件处于损坏状态)按题材检验归域,到实现中验证。
-
-## 9. 批量与签名
-
-- **查询型批量**:Workspace.validate(editing:) / ConfigurationSnapshot.validate() 返回 `[ConfigurationDiagnostic]`,每项保留同一 PinewindError 词表。找出配置问题是询问的成功回答;文档无法读取、解码失败或取消通过 throws 报告,不冒充可修正的编辑字段问题。字段校验谓词与真正求值共用,只汇总可独立判断的问题。
-- **管线型批量**(独立单元的执行):收集后抛聚合容器。聚合是独立类型(配置应用使用 ConfigurationValidationError,携带 diagnostics),不是词表 case——单复数是基数差异,塞入词表会迫使每个单数匹配顺手排除聚合。批量只出现在操作主动声明单元独立的签名上;失败相关的操作首错中断。
-- typed throws:事实层的签名携带**层级最底层的具体类型**——单域链路用域类型(`throws(FileSystemFailure)`/`throws(DeclarationFailure)`…),跨域事实函数用 `throws(Failure)`,抛出点直接抛词表值;归因边界(解析/求值/文档方法/lock 解码)不标注顶层类型,以普通 `throws` 承载 PinewindError——类型系统不做 Failure⇄PinewindError 隐式转换,跨域归因边界强行标注只会制造全量 do/catch 噪声,归因语义由构造点保证。被取消(CancellationError)或外来错误(Foundation/Errno)污染的签名保持 untyped。公共操作边界(Workspace、配置会话、公开文档方法及默认后端)共用 `ErrorBoundary.normalize`:取消原样穿透,已有 `PinewindError` 原样返回,所有领域错误和 `Failure` 归位 runtime,未知错误入 defect。归一化保持幂等,单数管线错误恒为 `PinewindError`;显式批量编辑入口保留 ConfigurationValidationError。提交后的准备失败以 PreparationFailure 包装已提交 Resolution 和同一 PinewindError cause,取消仍原样穿透。执行队列只转发,不提前归一化;取消检查不在提交完成后补做。
-
-## 10. 迁移
-
-2026-10-16 完成:旧 struct + Code 体系(14 个统一五字段 payload)已整体替换为本文结构;诊断平行类型(Diagnostic)与字段路径回查机制(relabeled)删除。归因范围 v1:解析与求值边界锚定文档身份+mark 行列;求值内部的条目级归因(锚到具体 order 条目)需要位置随求值管线下传,留待后续。传输层失败落 network.transportFailed(现为 url:reason:detail:),不走 defect 兜底。词表展开顺序建议:declaration → git/file/network → interpreter/state/lock/cache。
-
-## 11. 归一化与迁移约定(2026-10-17)
-
-三种转换各司其职:
-
-1. **外部错误翻译**在依赖边缘完成,保留操作和对象身份。相同的不存在错误,可选配置读取可返回 nil,明确声明的缺失由声明边缘裁决,普通 I/O 失败进 file 域。
-2. **机械装箱**只有一份 `Failure.recognizing` 类型表。`ErrorBoundary.normalize` 负责取消穿透、已有错误保持与未知错误兜底,不推断文档责任、不检查错误文本、不以 Task.isCancelled 覆盖已发生的其他错误。
-3. **文档归因**由持有真实文档上下文的边缘显式选择。共享仓库声明解析可作裁决;有效配置的开发准备仅把共享文档作为目击锚点。没有可打开的声明文档时保留 runtime。
-
-`FileIO.perform` 只翻译预期的原生文件错误,其他领域错误、取消和未知错误原样穿过。文件操作使用 `FileSystemFailure.operationFailed(FileOperationFailure)`,携带操作、路径序列、`SystemErrorCode` 和展示 detail。copy/move 路径按源、目标排序;协调失败列出全部请求路径。网络传输携带 `TransportFailureReason`,Git 操作携带 operation,资源校验失败携带 URL、预期与实际 SHA-256。编码内部锁数据失败属于 defect,解码输入损坏才属于 lock.malformed。
-
-迁移公开消费代码:
-
-- `promoted(context)` 改为 `attributed(to: context, as: .configuration/.incident)`;已有主定位不变,引入帧使用 `addingDerivation`。
-- `GitFailure.operationFailed` 增加 operation;`NetworkFailure.transportFailed` 增加 reason;`CacheFailure.checksumMismatch` 改为具名 url/expected/actual 载荷。
-- 文件错误消费需处理新增的 operationFailed;旧的路径约束事实和锁装置事实仍保留。
-- 文档及归因方法改为普通 throws;内部删除 embed/wrap/relay。纯校验继续使用具体 typed throws。模板的选项失败为 `Failure.declaration`,正则/替换范围不变量失败为 `Failure.defect`,不再提供 invalidTemplateRange 声明错误。
-
-条目级求值位置与解释器内 include 的逐帧定位仍遵循 §10 的边界:本次提供显式归因和推导链操作,不通过重新查字段或生成 YAML 伪造缺失的位置。
-
-## 12. 包管理编辑结果(2026-10-18)
-
-ConfigurationValidationError 只表示整批候选在配置预检中被拒绝,不把聚合添加为 PinewindError 或 Failure 的 case。PreparationFailure 只表示配置与 lock 已提交而后续准备失败,其 cause 保留原有归因和领域事实。操作阶段信息不通过解析 description 推断。持久化提交错误仍由原有 file/state 事实报告,未完成事务通过恢复日志完成;读取状态可确认最终结果。
+lint 不提交新的配置或 lock,也不创建个人源码目录。它仍使用 Core 的文件协调,可能创建协作锁或恢复此前已持久化的事务;不是绕过恢复契约的原始磁盘读取器。

@@ -118,21 +118,21 @@ public struct PlatformDirectories: Sendable {
     let candidates = supportedFrontends
     if let frontend {
       guard candidates.contains(frontend) else {
-        throw PinewindError.runtime(.state(.unsupportedFrontend(frontend.rawValue)))
+        throw StateFailure.unsupportedFrontend(frontend.rawValue)
       }
       return rimeDirectory(frontend)
     }
     let existing = discoverRimeDirectories()
     if existing.count == 1 { return existing[0].directory }
     if existing.count > 1 {
-      throw PinewindError.runtime(.state(.ambiguousOutputDirectories(existing.map(\.directory))))
+      throw StateFailure.ambiguousOutputDirectories(existing.map(\.directory))
     }
     #if os(macOS)
       return rimeDirectory(.squirrel)
     #elseif os(Windows)
       return rimeDirectory(.weasel)
     #else
-      throw PinewindError.runtime(.state(.frontendRequired))
+      throw StateFailure.frontendRequired
     #endif
   }
 

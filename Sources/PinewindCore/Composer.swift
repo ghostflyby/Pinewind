@@ -162,7 +162,7 @@ struct Composer {
           }
         }
         guard status == 0 else {
-          throw PinewindError.runtime(.file(.exchangeFailed(errno: status)))
+          throw FileSystemFailure.exchangeFailed(errno: status)
         }
       } else {
         try fm.moveItem(at: candidate, to: outputRoot)

@@ -72,7 +72,7 @@ Workspace 是唯一的公开编辑入口。configuration(editing:) 返回绑定�
 
 ConfigurationEditor 的添加、删除、重命名、改向和移动方法均不抛配置错误。每次操作在临时值上执行,失败保留原值并记录诊断,因此重复添加不会通过字典覆盖丢失证据。允许通过 PackageFields 提交不完整字段;来源简写和相对位置在 Core 中解析。添加默认位于首个 self 前;删除维护全部命名引用和本地覆写;重命名维护两层对应名称。相对改向始终使用工作区基准。
 
-validate(editing:) 与 candidate.validate() 返回 ConfigurationDiagnostic 集合,默认同时检查共享与有效配置,与实际应用一致。诊断包含原有 PinewindError 及可选操作序号、包名、字段;后者只定位内存编辑,不进入文档文本定位。独立字段错误汇总,无法判断的派生错误跳过。预览不提交;存在错误时 update/apply 在联网前整体抛 ConfigurationValidationError。文件读取失败和取消仍抛出,不伪装为配置诊断。
+validate(editing:) 与 candidate.validate() 返回 ConfigurationDiagnostic 集合,默认同时检查共享与有效配置,与实际应用一致。诊断包含原始错误及可选操作序号、包名、字段;后者只定位内存编辑,不进入文档文本定位。独立字段错误汇总,无法判断的派生错误跳过。预览不提交;存在错误时 update/apply 在联网前整体抛 ConfigurationValidationError。文件读取失败和取消仍抛出,不伪装为配置诊断。
 
 无公开 Session、独立草稿构造、逐层保存回执或重载协议。GUI 保存表单状态或候选快照;需要最新状态时重新读取 Workspace。旧的文档协调会话仅为内部实现,不是外部契约。
 
@@ -80,7 +80,7 @@ Apple 文件访问经 NSFileCoordinator,使用其返回的实际 URL。其他平
 
 应用前预检所有文档与 lock 基线。提交使用包含 before/after 字节和文档身份的持久化重做日志:先同步日志,再逐文件原子替换并同步,最后删除并同步日志。日志持久化即提交点,此后不响应取消。崩溃后 Core 读者在相同协调范围内先完成恢复,只看到完整结果;当前字节不属于 before/after 的任何一者则拒绝恢复,不覆盖外部修改。损坏或不属于本配置集合的日志硬失败并提供恢复提示。
 
-该事务协议保证协作 Core 调用者的整批可见性与恢复,不承诺其他程序直接读取或跨设备同步时的跨文件原子性。持久化期间 I/O 错误可能留下待恢复提交;重新访问可完成。解析失败不写配置;提交后的准备失败保留声明与 lock,以 PreparationFailure 携带已提交 Resolution 和原有 PinewindError。取消保持 CancellationError,可通过 configuration/status 查询已提交状态。
+该事务协议保证协作 Core 调用者的整批可见性与恢复,不承诺其他程序直接读取或跨设备同步时的跨文件原子性。持久化期间 I/O 错误可能留下待恢复提交;重新访问可完成。解析失败不写配置;提交后的准备失败保留声明与 lock,以 PreparationFailure 携带已提交 Resolution 和原始错误。取消保持 CancellationError,可通过 configuration/status 查询已提交状态。
 
 ## 5. 阶段与副作用
 
@@ -165,7 +165,7 @@ Windows 两种模式按保留末级入口的 publicationPath 获取同一发布�
 
 取消检查覆盖等待、下载、文件枚举、哈希和渲染,提交前执行最后检查。提交已经完成则返回成功,不在成功提交后再报告取消。普通 resolve/refresh 与 directory 发布失败或取消保留旧锁和完整已发布输出;update/apply 的跨文件提交与 managedFiles 的恢复边界如前所述。候选和临时视图清理。
 
-PinewindError 按 configuration/incident/runtime 区分归因,事实由 Failure 的领域载荷承载,说明由 description 推导。文档上下文含路径、URL、可选行列及推导链,不含字段路径;归一化与载荷约定以《Error-System-Design》为准。CancellationError 单独保留。每次操作可独立接收进度回调,界面线程切换由调用方处理。
+PinewindError 按 configuration/incident/runtime 区分归因,原因由具体错误或协议存在值保留,说明由 description 推导。文档上下文含路径、URL、可选行列及推导链,不含字段路径;归一化与载荷约定以《Error-System-Design》为准。CancellationError 单独保留。每次操作可独立接收进度回调,界面线程切换由调用方处理。
 
 ## 9. 验证边界
 

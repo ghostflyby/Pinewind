@@ -8,7 +8,7 @@ import Foundation
 import SystemPackage
 
 enum SafePath {
-  static func file(_ path: RelativePath, in root: FilePath) throws(FileSystemFailure) -> FilePath {
+  static func file(_ path: RelativePath, in root: FilePath) throws -> FilePath {
     let rootIdentity = try canonical(root)
     #if os(Windows)
       let canonicalRoot: FilePath
@@ -25,14 +25,14 @@ enum SafePath {
     return candidate
   }
 
-  static func validateOutputRoot(_ output: FilePath) throws(FileSystemFailure) {
+  static func validateOutputRoot(_ output: FilePath) throws {
     guard output.lastComponent != nil else {
       throw FileSystemFailure.isFilesystemRoot(output)
     }
   }
 
   static func validateRoots(input: FilePath, output: FilePath, sources: [FilePath])
-    throws(FileSystemFailure)
+    throws
   {
     try validateOutputRoot(output)
     let roots = [input] + sources
@@ -45,13 +45,13 @@ enum SafePath {
     }
   }
 
-  static func overlaps(_ first: FilePath, _ second: FilePath) throws(FileSystemFailure) -> Bool {
+  static func overlaps(_ first: FilePath, _ second: FilePath) throws -> Bool {
     let a = try canonical(first)
     let b = try canonical(second)
     return a.starts(with: b) || b.starts(with: a)
   }
 
-  static func canonical(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+  static func canonical(_ url: FilePath) throws -> FilePath {
     #if os(Windows)
       do { return try WindowsDirectoryPublisher.canonicalPath(url) } catch {
         throw FileSystemFailure.unresolvable(url)
@@ -121,8 +121,8 @@ enum SafePath {
       }
     }
     if let enumerationError {
-      throw FileSystemFailure.operationFailed(
-        FileOperationFailure(operation: .enumerate, paths: [root], error: enumerationError))
+      throw
+        FileOperationFailure(operation: .enumerate, paths: [root], error: enumerationError)
     }
     return result.sorted()
   }

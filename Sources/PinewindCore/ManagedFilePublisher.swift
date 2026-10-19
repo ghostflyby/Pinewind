@@ -122,7 +122,7 @@ struct ManagedFilePublisher {
         try Cancellation.check()
         let destination = try SafePath.file(path, in: output)
         guard try hashIfPresent(destination) == expected[path] else {
-          throw PinewindError.runtime(.state(.externallyModified))
+          throw StateFailure.externallyModified
         }
         try replace(try SafePath.file(path, in: rendered), at: destination)
       }
@@ -130,7 +130,7 @@ struct ManagedFilePublisher {
         try Cancellation.check()
         let destination = try SafePath.file(path, in: output)
         guard try hashIfPresent(destination) == expected[path] else {
-          throw PinewindError.runtime(.state(.externallyModified))
+          throw StateFailure.externallyModified
         }
         try removeFile(destination)
       }

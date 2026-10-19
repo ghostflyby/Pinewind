@@ -14,7 +14,7 @@
   enum WindowsDirectoryPublisher {
     /// Resolve parent aliases and expand the entry's short name without following
     /// the final managed junction into its replaceable generation.
-    static func publicationPath(_ output: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func publicationPath(_ output: FilePath) throws -> FilePath {
       guard let component = output.lastComponent else {
         throw FileSystemFailure.isFilesystemRoot(output)
       }
@@ -36,7 +36,7 @@
         "." + (output.lastComponent?.string ?? "") + ".pinewind-generations")
     }
 
-    static func validate(_ output: FilePath) throws(FileSystemFailure) {
+    static func validate(_ output: FilePath) throws {
       var isDirectory: ObjCBool = false
       if let target = try currentTarget(output) {
         let target = try resolvedPath(target)
@@ -55,8 +55,8 @@
         }
         let entries: [String]
         do { entries = try FileManager.default.contentsOfDirectory(atPath: output.string) } catch {
-          throw FileSystemFailure.operationFailed(
-            FileOperationFailure(operation: .enumerate, paths: [output], error: error))
+          throw
+            FileOperationFailure(operation: .enumerate, paths: [output], error: error)
         }
         guard entries.isEmpty else {
           throw FileSystemFailure.publicationFailed(
@@ -104,8 +104,8 @@
 
     private static func withHandle<T>(
       _ url: FilePath, access: DWORD, following: Bool = false,
-      _ body: (HANDLE) throws(FileSystemFailure) -> T
-    ) throws(FileSystemFailure) -> T {
+      _ body: (HANDLE) throws -> T
+    ) throws -> T {
       let handle = try windowsNativePath(url).withPlatformString {
         CreateFileW(
           $0, access, DWORD(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE), nil,
@@ -123,11 +123,11 @@
 
     /// Resolve the nearest existing ancestor through the filesystem, including
     /// short names, junctions and case aliases, then append absent components.
-    static func canonicalPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func canonicalPath(_ url: FilePath) throws -> FilePath {
       FilePath(try resolvedPath(url).string.lowercased())
     }
 
-    static func resolvedPath(_ url: FilePath) throws(FileSystemFailure) -> FilePath {
+    static func resolvedPath(_ url: FilePath) throws -> FilePath {
       var ancestor = url
       var missing: [FilePath.Component] = []
       while !FileManager.default.fileExists(atPath: ancestor.string) {
@@ -140,7 +140,7 @@
       }
       var resolved = try withHandle(ancestor, access: 0, following: true) {
         (handle: HANDLE)
-          throws(FileSystemFailure) -> FilePath in
+          throws -> FilePath in
         var buffer = [WCHAR](repeating: 0, count: 32_768)
         let count = GetFinalPathNameByHandleW(handle, &buffer, DWORD(buffer.count), 0)
         guard count > 0, Int(count) < buffer.count else {
@@ -156,7 +156,7 @@
       return resolved
     }
 
-    static func currentTarget(_ output: FilePath) throws(FileSystemFailure) -> FilePath? {
+    static func currentTarget(_ output: FilePath) throws -> FilePath? {
       let attributes = try windowsNativePath(output).withPlatformString {
         GetFileAttributesW($0)
       }
@@ -170,7 +170,7 @@
       }
       if attributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0 { return nil }
       return try withHandle(output, access: 0) {
-        (handle: HANDLE) throws(FileSystemFailure) -> FilePath in
+        (handle: HANDLE) throws -> FilePath in
         var buffer = Data(count: 16_384)
         var count: DWORD = 0
         let ok = buffer.withUnsafeMutableBytes {
@@ -225,7 +225,7 @@
       for word in substitute + [0] + printable + [0] { data.appendInteger(word) }
       try withHandle(output, access: DWORD(GENERIC_WRITE)) {
         (handle: HANDLE)
-          throws(FileSystemFailure) -> Void in
+          throws -> Void in
         var count: DWORD = 0
         let ok = data.withUnsafeMutableBytes {
           DeviceIoControl(

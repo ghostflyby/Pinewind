@@ -13,6 +13,8 @@ import Yams
 struct YAMLReader {
   let source: String
   var text: String? = nil
+  var anchor: Node? = nil
+  var sourceURL: URL? = nil
 
   private func placement(_ mark: Mark, in text: String?) -> Placement {
     // Yams columns count Unicode scalars. Editor columns here count UTF-16 code units, from 1.
@@ -34,19 +36,21 @@ struct YAMLReader {
   /// The decoded document's identity, positioned at the node when one is available.
   func context(at node: Node? = nil) -> DocumentContext {
     let path = FilePath(source)
-    let position = node?.mark.map { placement($0, in: text) }
-    let url = (try? path.foundationURL) ?? URL(fileURLWithPath: source)
+    let position = (node ?? anchor)?.mark.map { placement($0, in: text) }
+    let url = sourceURL ?? (try? path.foundationURL) ?? URL(fileURLWithPath: source)
     return DocumentContext(path: path, url: url, placement: position)
   }
 
   /// An anchored verdict carrying a typed fact.
-  func fail(_ failure: Failure, at node: Node? = nil) -> PinewindError {
-    .configuration(DocumentError(context: context(at: node), failure: failure))
+  func fail<E: Error>(_ failure: E, at node: Node? = nil) -> PinewindError {
+    // Preserve an existing attribution and its original position across decoder layers.
+    if let failure = failure as? PinewindError { return failure }
+    return .configuration(DocumentError(context: context(at: node), failure: failure))
   }
 
   /// An anchored decode failure; the detail carries the structural fact.
   func error(_ detail: String, at node: Node? = nil) -> PinewindError {
-    fail(.declaration(.syntaxError(detail: detail)), at: node)
+    fail(DeclarationFailure.syntaxError(detail: detail), at: node)
   }
 
   func document(_ yaml: String) throws -> Node {
@@ -68,7 +72,7 @@ struct YAMLReader {
       context.placement = mark.map { placement($0, in: yaml) }
       throw PinewindError.configuration(
         DocumentError(
-          context: context, failure: .declaration(.syntaxError(detail: String(describing: error)))))
+          context: context, failure: error))
     }
   }
 
@@ -102,9 +106,9 @@ struct YAMLReader {
 
   func relativePath(_ text: String) throws -> RelativePath {
     guard !text.contains("\0"), !text.contains("\\") else {
-      throw fail(.file(.notPortable(FilePath(text))))
+      throw fail(FileSystemFailure.notPortable(FilePath(text)))
     }
-    do { return try RelativePath(FilePath(text)) } catch { throw fail(.file(error)) }
+    do { return try RelativePath(FilePath(text)) } catch { throw fail(error) }
   }
 
   func version(_ fields: [String: Node]) throws {
@@ -118,7 +122,7 @@ struct YAMLReader {
     let exclude = try fields["exclude"].map { $0.tag == Tag(.null) ? [] : try strings($0) } ?? []
     let filter = FileFilter(include: include, exclude: exclude)
     do { try filter.validate() } catch {
-      throw fail(.declaration(error), at: fields["include"] ?? fields["exclude"])
+      throw fail(error, at: fields["include"] ?? fields["exclude"])
     }
     return filter
   }
@@ -162,10 +166,12 @@ enum ConfigurationParser {
       else {
         throw reader.error("conf imports only accept import and variables", at: node)
       }
-      return .importConf(
-        try ConfImport(
-          source: reader.string(value),
-          variables: fields["variables"].map(reader.stringMap) ?? [:]))
+      do {
+        return .importConf(
+          try ConfImport(
+            source: reader.string(value),
+            variables: fields["variables"].map(reader.stringMap) ?? [:]))
+      } catch { throw reader.fail(error, at: value) }
     default:
       guard fields["variables"] == nil else {
         throw reader.error("variables is only valid on imports", at: node)
@@ -195,17 +201,20 @@ enum ConfigurationEvaluator {
     result.exclude = choose(updates.exclude, result.exclude)
     return result
   }
-  static func request(_ fields: PackageFields) throws(Failure) -> PackageRequest {
-    guard let url = fields.url.value else { throw .declaration(.inlineURLRequired) }
+  static func request(_ fields: PackageFields) throws -> PackageRequest {
+    guard let url = fields.url.value else { throw DeclarationFailure.inlineURLRequired }
     return try PackageRequest(
       url: url, revision: fields.revision.value, recipe: fields.recipe.value,
       options: fields.options.value ?? [:],
       filter: FileFilter(include: fields.include.value, exclude: fields.exclude.value ?? []))
   }
 
-  private static func validate(_ name: String, fields: PackageFields) throws(Failure) {
-    guard !name.isEmpty else { throw .declaration(.emptyName) }
-    guard name != "self" else { throw .declaration(.reservedName("self")) }
+  static func validateName(_ name: String) throws(DeclarationFailure) {
+    guard !name.isEmpty else { throw .emptyName }
+    guard name != "self" else { throw .reservedName("self") }
+  }
+  private static func validate(_ name: String, fields: PackageFields) throws {
+    try validateName(name)
     try fields.validate()
   }
 
@@ -215,7 +224,7 @@ enum ConfigurationEvaluator {
   ) -> [PinewindError] {
     var result: [PinewindError] = []
     var names = document.names
-    func append(_ failure: Failure, anchoredBy context: DocumentContext?) {
+    func append(_ failure: any Error, anchoredBy context: DocumentContext?) {
       let error = PinewindError.runtime(failure)
       result.append(context.map { error.attributed(to: $0, as: .configuration) } ?? error)
     }
@@ -239,7 +248,7 @@ enum ConfigurationEvaluator {
     return result
   }
 
-  static func evaluate(_ document: ManifestDocument, local: LocalOverridesDocument?) throws(Failure)
+  static func evaluate(_ document: ManifestDocument, local: LocalOverridesDocument?) throws
     -> Manifest
   {
     var names = document.names
@@ -254,12 +263,12 @@ enum ConfigurationEvaluator {
     for entry in document.order {
       switch entry {
       case .userFiles(let filter):
-        do { try filter.validate() } catch { throw .declaration(error) }
+        do { try filter.validate() } catch { throw error }
         entries.append(.userFiles(filter))
       case .importConf(let request): entries.append(.importConf(request))
       case .package(let fields): entries.append(.package(try request(fields)))
       case .named(let name, let fields):
-        guard let definition = names[name] else { throw .declaration(.unknownName(name)) }
+        guard let definition = names[name] else { throw DeclarationFailure.unknownName(name) }
         entries.append(.package(try request(merge(fields, into: definition))))
       }
     }

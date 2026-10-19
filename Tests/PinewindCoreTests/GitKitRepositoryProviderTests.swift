@@ -39,7 +39,7 @@ struct GitKitRepositoryProviderTests {
     let ambiguous = RemoteReferences(
       values + [GitReference(name: "refs/heads/other", commit: branch, symbolicTarget: nil)],
       url: f.url)
-    #expect(throws: PinewindError.runtime(.git(.defaultBranchIndeterminate(f.url)))) {
+    #expect(throws: GitFailure.defaultBranchIndeterminate(f.url)) {
       _ = try ambiguous.defaultBranch()
     }
   }
@@ -59,10 +59,10 @@ struct GitKitRepositoryProviderTests {
       }
       #expect(status == GIT_EUSER.rawValue)
       #expect(context.credentialsDeclined)
-      #expect(throws: PinewindError.runtime(.git(.authenticationRequired(endpoint)))) {
+      #expect(throws: GitFailure.authenticationRequired(endpoint)) {
         try transport.check(try #require(status), repository: endpoint, context: context)
       }
-      #expect(throws: PinewindError.self) {
+      #expect(throws: GitFailure.self) {
         try transport.check(GIT_ENOTFOUND.rawValue, repository: endpoint, context: context)
       }
       let signal = CancellationSignal()
@@ -77,7 +77,7 @@ struct GitKitRepositoryProviderTests {
       try transport.check(GIT_EUSER.rawValue, repository: endpoint)
       Issue.record("unknown callback abort accepted")
     } catch {
-      guard case .runtime(.git(.operationFailed(_, _, let status, _))) = error as? PinewindError
+      guard case .operationFailed(_, _, let status, _) = error as? GitFailure
       else {
         Issue.record("unexpected error: \(error)")
         return
@@ -101,7 +101,7 @@ struct GitKitRepositoryProviderTests {
         commit: bad, repository: native(f.origin), destination: native(destination))
       Issue.record("unsafe tree accepted")
     } catch {
-      guard case .runtime(.git(.treeEntryInvalid)) = error as? PinewindError else {
+      guard case .treeEntryInvalid = error as? GitFailure else {
         Issue.record("unexpected rejection: \(error)")
         return
       }
@@ -193,12 +193,12 @@ struct GitKitRepositoryProviderTests {
     #expect(
       try await backend.resolve(RepositoryRequest(url: f.url, revision: .tag("v1"))).commit.string
         == first)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: GitFailure.self) {
       try await backend.resolve(RepositoryRequest(url: f.url, revision: .reference("missing")))
         .commit.string
     }
     try f.branch("v1", commit: first)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: GitFailure.self) {
       try await backend.resolve(RepositoryRequest(url: f.url, revision: .reference("v1"))).commit
         .string
     }
@@ -318,7 +318,7 @@ struct GitKitRepositoryProviderTests {
     defer { f.remove() }
     _ = try f.commit("first")
     let missing = String(repeating: "a", count: 40)
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: GitFailure.self) {
       try await f.backend().prepareSource(
         SourceIdentity(url: f.url, commit: missing), cacheRoot: native(f.cache))
     }
@@ -338,7 +338,7 @@ struct GitKitRepositoryProviderTests {
     try FileManager.default.createSymbolicLink(
       atPath: f.origin.appendingPathComponent("link").path, withDestinationPath: "default.yaml")
     let bad = try f.commit("symlink", extra: ["link"])
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: GitFailure.self) {
       try await backend.prepareSource(
         SourceIdentity(url: f.url, commit: bad), cacheRoot: native(f.cache))
     }
@@ -361,7 +361,7 @@ struct GitKitRepositoryProviderTests {
     let url = try #require(URL(string: text))
     await #expect {
       try await GitKitRepositoryProvider().resolve(RepositoryRequest(url: url)).commit.string
-    } throws: { ($0 as? PinewindError) != nil || $0 is Failure }
+    } throws: { ($0 as? PinewindError) != nil || $0 is any PinewindErrorProtocol }
   }
 
   @Test func explicitCommitResolutionIsOfflineAndNormalizesCase() async throws {
@@ -374,7 +374,7 @@ struct GitKitRepositoryProviderTests {
           url: URL(string: "https://github.com/u/r")!, revision: .commit(CommitID(commit)))
       ).commit.string
         == commit.lowercased())
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: NetworkFailure.self) {
       try await downloadedData(using: downloader, from: URL(string: "http://example.org/file")!)
     }
   }
@@ -389,7 +389,7 @@ struct GitKitRepositoryProviderTests {
     #expect(
       try await downloadedData(using: downloader, from: URL(string: "https://resource.test/ok")!)
         == Data("resource".utf8))
-    await #expect(throws: PinewindError.self) {
+    await #expect(throws: NetworkFailure.self) {
       try await downloadedData(
         using: downloader, from: URL(string: "https://resource.test/missing")!)
     }
@@ -410,7 +410,7 @@ struct GitKitRepositoryProviderTests {
         URL(string: "https://resource.test/ok")!, to: file, maximumBytes: maximumBytes)
     } throws: { error in
       guard
-        case .runtime(.network(.sizeLimitExceeded(let url, let limit))) = error as? PinewindError
+        case .sizeLimitExceeded(let url, let limit) = error as? NetworkFailure
       else {
         return false
       }
@@ -449,14 +449,11 @@ struct GitKitRepositoryProviderTests {
       _ = try await downloadedData(
         using: downloader, from: URL(string: "https://resource.test/offline")!)
       Issue.record("expected a transport failure")
-    } catch let error as PinewindError {
-      guard case .runtime(.network(.transportFailed(let url, .connection, _))) = error,
-        url == URL(string: "https://resource.test/offline")
-      else {
-        Issue.record("\(error)")
-        return
-      }
+    } catch let error as ResourceTransferFailure<URLError> {
+      #expect(error.url == URL(string: "https://resource.test/offline"))
+      #expect(error.cause.code == .cannotConnectToHost)
     }
+
     await #expect(throws: CancellationError.self) {
       try await downloadedData(
         using: downloader, from: URL(string: "https://resource.test/cancelled")!)
@@ -484,11 +481,7 @@ struct GitKitRepositoryProviderTests {
         URL(string: "https://resource.test/ok")!, to: blocker.appending("resource"),
         maximumBytes: maximumBytes)
       Issue.record("expected a destination failure")
-    } catch let error as PinewindError {
-      guard case .runtime(.file(.operationFailed(let failure))) = error else {
-        Issue.record("destination failure left the file domain: \(error)")
-        return
-      }
+    } catch let failure as any FileOperationErrorProtocol {
       #expect(failure.operation == .createDirectory)
       #expect(failure.paths == [blocker])
     }
@@ -565,11 +558,10 @@ private struct LocalGitTransport: GitTransport {
   }
   private func validate(_ url: URL) throws {
     if let expectedURL, url != expectedURL {
-      throw PinewindError.runtime(
-        .git(
-          .operationFailed(
-            repository: url, operation: "validate", status: -1,
-            detail: "unexpected Git transport URL; expected \(expectedURL)")))
+      throw
+        GitFailure.operationFailed(
+          repository: url, operation: "validate", status: -1,
+          detail: "unexpected Git transport URL; expected \(expectedURL)")
     }
   }
 }
@@ -714,11 +706,10 @@ private struct GitFixture {
   private static let initialized = git_libgit2_init()
   private static func check(_ status: Int32) throws {
     guard status >= 0 else {
-      throw PinewindError.runtime(
-        .defect(
-          .wrapped(
-            detail: git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
-              ?? "fixture Git operation failed", origin: Origin())))
+      throw
+        Defect.wrapped(
+          detail: git_error_last().flatMap { $0.pointee.message }.map { String(cString: $0) }
+            ?? "fixture Git operation failed", origin: Origin())
     }
   }
 }

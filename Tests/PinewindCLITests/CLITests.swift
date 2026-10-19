@@ -67,6 +67,50 @@
 
   @Suite("Command-line consumer", .timeLimit(.minutes(1)))
   struct CLITests {
+    @Test func nestedImportFailuresPrintOneLocationAndProduceCompleteJSON() throws {
+      let f = try CommandFixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(at: f.config, withIntermediateDirectories: true)
+      try Data(
+        "version: 1\norder:\n  - import: 5\n  - import: https://example.test/import.conf\n    variables: {a: [1]}\n"
+          .utf8
+      ).write(to: f.manifest)
+      let install = try f.run(["install"] + f.options)
+      #expect(install.status != 0)
+      #expect(install.output.contains("expected a string"))
+      #expect(install.output.components(separatedBy: "pinewind.yaml:").count == 2)
+      let json = try f.run(["lint", "--format", "json"] + f.options)
+      #expect(json.status != 0)
+      let object = try #require(
+        JSONSerialization.jsonObject(with: Data(json.output.utf8)) as? [String: Any])
+      #expect((object["diagnostics"] as? [Any])?.count == 2)
+    }
+
+    @Test func lintReportsOriginalPositionsInTextAndCompleteJSONWithoutInstalling() throws {
+      let f = try CommandFixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(at: f.config, withIntermediateDirectories: true)
+      try Data("version: 1\norder: [missingOne, missingTwo]\n".utf8).write(to: f.manifest)
+      let text = try f.run(["lint"] + f.options)
+      #expect(text.status != 0)
+      #expect(text.output.contains("missingOne") && text.output.contains("missingTwo"))
+      #expect(text.output.contains("2:"))
+      let json = try f.run(["lint", "--format", "json"] + f.options)
+      #expect(json.status != 0)
+      let data = try #require(json.output.data(using: .utf8))
+      let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      #expect(object["version"] as? Int == 1)
+      #expect((object["diagnostics"] as? [Any])?.count == 2)
+      #expect(!FileManager.default.fileExists(atPath: f.lock.path))
+      #expect(!FileManager.default.fileExists(atPath: f.user.path))
+      try Data("version: 1\norder: []\n".utf8).write(to: f.manifest)
+      let clean = try f.run(["lint", "--format", "json"] + f.options)
+      #expect(clean.status == 0)
+      let cleanObject = try #require(
+        JSONSerialization.jsonObject(with: Data(clean.output.utf8)) as? [String: Any])
+      #expect((cleanObject["diagnostics"] as? [Any])?.isEmpty == true)
+    }
+
     @Test func addReportsInvalidCommitSourceAndFilterTogether() throws {
       let f = try CommandFixture()
       defer { f.remove() }

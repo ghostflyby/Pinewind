@@ -14,7 +14,9 @@ struct Pinewind: AsyncParsableCommand {
     commandName: "pinewind", abstract: "Manage Rime packages and build configuration.",
     discussion:
       "Pinewind uses platform user directories. Install prepares dependencies; build publishes configuration to your Rime frontend without accessing the network.",
-    subcommands: [Add.self, Remove.self, Install.self, Update.self, Build.self, Paths.self])
+    subcommands: [
+      Add.self, Remove.self, Install.self, Update.self, Build.self, Lint.self, Paths.self,
+    ])
 }
 
 @main
@@ -176,7 +178,7 @@ struct Build: AsyncParsableCommand {
     let result: CompositionResult
     do {
       result = try await workspace.build(to: directory, overwriteUnmanaged: force)
-    } catch PinewindError.runtime(.state(.unmanagedOutputFiles(let directory, let paths))) {
+    } catch StateFailure.unmanagedOutputFiles(let directory, let paths) {
       throw CommandFailure(
         "Unmanaged files in \(directory.string) were left unchanged:\n"
           + paths.map { "  " + $0.string }.joined(separator: "\n")
@@ -192,6 +194,32 @@ struct Build: AsyncParsableCommand {
       warning("Replaced unmanaged file: \(path.string)")
     }
     for value in result.warnings { warning("Warning: \(value)") }
+  }
+}
+
+struct Lint: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    abstract: "Check original YAML using available local information, without downloading.")
+  enum Format: String, ExpressibleByArgument { case text, json }
+  @OptionGroup var locations: LocationOptions
+  @Option(help: "Output format: text or json.") var format: Format = .text
+  mutating func run() async throws {
+    var options = WorkspaceOptions()
+    if let limit = locations.maximumResourceBytes { options.maximumResourceBytes = limit }
+    // Opening a workspace directly avoids creating personal sources just to lint.
+    let workspace = try await Workspace.open(locations: locations.locations(), options: options)
+    let report = try await workspace.lint()
+    switch format {
+    case .text:
+      if report.isValid { print("No configuration issues found.") }
+      for diagnostic in report.diagnostics { print(diagnostic.description) }
+    case .json:
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+      let data = try encoder.encode(report)
+      FileHandle.standardOutput.write(data + Data([10]))
+    }
+    if !report.isValid { throw ExitCode.failure }
   }
 }
 

@@ -75,10 +75,10 @@ enum FileAccessCoordinator {
             }
             if let error {
               continuation.resume(
-                throwing: FileSystemFailure.operationFailed(
+                throwing:
                   FileOperationFailure(
                     operation: .coordinate,
-                    paths: requests.compactMap { try? NativePath.from($0.url) }, error: error)))
+                    paths: requests.compactMap { try? NativePath.from($0.url) }, error: error))
               return
             }
             do {
