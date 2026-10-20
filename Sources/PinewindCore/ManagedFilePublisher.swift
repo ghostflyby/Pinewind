@@ -20,19 +20,20 @@ struct ManagedFilePublisher {
   let stateRoot: FilePath
   let cacheRoot: FilePath
 
-  private struct Entry: Codable {
+  struct Entry: Codable {
     let path: String
     let sha256: String
   }
-  private struct Record: Codable {
+  struct Record: Codable {
     let version: Int
     let target: String
     let files: [Entry]
+    var sourceRoots: [String]? = nil
   }
 
   func compose(
     _ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath,
-    overwriteUnmanaged: Bool = false
+    overwriteUnmanaged: Bool = false, replaceDirectory: Bool = false
   ) throws
     -> CompositionResult
   {
@@ -42,38 +43,32 @@ struct ManagedFilePublisher {
     let staging = try CompositionSnapshot(root: cacheRoot.appending("publication"))
     defer { withExtendedLifetime(staging) {} }
     let rendered = staging.directory.appending("rendered")
-    let result = try Composer().compose(plan, inputRoot: inputRoot, outputRoot: rendered)
-    let files = try result.paths.map { path in
+    let paths = try Composer().renderCandidate(plan, inputRoot: inputRoot, to: rendered)
+    let files = try paths.map { path in
       Entry(path: path.string, sha256: try SnapshotFiles.sha256(SafePath.file(path, in: rendered)))
     }
-    #if os(Windows)
-      let publication = try WindowsDirectoryPublisher.publicationPath(outputRoot)
-    #else
-      let publication = output
-    #endif
-    let lock = publication.removingLastComponent().appending(
-      "." + (publication.lastComponent?.string ?? "") + ".pinewind-publication.lock")
-    return try NativeLock.withLock(lock) {
+    let sourceRoots = try Set(plan.sourceRoots.map { try SafePath.canonical($0).string }).sorted()
+    let publication = try PublicationLock.output(outputRoot)
+    return try NativeLock.withLock(PublicationLock.file(for: publication)) {
       #if os(Windows)
         // Share the generation publisher's stable entry lock, and never write
         // into a replaceable generation through its final junction.
-        guard try WindowsDirectoryPublisher.currentTarget(publication) == nil else {
-          throw StateFailure.publicationModeConflict(publication)
+        if !replaceDirectory {
+          guard try WindowsDirectoryPublisher.currentTarget(publication) == nil else {
+            throw StateFailure.publicationModeConflict(publication)
+          }
         }
       #endif
       let output = try SafePath.canonical(publication)
       try SafePath.validateRoots(
         input: inputRoot, output: output, sources: plan.sourceRoots + [plan.snapshot.directory])
-      let key = SHA256.hash(data: Data(output.string.utf8)).map { String(format: "%02x", $0) }
-        .joined()
-      let record = stateRoot.appending("publications/" + key + ".plist")
-      let pending = stateRoot.appending("publications/" + key + ".pending.plist")
+      let (record, pending) = records(for: publication)
       var previous: [RelativePath: Set<String>] = [:]
-      let committed = try read(record, target: output)
+      let committed = try read(record, target: publication)
       let pendingEntries: [Entry]
       var warnings: [PublicationWarning] = []
       do {
-        pendingEntries = try read(pending, target: output)
+        pendingEntries = try read(pending, target: publication)
       } catch StateFailure.invalidPublicationRecord {
         pendingEntries = []
         warnings.append(.discardedPendingRecord(pending))
@@ -81,14 +76,28 @@ struct ManagedFilePublisher {
       for entry in committed + pendingEntries {
         previous[try RelativePath(FilePath(entry.path)), default: []].insert(entry.sha256)
       }
-      let current = Set(result.paths)
+      let current = Set(paths)
       var changed: [RelativePath] = []
       var reused: [RelativePath] = []
       var removed: [RelativePath] = []
       var preserved: [RelativePath] = []
       var conflicts: [RelativePath] = []
       var expected: [RelativePath: String] = [:]
-      for path in Set(previous.keys).union(current).sorted() {
+      let outputExisted = FileManager.default.fileExists(atPath: output.string)
+      let existingTree =
+        replaceDirectory && outputExisted
+        ? try PublishedTree.inspect(output) : PublishedTree(directories: [], files: [])
+      let existing = existingTree.files
+      if replaceDirectory {
+        try RuntimeOutputProtection.validate(existing + existingTree.directories + paths)
+        for directory in existingTree.directories {
+          let prefix = directory.string + "/"
+          if !Set(previous.keys).union(current).contains(where: { $0.string.hasPrefix(prefix) }) {
+            conflicts.append(directory)
+          }
+        }
+      }
+      for path in Set(previous.keys).union(current).union(existing).sorted() {
         try validateParents(path, in: output)
         let destination = try SafePath.file(path, in: output)
         if let hash = try hashIfPresent(destination) { expected[path] = hash }
@@ -98,26 +107,75 @@ struct ManagedFilePublisher {
             reused.append(path)
           } else {
             changed.append(path)
-            if expected[path] != nil && previous[path] == nil { conflicts.append(path) }
+            if let hash = expected[path],
+              replaceDirectory ? previous[path]?.contains(hash) != true : previous[path] == nil
+            {
+              conflicts.append(path)
+            }
           }
         } else if let hash = expected[path] {
           if previous[path]?.contains(hash) == true {
             removed.append(path)
           } else {
             preserved.append(path)
+            if replaceDirectory { conflicts.append(path) }
           }
         }
       }
-      guard overwriteUnmanaged || conflicts.isEmpty else {
+      guard (!replaceDirectory && overwriteUnmanaged) || conflicts.isEmpty else {
         throw StateFailure.unmanagedOutputFiles(directory: output, paths: conflicts)
       }
       try plan.binding?.validate()
       try Cancellation.check()
-      try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+      if !replaceDirectory {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+      }
       let intent =
         previous.flatMap { path, hashes in hashes.map { Entry(path: path.string, sha256: $0) } }
         + files
-      try write(Record(version: 1, target: output.string, files: intent), to: pending)
+      try write(
+        Record(version: 1, target: publication.string, files: intent, sourceRoots: sourceRoots),
+        to: pending)
+      if replaceDirectory {
+        var generatedDirectories = Set<RelativePath>()
+        for path in paths {
+          var parent = path.filePath.removingLastComponent()
+          while !parent.isEmpty {
+            generatedDirectories.insert(try RelativePath(parent))
+            parent = parent.removingLastComponent()
+          }
+        }
+        // TODO: clone/copy `rendered` into a candidate on the output volume
+        // instead of rendering the plan twice. Preserve the final ownership and
+        // input-binding checks immediately before the atomic exchange.
+        let published = try Composer().compose(
+          plan, inputRoot: inputRoot, outputRoot: publication, lockAlreadyHeld: true,
+          forcePublication: Set(existingTree.directories) != generatedDirectories,
+          validateOutput: {
+            guard FileManager.default.fileExists(atPath: output.string) == outputExisted else {
+              throw StateFailure.externallyModified
+            }
+            if outputExisted {
+              let observed = try PublishedTree.inspect(output)
+              guard observed.directories == existingTree.directories,
+                observed.files == existingTree.files
+              else { throw StateFailure.externallyModified }
+              for path in observed.files {
+                guard try hashIfPresent(SafePath.file(path, in: output)) == expected[path] else {
+                  throw StateFailure.externallyModified
+                }
+              }
+            }
+          })
+        try write(
+          Record(version: 1, target: publication.string, files: files, sourceRoots: sourceRoots),
+          to: record)
+        try removeFile(pending)
+        return CompositionResult(
+          directory: published.directory, paths: published.paths,
+          changedPaths: published.changedPaths, removedPaths: published.removedPaths,
+          reusedPaths: published.reusedPaths, warnings: warnings)
+      }
       for path in changed {
         try Cancellation.check()
         let destination = try SafePath.file(path, in: output)
@@ -134,17 +192,70 @@ struct ManagedFilePublisher {
         }
         try removeFile(destination)
       }
-      try write(Record(version: 1, target: output.string, files: files), to: record)
+      try write(
+        Record(version: 1, target: publication.string, files: files, sourceRoots: sourceRoots),
+        to: record)
       try removeFile(pending)
       return CompositionResult(
-        directory: output, paths: result.paths, changedPaths: changed, removedPaths: removed,
+        directory: output, paths: paths, changedPaths: changed, removedPaths: removed,
         reusedPaths: reused, preservedPaths: preserved,
         overwrittenUnmanagedPaths: conflicts, warnings: warnings)
     }
   }
 
+  func records(for output: FilePath) -> (committed: FilePath, pending: FilePath) {
+    let key = SHA256.hash(data: Data(output.string.utf8)).map { String(format: "%02x", $0) }
+      .joined()
+    return (
+      stateRoot.appending("publications/" + key + ".plist"),
+      stateRoot.appending("publications/" + key + ".pending.plist")
+    )
+  }
+
+  /// Called under PublicationLock before untracked directory composition,
+  /// including a byte-identical no-op. Preserve ownership and pending recovery,
+  /// but never export using source roots captured from an older composition.
+  func invalidateSnapshotEligibility(output: FilePath) throws {
+    let (record, _) = records(for: output)
+    guard var metadata = try readRecord(record, target: output), metadata.sourceRoots != nil else {
+      return
+    }
+    metadata.sourceRoots = nil
+    try write(metadata, to: record)
+  }
+
+  /// Must be called while holding PublicationLock. Any pending intent, including
+  /// a malformed one, means the multi-file publication is not proven complete.
+  func requireCommitted(output: FilePath) throws -> [FilePath] {
+    let (record, pending) = records(for: output)
+    guard !entryExists(pending) else {
+      throw StateFailure.incompletePublication(output)
+    }
+    guard let metadata = try readRecord(record, target: output) else {
+      throw StateFailure.unpublishedOutput(output)
+    }
+    guard let roots = metadata.sourceRoots else { throw StateFailure.unpublishedOutput(output) }
+    return roots.map { FilePath($0) }
+  }
+
   private func read(_ path: FilePath, target: FilePath) throws -> [Entry] {
-    guard FileManager.default.fileExists(atPath: path.string) else { return [] }
+    try readRecord(path, target: target)?.files ?? []
+  }
+
+  private func entryExists(_ path: FilePath) -> Bool {
+    FileManager.default.fileExists(atPath: path.string)
+      || (try? FileManager.default.attributesOfItem(atPath: path.string)) != nil
+  }
+
+  private func readRecord(_ path: FilePath, target: FilePath) throws -> Record? {
+    guard entryExists(path) else { return nil }
+    let values = try path.foundationURL.resourceValues(forKeys: [
+      .isSymbolicLinkKey, .isRegularFileKey,
+    ])
+    guard values.isSymbolicLink != true else {
+      throw FileSystemFailure.symbolicLinkNotAllowed(path)
+    }
+    guard values.isRegularFile == true else { throw FileSystemFailure.notRegularFile(path) }
     let record: Record
     do {
       record = try PropertyListDecoder().decode(Record.self, from: Data(contentsOf: path))
@@ -159,7 +270,10 @@ struct ManagedFilePublisher {
         throw StateFailure.invalidPublicationRecord(path)
       }
     }
-    return record.files
+    if let roots = record.sourceRoots, roots.contains(where: { !FilePath($0).isAbsolute }) {
+      throw StateFailure.invalidPublicationRecord(path)
+    }
+    return record
   }
 
   private func write(_ record: Record, to path: FilePath) throws {

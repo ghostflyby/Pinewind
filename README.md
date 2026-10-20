@@ -59,6 +59,26 @@ Linux 的 XDG 基目录默认分别为 `~/.config`、`~/.local/state`、`~/.cach
 
 直接使用 `FilePath` 的消费 target 还应声明 Swift System 的 `SystemPackage` product;Pinewind 使用 Swift System `1.8.x`,最低 `1.8.1`。
 
+## 复用命令行
+
+独立命令行宿主可依赖 `PinewindCommands` library product,复用 `pinewind` 的全部子命令与参数校验,不必复制解析代码。原 `pinewind` executable 也通过同一入口执行。
+
+```swift
+import PinewindCommands
+
+let runner = PinewindCommandRunner(
+  commandName: "rime-host",
+  defaultWorkspace: { try discoverHostWorkspace() },
+  defaultOutput: { try discoverHostGeneratedDirectory() },
+  defaultOutputPublication: .directory)
+let status = await runner.run(arguments: Array(CommandLine.arguments.dropFirst()))
+// 进程入口自行处理 status;库不会调用 exit。
+```
+
+上述两个发现函数由宿主提供,返回 `WorkspaceLocations` 与 `FilePath`。省略回调时沿用 Pinewind 的平台默认值。发现只在解析与校验成功、命令实际需要对应默认值时发生;`--help` 不发现宿主路径。每次调用独立捕获启动位置,显式相对路径始终以该位置解析。`--config-directory`、`--state-directory`、`--cache-directory`、`--user-files` 分别覆盖对应默认位置;四项均指定时无需工作区发现。显式 `--output` 或 `--frontend` 跳过宿主默认输出与发布策略,沿用受管文件发布。
+
+`standardOutput`、`standardError` 可注入接收 `Data` 的输出回调,默认写标准流。`run` 返回退出码,取消返回 130;lint JSON 不混入文本诊断。自定义命令名仅接受字母、数字、`.`、`_`、`-`,不能以 `-` 开头。目前补全脚本生成仅支持原 `pinewind` 名称。宿主默认输出可选择 `.directory`,该模式拒绝 `--force`,避免将受管文件覆盖授权误用为整目录替换授权。
+
 ## 工作区
 
 以下位置均由调用方提供。文件 URL 可以来自文件选择器或 iCloud;App 负责下载、书签和授权,并在整个异步操作期间保持访问有效。
@@ -105,6 +125,25 @@ let result = try await workspace.compose(to: outputPath)
 `CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:只接受 `FilePath` 初始化,通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。这些路径从文件枚举到发布一直保留类型,不会在阶段间转回字符串重复校验。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
 默认 `publication: .directory` 原子替换完整目录。该模式在 Windows 上要求输出目录不存在、为空或为 Pinewind 管理的 junction。向现存 Rime 用户目录发布时使用 `publication: .managedFiles()`,只修改生成路径,并通过 `preservedPaths` 报告保留的外部修改文件。未受管同名文件冲突报告为 `StateFailure.unmanagedOutputFiles`;明确授权时使用 `.managedFiles(overwriteUnmanaged: true)`,结果中的 `overwrittenUnmanagedPaths` 列出实际覆盖的路径,`warnings` 报告损坏 pending 的恢复。此模式逐文件原子更新,将发布意图和所有权记录保存在状态目录;中断后下一次构建恢复,不承诺多文件整体原子性。所有平台均要求所在文件系统支持对应的原子发布与锁操作。
+
+## 宿主配置发布与部署快照
+
+`build(to:)` 默认保持与 CLI 一致的受管文件发布。纯生成配置目录可显式选择整目录发布:
+
+```swift
+let result = try await workspace.build(to: generatedDirectory, publication: .directory)
+let snapshot = try await workspace.snapshotPublishedOutput(
+  at: generatedDirectory, to: deploymentSnapshotDirectory)
+// 引擎部署读取 snapshot.directory;后续构建不会改变这份快照。
+```
+
+`build` 的两种模式都拒绝生成 Rime 运行数据路径。整目录模式还会检查现有输出:只有此前发布记录能够证明所有权且内容未改,或与本次生成文件字节相同的文件,才允许接管或替换。未受管文件、外部修改、符号链接、特殊文件和无来源的空目录会阻止发布,包括 `.git` 中的内容。先将个人配置整理到来源目录;不要把混有词库或运行状态的 Rime 用户目录当作纯生成输出。低层 `compose(publication: .directory)` 仍是调用方明确授权的整目录替换,不提供 `build` 的接管保护。
+
+快照接口与发布共用输出入口的跨进程锁,检查完整发布记录后导出独立目录;任何未完成的发布都会阻止导出,应先重新构建恢复。未记录的低层整目录 compose 输出不能直接导出;对既有受管输出调用低层整目录 compose 也会使快照资格失效,包括内容相同的无变化发布,需要重新 build。旧发布记录缺少来源元数据时同样需要重新构建。源与目的地不得重叠,目的地必须不存在,也不能覆盖来源、配置文件、状态或缓存。快照包含配置树中的普通文件与空目录,拒绝符号链接、特殊文件及 Rime 运行数据路径。它不提交配置、不联网,也不触发引擎部署。
+
+`PublishedOutputSnapshot.files` 返回相对路径、SHA-256 与字节数;`revision` 是整个快照树内容的确定性 SHA-256 标识,不是依赖 lock 版本或递增编号。相对路径统一编码为 `/`,平台根目录和原生分隔符不参与标识;相同版本下,实际相对名称、目录结构与文件字节相同的树使用同一标识。名称的大小写和 Unicode 字节差异仍视为不同内容。成功返回后快照由调用方拥有并负责删除,不会随 Swift 值释放而消失。锁只协调参与 Pinewind 协议的发布者;外部编辑器和引擎写入不受该锁控制,导出前应让这些写入静默。宿主应独立处理主 App 容器发现、授权、部署排队与结果回传。
+
+当前安全整目录构建会先渲染用于接管检查,再构造发布候选,因此大型词典有额外渲染开销;后续可通过复制或克隆已渲染内容到输出卷的候选目录优化,同时保留原子切换前的校验。
 
 ## 清单与本地覆写
 

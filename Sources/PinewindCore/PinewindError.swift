@@ -466,6 +466,9 @@ public enum StateFailure: PinewindErrorProtocol, Codable, Hashable {
   case publicationModeConflict(FilePath)
   case unmanagedOutputFiles(directory: FilePath, paths: [RelativePath])
   case invalidPublicationRecord(FilePath)
+  case incompletePublication(FilePath)
+  case unpublishedOutput(FilePath)
+  case snapshotDestinationExists(FilePath)
   case externallyModified
   case staleSnapshot
   case staleInputs
@@ -495,6 +498,14 @@ public enum StateFailure: PinewindErrorProtocol, Codable, Hashable {
     case .invalidPublicationRecord(let path):
       return
         "invalid publication record: \(path.string). Restore a known-good backup, or move this record aside to reset ownership; existing files will be protected as unmanaged on the next build."
+    case .incompletePublication(let path):
+      return
+        "publication is incomplete at \(path.string); run build again before exporting a snapshot"
+    case .unpublishedOutput(let path):
+      return
+        "no committed publication is recorded for \(path.string); run build before exporting a snapshot"
+    case .snapshotDestinationExists(let path):
+      return "snapshot destination must not exist: \(path.string)"
     case .externallyModified: return "configuration changed on disk; reload before saving"
     case .staleSnapshot: return "snapshot is stale; reload before editing"
     case .staleInputs: return "configuration or lock changed before publication"
