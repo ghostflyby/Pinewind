@@ -124,19 +124,14 @@ struct Composer {
     #else
       let candidate = parent.appending(".pinewind-" + UUID().uuidString)
     #endif
-    try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
+    let paths = try renderCandidate(plan, inputRoot: inputRoot, to: candidate)
     var retained = false
     defer { if !retained { try? fm.removeItem(at: candidate) } }
-    let files = plan.files.sorted { $0.key < $1.key }
-    let paths = files.map(\.key)
     var reused: [RelativePath] = []
     var changed: [RelativePath] = []
-    for (path, operations) in files {
+    for path in paths {
       try Cancellation.check()
       let destination = try SafePath.file(path, in: candidate)
-      try fm.createDirectory(
-        at: destination.removingLastComponent(), withIntermediateDirectories: true)
-      try render(operations, to: destination)
       var matchesPrevious = false
       if exists {
         let old = try SafePath.file(path, in: outputRoot)
@@ -183,6 +178,41 @@ struct Composer {
     return CompositionResult(
       directory: outputRoot, paths: paths,
       changedPaths: changed, removedPaths: removed, reusedPaths: reused)
+  }
+
+  /// Renders into a fresh caller-owned private directory without publishing it.
+  /// A temporary tree does not need a publication lock, a junction or a second
+  /// generation directory. Keep this path shallow on Windows, where that extra
+  /// generation layer can exceed MAX_PATH for otherwise ordinary cache roots.
+  /// Successful callers own the candidate; failure removes only our new tree.
+  func renderCandidate(_ plan: CompositionPlan, inputRoot: FilePath, to candidate: FilePath)
+    throws -> [RelativePath]
+  {
+    defer { withExtendedLifetime(plan.snapshot) {} }
+    try Cancellation.check()
+    try SafePath.validateRoots(
+      input: inputRoot, output: candidate, sources: plan.sourceRoots + [plan.snapshot.directory])
+    let fm = FileManager.default
+    guard !fm.fileExists(atPath: candidate.string),
+      (try? fm.attributesOfItem(atPath: candidate.string)) == nil
+    else {
+      throw FileSystemFailure.publicationFailed(detail: "render candidate already exists")
+    }
+    try fm.createDirectory(at: candidate, withIntermediateDirectories: false)
+    var completed = false
+    defer { if !completed { try? fm.removeItem(at: candidate) } }
+    let files = plan.files.sorted { $0.key < $1.key }
+    for (path, operations) in files {
+      try Cancellation.check()
+      let destination = try SafePath.file(path, in: candidate)
+      try fm.createDirectory(
+        at: destination.removingLastComponent(), withIntermediateDirectories: true)
+      try render(operations, to: destination)
+    }
+    try plan.binding?.validate()
+    try Cancellation.check()
+    completed = true
+    return files.map(\.key)
   }
 
   private func render(_ operations: [CompositionOperation], to destination: FilePath) throws {

@@ -43,8 +43,8 @@ struct ManagedFilePublisher {
     let staging = try CompositionSnapshot(root: cacheRoot.appending("publication"))
     defer { withExtendedLifetime(staging) {} }
     let rendered = staging.directory.appending("rendered")
-    let result = try Composer().compose(plan, inputRoot: inputRoot, outputRoot: rendered)
-    let files = try result.paths.map { path in
+    let paths = try Composer().renderCandidate(plan, inputRoot: inputRoot, to: rendered)
+    let files = try paths.map { path in
       Entry(path: path.string, sha256: try SnapshotFiles.sha256(SafePath.file(path, in: rendered)))
     }
     let sourceRoots = try Set(plan.sourceRoots.map { try SafePath.canonical($0).string }).sorted()
@@ -76,7 +76,7 @@ struct ManagedFilePublisher {
       for entry in committed + pendingEntries {
         previous[try RelativePath(FilePath(entry.path)), default: []].insert(entry.sha256)
       }
-      let current = Set(result.paths)
+      let current = Set(paths)
       var changed: [RelativePath] = []
       var reused: [RelativePath] = []
       var removed: [RelativePath] = []
@@ -89,7 +89,7 @@ struct ManagedFilePublisher {
         ? try PublishedTree.inspect(output) : PublishedTree(directories: [], files: [])
       let existing = existingTree.files
       if replaceDirectory {
-        try RuntimeOutputProtection.validate(existing + existingTree.directories + result.paths)
+        try RuntimeOutputProtection.validate(existing + existingTree.directories + paths)
         for directory in existingTree.directories {
           let prefix = directory.string + "/"
           if !Set(previous.keys).union(current).contains(where: { $0.string.hasPrefix(prefix) }) {
@@ -138,7 +138,7 @@ struct ManagedFilePublisher {
         to: pending)
       if replaceDirectory {
         var generatedDirectories = Set<RelativePath>()
-        for path in result.paths {
+        for path in paths {
           var parent = path.filePath.removingLastComponent()
           while !parent.isEmpty {
             generatedDirectories.insert(try RelativePath(parent))
@@ -197,7 +197,7 @@ struct ManagedFilePublisher {
         to: record)
       try removeFile(pending)
       return CompositionResult(
-        directory: output, paths: result.paths, changedPaths: changed, removedPaths: removed,
+        directory: output, paths: paths, changedPaths: changed, removedPaths: removed,
         reusedPaths: reused, preservedPaths: preserved,
         overwrittenUnmanagedPaths: conflicts, warnings: warnings)
     }
