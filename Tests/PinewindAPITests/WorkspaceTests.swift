@@ -853,13 +853,10 @@ struct WorkspaceTests {
     defer { f.remove() }
     try write(f.input.appending("words.userdb/data"), "database")
     let workspace = try await f.workspace()
-    await #expect(
-      throws:
-        StateFailure.runtimeOutputPath(try RelativePath("words.userdb/data"))
-    ) {
-      _ = try await workspace.build(to: f.output, overwriteUnmanaged: true)
-    }
-    #expect(!exists(f.output))
+    let result = try await workspace.build(to: f.output, overwriteUnmanaged: true)
+    #expect(result.paths.isEmpty)
+    #expect(!exists(f.output.appending("words.userdb")))
+    #expect(try read(f.input.appending("words.userdb/data")) == "database")
   }
 
   @Test func sourceConveniencesAndReadOnlyStatusWorkWithoutCLITypes() async throws {
@@ -2107,6 +2104,28 @@ struct WorkspaceTests {
 
   @Suite("Published output", .serialized)
   struct PublishedOutputTests {
+    @Test func remoteRecipeBuildIgnoresRuntimePlaceholdersWithoutDeclarationExclusions()
+      async throws
+    {
+      let f = try Fixture()
+      defer { f.remove() }
+      try await f.repositories.install(
+        firstID,
+        files: [
+          "recipe.yaml": "install_files: [schema.yaml, build/.gitkeep, log/rime.INFO]\n",
+          "schema.yaml": "schema: {schema_id: test}\n",
+          "build/.gitkeep": "", "log/rime.INFO": "runtime",
+        ])
+      try f.remote()
+      let workspace = try await f.workspace()
+      _ = try await workspace.install()
+      let result = try await workspace.build(to: f.output, publication: .directory)
+      #expect(result.paths.map(\.string) == ["schema.yaml"])
+      let snapshot = try await workspace.snapshotPublishedOutput(
+        at: f.output, to: f.root.appending("snapshot"))
+      #expect(snapshot.files.map { $0.path.string } == ["schema.yaml"])
+    }
+
     @Test func directoryBuildTracksOwnershipAndRemovesOnlyUnmodifiedGeneratedFiles() async throws {
       let f = try Fixture()
       defer { f.remove() }

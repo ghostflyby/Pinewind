@@ -227,16 +227,20 @@
       #expect(removed.status == 0, "\(removed.output)")
     }
 
-    @Test func buildRejectsRuntimeInputsBeforePublishing() throws {
+    @Test func buildExcludesRuntimeInputsEvenWhenForced() throws {
       let f = try CommandFixture()
       defer { f.remove() }
       try FileManager.default.createDirectory(at: f.user, withIntermediateDirectories: true)
       try Data("runtime".utf8).write(to: f.user.appendingPathComponent("user.yaml"))
       for flags in [[], ["--force"]] {
         let result = try f.run(["build", "--output", f.output.path] + flags + f.options)
-        #expect(result.status != 0)
-        #expect(result.output.contains("Rime runtime data"))
-        #expect(!FileManager.default.fileExists(atPath: f.output.path))
+        #expect(result.status == 0, "\(result.output)")
+        #expect(
+          !FileManager.default.fileExists(atPath: f.output.appendingPathComponent("user.yaml").path)
+        )
+        #expect(
+          try String(contentsOf: f.user.appendingPathComponent("user.yaml"), encoding: .utf8)
+            == "runtime")
       }
     }
 

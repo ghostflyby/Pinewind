@@ -981,3 +981,61 @@ struct LockTests {
     }
   }
 }
+
+@Suite("Built-in Rime source exclusions")
+struct RuntimeSourceExclusionTests {
+  @Test(arguments: ["self", "package", "cross-package", "patch"])
+  func everySourceRouteExcludesRuntimeEvenWithExplicitIncludes(_ route: String) throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let blocked = [
+      "build/.gitkeep", "build/deep/table.bin",
+      "sync/device/words.txt", "trash/old.yaml", "log/rime.INFO",
+      "installation.yaml", "user.yaml", "words.userdb/data",
+      "nested/WORDS.USERDB.backup/data", "nested/words.userdb.bak/value",
+    ]
+    let allowed = [
+      "schema.yaml", "nested/build/schema.yaml", "nested/log/config.yaml",
+      "nested/sync/config.yaml", "nested/user.yaml",
+    ]
+    #expect(RuntimeOutputProtection.isProtected(try RelativePath("BuIlD/deep/table.bin")))
+    #expect(RuntimeOutputProtection.isProtected(try RelativePath("LOG/rime.INFO")))
+    let paths = blocked + allowed
+    let directory = route == "self" ? f.input : route == "cross-package" ? f.b : f.a
+    for path in paths { try f.write(path, "source", in: directory) }
+    let include = FileFilter(include: ["**"])
+    let a = try PackageRequest(source: .directory(.fileURL(f.a)), filter: include)
+    let b = try PackageRequest(source: .directory(.fileURL(f.b)))
+    let entries: [ManifestEntry]
+    if route == "self" {
+      entries = [.userFiles(include)]
+    } else {
+      let recipe: String
+      if route == "patch" {
+        recipe =
+          "install_files: []\npatch_files:\n"
+          + paths.map {
+            "  \($0): [{value: test}]\n"
+          }.joined()
+      } else {
+        recipe =
+          "install_files:\n"
+          + paths.map {
+            "  - \(route == "cross-package" ? "../b/" : "")\($0)\n"
+          }.joined()
+      }
+      try f.write("recipe.yaml", recipe, in: f.a)
+      entries = route == "cross-package" ? [.package(a), .package(b)] : [.package(a)]
+    }
+    let plan = try f.plan(entries)
+    #expect(Set(plan.paths.map(\.string)) == Set(allowed))
+    for path in blocked {
+      #expect(RuntimeOutputProtection.isProtected(try RelativePath(FilePath(path))))
+      #expect(
+        try String(contentsOf: directory.appendingPathComponent(path), encoding: .utf8) == "source")
+    }
+    _ = try Composer().compose(
+      plan, inputRoot: try NativePath.from(f.input), outputRoot: try NativePath.from(f.output))
+    #expect(Set(try SafePath.files(in: NativePath.from(f.output)).map(\.string)) == Set(allowed))
+  }
+}
