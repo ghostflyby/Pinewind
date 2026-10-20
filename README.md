@@ -124,6 +124,8 @@ let result = try await workspace.compose(to: outputPath)
 
 `CompositionResult.directory` 是 `FilePath`,表示当前发布目录,下一次发布可以替换其内容。`paths`、`changedPaths`、`removedPaths`、`reusedPaths` 是 `[RelativePath]`,它们是经过初始化校验和词法归一化的 `FilePath` 包装:只接受 `FilePath` 初始化,通过 `.filePath` 访问原生路径,通过 `.string` 读取统一 `/` 分隔的表示。例如 `try RelativePath(FilePath("assets/./old/../table.txt"))` 得到 `assets/table.txt`。这些路径从文件枚举到发布一直保留类型,不会在阶段间转回字符串重复校验。`plan.contributions(for:)` 检查贡献顺序和原始来源,不暴露临时快照。
 
+来源选择内置 Rime 运行位置排除规则，不需要在清单中重复 `exclude`：根目录的 `build/`、`sync/`、`trash/`、`log/`、`installation.yaml`、`user.yaml` 及其全部后代，以及任意深度的 `*.userdb` 和 `*.userdb.*`（含备份）均不会进入合成计划。匹配不区分大小写，适用于 self、本地/远程包、配方安装文件（含跨包引用）和补丁目标，显式 include 也不能覆盖。嵌套的 `nested/build/` 等普通配置路径不受根目录规则影响。配方仍检查源模式是否实际匹配，匹配后再排除运行位置，因此显式安装 `build/.gitkeep` 的旧配方可正常使用。发布和快照导出继续拒绝运行数据作为最后防线，不会清理现有运行文件。
+
 默认 `publication: .directory` 原子替换完整目录。该模式在 Windows 上要求输出目录不存在、为空或为 Pinewind 管理的 junction。向现存 Rime 用户目录发布时使用 `publication: .managedFiles()`,只修改生成路径,并通过 `preservedPaths` 报告保留的外部修改文件。未受管同名文件冲突报告为 `StateFailure.unmanagedOutputFiles`;明确授权时使用 `.managedFiles(overwriteUnmanaged: true)`,结果中的 `overwrittenUnmanagedPaths` 列出实际覆盖的路径,`warnings` 报告损坏 pending 的恢复。此模式逐文件原子更新,将发布意图和所有权记录保存在状态目录;中断后下一次构建恢复,不承诺多文件整体原子性。所有平台均要求所在文件系统支持对应的原子发布与锁操作。
 
 ## 宿主配置发布与部署快照

@@ -120,7 +120,8 @@ struct CompositionPlanner: Sendable {
       try Cancellation.check()
       switch entry {
       case .userFiles(let filter):
-        for path in try snapshot.files(in: inputRoot) where !Self.isMetadata(path) {
+        for path in try snapshot.files(in: inputRoot)
+        where !Self.isMetadata(path) && !RuntimeOutputProtection.isProtected(path) {
           if try filter.accepts(path) {
             let file = try SafePath.file(path, in: inputRoot)
             if try excluded.contains(SafePath.canonical(file)) { continue }
@@ -209,7 +210,7 @@ struct CompositionPlanner: Sendable {
         }
         var installed = Set<RelativePath>()
         for (path, file) in selected where installed.insert(path).inserted {
-          if try request.filter.accepts(path) {
+          if try !RuntimeOutputProtection.isProtected(path) && request.filter.accepts(path) {
             try add(
               path, source: file.foundationURL, index: index,
               action: .write(snapshot.capture(file))
@@ -217,7 +218,9 @@ struct CompositionPlanner: Sendable {
           }
         }
         for patch in recipe?.patches ?? [] {
-          if try request.filter.accepts(patch.target) {
+          if try !RuntimeOutputProtection.isProtected(patch.target)
+            && request.filter.accepts(patch.target)
+          {
             add(
               patch.target, source: request.url, index: index,
               action: .patch(rx: patch.rx, body: patch.body))

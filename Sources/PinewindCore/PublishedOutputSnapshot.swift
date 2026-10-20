@@ -105,14 +105,19 @@ struct PublishedTree {
   }
 }
 
-enum RuntimeOutputProtection {
+/// Rime-owned locations are never configuration sources. Root names are
+/// case-insensitive; user databases and their backups are protected at any depth.
+public enum RuntimeOutputProtection {
+  public static func isProtected(_ path: RelativePath) -> Bool {
+    let parts = path.filePath.components.map { $0.string.lowercased() }
+    guard let first = parts.first else { return true }
+    return ["build", "sync", "trash", "log", "installation.yaml", "user.yaml"].contains(first)
+      || parts.contains { $0.hasSuffix(".userdb") || $0.contains(".userdb.") }
+  }
+
   static func validate(_ paths: [RelativePath]) throws {
-    for path in paths {
-      let parts = path.filePath.components.map { $0.string.lowercased() }
-      guard let first = parts.first,
-        !["build", "sync", "trash", "installation.yaml", "user.yaml"].contains(first),
-        !parts.contains(where: { $0.hasSuffix(".userdb") || $0.contains(".userdb.") })
-      else { throw StateFailure.runtimeOutputPath(path) }
+    for path in paths where isProtected(path) {
+      throw StateFailure.runtimeOutputPath(path)
     }
   }
 }
