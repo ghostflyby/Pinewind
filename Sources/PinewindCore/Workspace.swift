@@ -505,7 +505,7 @@ public actor Workspace {
   }
   private func composeOperation(
     _ plan: CompositionPlan, to output: FilePath, publication: PublicationMode,
-    progress: OperationProgress? = nil
+    progress: OperationProgress? = nil, ownedDirectory: Bool = false
   ) async throws -> CompositionResult {
     if let binding = plan.binding { try check(binding.snapshot) }
     let output = try NativePath.absolute(output, relativeTo: locations.relativeTo)
@@ -526,7 +526,20 @@ public actor Workspace {
       try plan.binding?.validate()
       switch publication {
       case .directory:
-        return try Composer().compose(plan, inputRoot: plan.sourceRoots[0], outputRoot: output)
+        if ownedDirectory {
+          return try ManagedFilePublisher(
+            stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
+          ).compose(
+            plan, inputRoot: plan.sourceRoots[0], outputRoot: output, replaceDirectory: true)
+        }
+        let publication = try PublicationLock.output(output)
+        return try Composer().compose(
+          plan, inputRoot: plan.sourceRoots[0], outputRoot: publication,
+          validateOutput: {
+            try ManagedFilePublisher(
+              stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
+            ).invalidateSnapshotEligibility(output: publication)
+          })
       case .managedFiles(let overwriteUnmanaged):
         return try ManagedFilePublisher(
           stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
@@ -898,17 +911,59 @@ extension Workspace {
   public func build(
     to output: FilePath, overwriteUnmanaged: Bool = false, progress: OperationProgress? = nil
   ) async throws -> CompositionResult {
-    let plan = try await plan(cachedInputs(progress: progress), progress: progress)
-    for path in plan.paths {
-      let parts = path.filePath.components.map { $0.string.lowercased() }
-      guard let first = parts.first,
-        !["build", "sync", "trash", "installation.yaml", "user.yaml"].contains(first),
-        !parts.contains(where: { $0.hasSuffix(".userdb") || $0.contains(".userdb.") })
-      else { throw StateFailure.runtimeOutputPath(path) }
-    }
-    return try await compose(
-      plan, to: output, publication: .managedFiles(overwriteUnmanaged: overwriteUnmanaged),
+    try await build(
+      to: output, publication: .managedFiles(overwriteUnmanaged: overwriteUnmanaged),
       progress: progress)
+  }
+
+  /// Builds offline using the requested publication policy. Directory mode is
+  /// for exclusively generated output: existing files must be previously owned
+  /// with unchanged bytes or identical to new generated files. Unmanaged files
+  /// (including obsolete personal configuration), modified owned files and Rime
+  /// runtime paths are rejected before changing output. Move personal files into
+  /// source inputs before opting in. Pending publication is recovered on retry.
+  public func build(
+    to output: FilePath, publication: PublicationMode, progress: OperationProgress? = nil
+  ) async throws -> CompositionResult {
+    let plan = try await plan(cachedInputs(progress: progress), progress: progress)
+    try RuntimeOutputProtection.validate(plan.paths)
+    return try await pipeline {
+      try await composeOperation(
+        plan, to: output, publication: publication, progress: progress, ownedDirectory: true)
+    }
+  }
+
+  /// Exports a complete, independent output tree under the same cross-process
+  /// lock as publication. Requires a successful recorded build (or managed-file
+  /// compose); rejects missing/corrupt records and any unfinished publication.
+  /// The destination must not exist, overlap inputs, documents, state, cache or
+  /// output. It becomes caller-owned only after a successful return. Symlinks
+  /// and special files are rejected; all regular files and empty directories,
+  /// including retained unmanaged configuration, are included. Rime runtime data
+  /// is rejected. Older publication records without captured input roots require
+  /// one rebuild. The lock coordinates Pinewind publishers; other writers must
+  /// be quiescent during export. No current-manifest read or network access occurs.
+  public func snapshotPublishedOutput(at output: FilePath, to destination: FilePath)
+    async throws -> PublishedOutputSnapshot
+  {
+    try await pipeline {
+      let output = try NativePath.absolute(output, relativeTo: locations.relativeTo)
+      let destination = try NativePath.absolute(destination, relativeTo: locations.relativeTo)
+      let protected =
+        try store.documentLocations.map { try $0.filePath }
+        + [locations.userFilesRoot.filePath, locations.stateRoot, locations.cacheRoot]
+      for path in protected {
+        for selected in [output, destination] where try SafePath.overlaps(selected, path) {
+          throw FileSystemFailure.overlappingPaths(selected, path)
+        }
+      }
+      return try await BlockingIO.run {
+        try PublishedOutputExporter(
+          stateRoot: self.locations.stateRoot, cacheRoot: self.locations.cacheRoot
+        )
+        .snapshot(output: output, to: destination)
+      }
+    }
   }
 }
 

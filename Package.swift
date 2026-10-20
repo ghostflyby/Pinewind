@@ -10,6 +10,7 @@ let package = Package(
   ],
   products: [
     .library(name: "PinewindCore", targets: ["PinewindCore"]),
+    .library(name: "PinewindCommands", targets: ["PinewindCommands"]),
     .executable(name: "pinewind", targets: ["PinewindCLI"]),
   ],
   dependencies: [
@@ -28,6 +29,9 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "PinewindCLI",
+      dependencies: ["PinewindCommands"]),
+    .target(
+      name: "PinewindCommands",
       dependencies: [
         "PinewindCore",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -49,7 +53,8 @@ let package = Package(
       name: "PinewindCLITests",
       dependencies: [
         .target(name: "PinewindCLI", condition: .when(platforms: [.macOS, .linux, .windows])),
-        "PinewindCore", .product(name: "SystemPackage", package: "swift-system"),
+        "PinewindCommands", "PinewindCore",
+        .product(name: "SystemPackage", package: "swift-system"),
       ],
       resources: [.copy("Fixtures")]),
     .testTarget(

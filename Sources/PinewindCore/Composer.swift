@@ -50,7 +50,10 @@ public enum PublicationWarning: Sendable, CustomStringConvertible {
 }
 
 public enum PublicationMode: Sendable {
-  /// Atomically replace a complete directory generation.
+  /// Atomically replace a complete directory generation. With `build`, existing
+  /// files must be previously owned or identical to the new generated files.
+  /// Lower-level `compose` replaces the entire tree: its caller must exclusively
+  /// own that directory, which must not contain personal or runtime data.
   case directory
   /// Update only generated files, preserving unrelated input-method data.
   /// Individual files are atomic; an interrupted multi-file update is recovered
@@ -64,7 +67,11 @@ public enum PublicationMode: Sendable {
 /// candidate, so deletions, local edits and lost change notifications stay correct.
 struct Composer {
   /// On Windows, outputRoot must be absent, empty, or a junction managed by Pinewind.
-  func compose(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot requestedOutput: FilePath)
+  func compose(
+    _ plan: CompositionPlan, inputRoot: FilePath, outputRoot requestedOutput: FilePath,
+    lockAlreadyHeld: Bool = false, forcePublication: Bool = false,
+    validateOutput: () throws -> Void = {}
+  )
     throws
     -> CompositionResult
   {
@@ -72,11 +79,7 @@ struct Composer {
     // including optimized builds that may end a property's lifetime at last use.
     defer { withExtendedLifetime(plan.snapshot) {} }
     try Cancellation.check()
-    #if os(Windows)
-      let outputRoot = try WindowsDirectoryPublisher.publicationPath(requestedOutput)
-    #else
-      let outputRoot = try SafePath.canonical(requestedOutput)
-    #endif
+    let outputRoot = try PublicationLock.output(requestedOutput)
     try SafePath.validateRoots(
       input: inputRoot, output: outputRoot, sources: plan.sourceRoots + [plan.snapshot.directory])
     #if os(Windows)
@@ -85,15 +88,22 @@ struct Composer {
         input: inputRoot, output: storage, sources: plan.sourceRoots + [plan.snapshot.directory])
       try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
     #endif
-    return try NativeLock.withLock(
-      outputRoot.removingLastComponent().appending(
-        "." + (outputRoot.lastComponent?.string ?? "") + ".pinewind-publication.lock")
-    ) {
-      try composeGeneration(plan, inputRoot: inputRoot, outputRoot: outputRoot)
+    if lockAlreadyHeld {
+      return try composeGeneration(
+        plan, inputRoot: inputRoot, outputRoot: outputRoot,
+        forcePublication: forcePublication, validateOutput: validateOutput)
+    }
+    return try NativeLock.withLock(PublicationLock.file(for: outputRoot)) {
+      try composeGeneration(
+        plan, inputRoot: inputRoot, outputRoot: outputRoot,
+        forcePublication: forcePublication, validateOutput: validateOutput)
     }
   }
 
-  private func composeGeneration(_ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath)
+  private func composeGeneration(
+    _ plan: CompositionPlan, inputRoot: FilePath, outputRoot: FilePath,
+    forcePublication: Bool, validateOutput: () throws -> Void
+  )
     throws
     -> CompositionResult
   {
@@ -142,13 +152,15 @@ struct Composer {
     }
     let current = Set(paths)
     let removed = previous.filter { !current.contains($0) }
-    if exists && changed.isEmpty && removed.isEmpty {
+    if exists && changed.isEmpty && removed.isEmpty && !forcePublication {
+      try validateOutput()
       try plan.binding?.validate()
       try Cancellation.check()
       return CompositionResult(
         directory: outputRoot, paths: paths,
         changedPaths: [], removedPaths: [], reusedPaths: reused)
     }
+    try validateOutput()
     try plan.binding?.validate()
     try Cancellation.check()
     #if os(Windows)

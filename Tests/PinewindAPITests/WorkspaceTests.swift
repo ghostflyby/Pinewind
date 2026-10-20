@@ -2051,4 +2051,327 @@ struct WorkspaceTests {
     #expect(resolution.imports[0].resources.count == 2)
   }
 
+  @Test func directoryBuildTracksOwnershipAndRemovesOnlyUnmodifiedGeneratedFiles() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("schema.yaml"), "first")
+    try write(f.input.appending("nested/obsolete.txt"), "owned")
+    let workspace = try await f.workspace()
+    _ = try await workspace.build(to: f.output, publication: .directory)
+    try FileManager.default.removeItem(at: url(f.input.appending("nested/obsolete.txt")))
+    try write(f.input.appending("schema.yaml"), "second")
+    let result = try await workspace.build(to: f.output, publication: .directory)
+    #expect(result.removedPaths.map(\.string) == ["nested/obsolete.txt"])
+    #expect(try read(f.output.appending("schema.yaml")) == "second")
+    try write(f.output.appending("schema.yaml"), "personal edit")
+    await #expect(throws: StateFailure.self) {
+      _ = try await workspace.build(to: f.output, publication: .directory)
+    }
+    #expect(try read(f.output.appending("schema.yaml")) == "personal edit")
+  }
+
+  @Test func directoryBuildRemovesFormerlyOwnedEmptyParentsEvenWhenFileBytesAreUnchanged()
+    async throws
+  {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("schema.yaml"), "same")
+    try write(f.input.appending("nested/obsolete.yaml"), "owned")
+    let workspace = try await f.workspace()
+    _ = try await workspace.build(to: f.output, publication: .directory)
+    try FileManager.default.removeItem(at: url(f.input.appending("nested/obsolete.yaml")))
+    try FileManager.default.removeItem(at: url(f.output.appending("nested/obsolete.yaml")))
+    _ = try await workspace.build(to: f.output, publication: .directory)
+    #expect(!exists(f.output.appending("nested")))
+    _ = try await workspace.build(to: f.output, publication: .directory)
+    #expect(try read(f.output.appending("schema.yaml")) == "same")
+  }
+
+  @Test func directoryBuildProtectsUnmanagedGitTreesEmptyDirectoriesAndRuntimeData() async throws {
+    for path in [".git/config", "personal.yaml", "words.userdb/data", "build/output", "user.yaml"] {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("schema.yaml"), "generated")
+      try write(f.output.appending(path), "protected")
+      let workspace = try await f.workspace()
+      await #expect(throws: StateFailure.self) {
+        _ = try await workspace.build(to: f.output, publication: .directory)
+      }
+      #expect(try read(f.output.appending(path)) == "protected")
+      #expect(!exists(f.output.appending("schema.yaml")))
+    }
+    for directory in ["empty personal folder", "empty.userdb"] {
+      let f = try Fixture()
+      defer { f.remove() }
+      try FileManager.default.createDirectory(
+        at: url(f.output.appending(directory)), withIntermediateDirectories: true)
+      let workspace = try await f.workspace()
+      await #expect(throws: StateFailure.self) {
+        _ = try await workspace.build(to: f.output, publication: .directory)
+      }
+      #expect(exists(f.output.appending(directory)))
+    }
+  }
+
+  #if !os(Windows)
+    @Test func directoryBuildCanSafelyAdoptByteIdenticalExistingConfiguration() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("schema.yaml"), "identical")
+      try write(f.output.appending("schema.yaml"), "identical")
+      let workspace = try await f.workspace()
+      let result = try await workspace.build(to: f.output, publication: .directory)
+      #expect(result.reusedPaths.map(\.string) == ["schema.yaml"])
+      let snapshot = try await workspace.snapshotPublishedOutput(
+        at: f.output, to: f.root.appending("snapshot"))
+      #expect(snapshot.files.map(\.path.string) == ["schema.yaml"])
+    }
+  #endif
+
+  @Test func snapshotsAreDetachedDeterministicCompleteAndIndependentOfCurrentManifest() async throws
+  {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("schema.yaml"), "first")
+    let workspace = try await f.workspace()
+    _ = try await workspace.build(to: f.output)
+    try write(f.output.appending(".git/config"), "retained metadata")
+    try FileManager.default.createDirectory(
+      at: url(f.output.appending("empty")), withIntermediateDirectories: true)
+    let first = try await workspace.snapshotPublishedOutput(
+      at: f.output, to: f.root.appending("first"))
+    #expect(first.files.map(\.path.string) == [".git/config", "schema.yaml"])
+    #expect(first.files.allSatisfy { $0.sha256.count == 64 && $0.byteCount > 0 })
+    #expect(exists(first.directory.appending("empty")))
+    try write(f.manifest, "invalid YAML: [")
+    let same = try await workspace.snapshotPublishedOutput(
+      at: f.output, to: f.root.appending("same"))
+    #expect(same.revision == first.revision)
+    try FileManager.default.removeItem(at: url(f.manifest))
+    try write(f.input.appending("schema.yaml"), "second")
+    _ = try await workspace.build(to: f.output)
+    let next = try await workspace.snapshotPublishedOutput(
+      at: f.output, to: f.root.appending("next"))
+    #expect(next.revision != first.revision)
+    #expect(try read(first.directory.appending("schema.yaml")) == "first")
+    #expect(try read(next.directory.appending("schema.yaml")) == "second")
+    try write(first.directory.appending("schema.yaml"), "caller mutation")
+    #expect(try read(f.output.appending("schema.yaml")) == "second")
+  }
+
+  @Test func snapshotsRejectIncompleteCorruptAndUnrecordedPublicationUntilRebuild() async throws {
+    for publication in [PublicationMode.directory, .managedFiles()] {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("old.yaml"), "old")
+      let workspace = try await f.workspace()
+      _ = try await workspace.build(to: f.output, publication: publication)
+      let records = try FileManager.default.contentsOfDirectory(
+        at: url(f.locations.stateRoot.appending("publications")), includingPropertiesForKeys: nil)
+      let record = try #require(records.first { $0.pathExtension == "plist" })
+      let pending = record.deletingPathExtension().appendingPathExtension("pending.plist")
+      // Model process death after durable intent, before the committed record.
+      try FileManager.default.moveItem(at: record, to: pending)
+      await #expect(throws: StateFailure.incompletePublication(f.output)) {
+        _ = try await workspace.snapshotPublishedOutput(
+          at: f.output, to: f.root.appending("rejected"))
+      }
+      #expect(!exists(f.root.appending("rejected")))
+      try FileManager.default.removeItem(at: url(f.input.appending("old.yaml")))
+      try write(f.input.appending("new.yaml"), "new")
+      _ = try await workspace.build(to: f.output, publication: publication)
+      let recovered = try await workspace.snapshotPublishedOutput(
+        at: f.output, to: f.root.appending("recovered"))
+      #expect(recovered.files.map(\.path.string) == ["new.yaml"])
+      try Data("corrupt pending".utf8).write(to: pending)
+      await #expect(throws: StateFailure.incompletePublication(f.output)) {
+        _ = try await workspace.snapshotPublishedOutput(
+          at: f.output, to: f.root.appending("pending"))
+      }
+      try FileManager.default.removeItem(at: pending)
+      try Data("corrupt record".utf8).write(to: record)
+      do {
+        _ = try await workspace.snapshotPublishedOutput(
+          at: f.output, to: f.root.appending("corrupt"))
+        Issue.record("corrupt committed publication record was accepted")
+      } catch StateFailure.invalidPublicationRecord(let actual) {
+        #expect(
+          url(actual).resolvingSymlinksInPath().standardizedFileURL
+            == record.resolvingSymlinksInPath().standardizedFileURL)
+      }
+      try FileManager.default.removeItem(at: record)
+      await #expect(throws: StateFailure.unpublishedOutput(f.output)) {
+        _ = try await workspace.snapshotPublishedOutput(
+          at: f.output, to: f.root.appending("missing"))
+      }
+    }
+  }
+
+  @Test func rawDirectoryCompositionInvalidatesOldSnapshotSourceMetadataEvenOnNoOp()
+    async throws
+  {
+    for identical in [false, true] {
+      let f = try Fixture()
+      defer { f.remove() }
+      let a = f.root.appending("package A")
+      let b = f.root.appending("package B")
+      try write(a.appending("schema.yaml"), "first")
+      try write(b.appending("schema.yaml"), identical ? "first" : "second")
+      try write(f.manifest, "version: 1\norder: [{url: \(url(a).absoluteString)}]\n")
+      let workspace = try await f.workspace()
+      _ = try await workspace.build(to: f.output, publication: .directory)
+      try write(f.manifest, "version: 1\norder: [{url: \(url(b).absoluteString)}]\n")
+      _ = try await workspace.compose(to: f.output, publication: .directory)
+      await #expect(throws: StateFailure.unpublishedOutput(f.output)) {
+        _ = try await workspace.snapshotPublishedOutput(at: f.output, to: b.appending("snapshot"))
+      }
+      #expect(!exists(b.appending("snapshot")))
+      #expect(try read(b.appending("schema.yaml")) == (identical ? "first" : "second"))
+      // Rebuilding captures B's source identity under the normal publication
+      // transaction, even if no output bytes change.
+      _ = try await workspace.build(to: f.output, publication: .directory)
+      await #expect(throws: FileSystemFailure.self) {
+        _ = try await workspace.snapshotPublishedOutput(at: f.output, to: b.appending("snapshot"))
+      }
+      _ = try await workspace.snapshotPublishedOutput(
+        at: f.output, to: f.root.appending("safe snapshot"))
+    }
+  }
+
+  @Test func snapshotsRejectUnsafeDestinationsAndLiveRuntimeDataWithoutChangingThem() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    let local = f.root.appending("local package")
+    try write(local.appending("schema.yaml"), "package")
+    try write(f.manifest, "version: 1\norder: [{url: \(url(local).absoluteString)}]\n")
+    let workspace = try await f.workspace()
+    _ = try await workspace.build(to: f.output)
+    for destination in [
+      f.output, f.output.appending("nested"), f.root, f.input.appending("nested"),
+      f.locations.stateRoot.appending("nested"), f.locations.cacheRoot.appending("nested"),
+      local.appending("nested"), f.manifest.appending("nested"),
+    ] {
+      await #expect(throws: FileSystemFailure.self) {
+        _ = try await workspace.snapshotPublishedOutput(at: f.output, to: destination)
+      }
+    }
+    let occupied = f.root.appending("occupied")
+    try write(occupied.appending("keep"), "protected")
+    await #expect(throws: StateFailure.snapshotDestinationExists(occupied)) {
+      _ = try await workspace.snapshotPublishedOutput(at: f.output, to: occupied)
+    }
+    #expect(try read(occupied.appending("keep")) == "protected")
+    try write(f.output.appending("user.yaml"), "live runtime")
+    await #expect(throws: StateFailure.runtimeOutputPath(try RelativePath("user.yaml"))) {
+      _ = try await workspace.snapshotPublishedOutput(at: f.output, to: f.root.appending("runtime"))
+    }
+  }
+
+  #if !os(Windows)
+    @Test func snapshotsRejectSymlinksAndAliasesUseThePublisherLockIdentity() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("schema.yaml"), "first")
+      let workspace = try await f.workspace()
+      _ = try await workspace.build(to: f.output, publication: .directory)
+      let alias = f.root.appending("output alias")
+      try FileManager.default.createSymbolicLink(at: url(alias), withDestinationURL: url(f.output))
+      let snapshot = try await workspace.snapshotPublishedOutput(
+        at: alias, to: f.root.appending("copy"))
+      #expect(snapshot.sourceDirectory == f.output)
+      try FileManager.default.createSymbolicLink(
+        at: url(f.output.appending("link")), withDestinationURL: url(f.input))
+      await #expect(throws: FileSystemFailure.self) {
+        _ = try await workspace.snapshotPublishedOutput(at: alias, to: f.root.appending("rejected"))
+      }
+      #expect(!exists(f.root.appending("rejected")))
+    }
+  #endif
+
+  @Test func snapshotReadersNeverMixConcurrentDirectoryGenerations() async throws {
+    let f = try Fixture()
+    defer { f.remove() }
+    try write(f.input.appending("a.yaml"), "0")
+    try write(f.input.appending("nested/b.yaml"), "0")
+    let writer = try await f.workspace()
+    let reader = try await f.workspace()
+    _ = try await writer.build(to: f.output, publication: .directory)
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      group.addTask {
+        for index in 1...6 {
+          try write(f.input.appending("a.yaml"), String(index))
+          try write(f.input.appending("nested/b.yaml"), String(index))
+          _ = try await writer.build(to: f.output, publication: .directory)
+        }
+      }
+      group.addTask {
+        for index in 0..<8 {
+          let snapshot = try await reader.snapshotPublishedOutput(
+            at: f.output, to: f.root.appending("snapshot-\(index)"))
+          #expect(
+            try read(snapshot.directory.appending("a.yaml"))
+              == read(snapshot.directory.appending("nested/b.yaml")))
+        }
+      }
+      try await group.waitForAll()
+    }
+  }
+
+  #if os(macOS) || os(Linux)
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func snapshotsWaitForOtherProcessesAndCancelWithoutLeavingCandidates() async throws {
+      let f = try Fixture()
+      defer { f.remove() }
+      try write(f.input.appending("schema.yaml"), "first")
+      let workspace = try await f.workspace()
+      _ = try await workspace.build(to: f.output)
+      let alias = f.root.appending("alias")
+      try FileManager.default.createSymbolicLink(at: url(alias), withDestinationURL: url(f.output))
+      let child = Process()
+      child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+      child.arguments = [
+        "-c",
+        """
+        import fcntl, sys
+        with open(sys.argv[1], 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            print('ready', flush=True)
+            sys.stdin.read(1)
+            with open(sys.argv[2], 'w') as output:
+                output.write('second')
+        """,
+        f.root.appending(".published.pinewind-publication.lock").string,
+        f.output.appending("schema.yaml").string,
+      ]
+      let output = Pipe()
+      let input = Pipe()
+      child.standardOutput = output
+      child.standardInput = input
+      try child.run()
+      defer {
+        if child.isRunning { child.terminate() }
+        child.waitUntilExit()
+      }
+      #expect(try output.fileHandleForReading.read(upToCount: 6) == Data("ready\n".utf8))
+      let cancelledDestination = f.root.appending("cancelled")
+      let cancelled = Task {
+        try await workspace.snapshotPublishedOutput(at: alias, to: cancelledDestination)
+      }
+      try await Task.sleep(for: .milliseconds(80))
+      cancelled.cancel()
+      await #expect(throws: CancellationError.self) { _ = try await cancelled.value }
+      #expect(!exists(cancelledDestination))
+      let successful = Task {
+        try await workspace.snapshotPublishedOutput(at: alias, to: f.root.appending("snapshot"))
+      }
+      try await Task.sleep(for: .milliseconds(80))
+      try input.fileHandleForWriting.write(contentsOf: Data("x".utf8))
+      child.waitUntilExit()
+      let snapshot = try await successful.value
+      #expect(try read(snapshot.directory.appending("schema.yaml")) == "second")
+      let leftovers = try FileManager.default.contentsOfDirectory(atPath: f.root.string)
+      #expect(!leftovers.contains(where: { $0.hasPrefix(".pinewind-export-") }))
+    }
+  #endif
+
 }
