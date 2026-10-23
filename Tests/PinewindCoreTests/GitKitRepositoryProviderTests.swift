@@ -17,6 +17,19 @@ import Testing
 
 @Suite("Pinewind GitKit acquisition")
 struct GitKitRepositoryProviderTests {
+  @Test func referenceDiscoveryIncludesPeeledTagsWithoutFetchingSource() async throws {
+    let f = try GitFixture()
+    defer { f.remove() }
+    let first = try f.commit("first")
+    try f.tag("main", commit: first)
+    let refs = try await f.backend().references(at: f.url)
+    #expect(refs.defaultBranch == "refs/heads/main")
+    #expect(refs.references.contains { $0.name == "refs/heads/main" && $0.commit.string == first })
+    #expect(refs.references.contains { $0.name == "refs/tags/main" && $0.commit.string == first })
+    #expect(!refs.references.contains { $0.name == "HEAD" || $0.name.hasSuffix("^{}") })
+    #expect(throws: GitFailure.ambiguousReference("main")) { try refs.revision(for: "main") }
+  }
+
   @Test func defaultBranchIgnoresSameNamedTagsAndRejectsIndeterminateHEAD() async throws {
     let f = try GitFixture()
     defer { f.remove() }

@@ -168,6 +168,25 @@ order:
 
 后面的文件覆盖前面的同名文件;每个包安装文件后立即应用自己的补丁。`self` 没有特殊优先级。相对 conf import 以清单所在目录为基准,不是用户文件树。远程 conf 的相对 include 限制在根 conf 所在 HTTPS 资源目录内;普通组合使用固定的展开结果,不会重新求值清单。
 
+长时间打开的表单可先读取 `workspace.configuration()`，再通过该快照的 `editing(_:)` 生成候选；`workspace.apply(_:)` 仍以原始文档与 lock 为基线检测外部修改。连续编辑同一候选保留先前改动和诊断，不重新读取或重放用户操作。
+
+## 仓库与配方发现
+
+发现接口不依赖 GUI 或 GitHub，供交互表单、CLI 补全和其他宿主复用：
+
+```swift
+let refs = try await workspace.references(at: repositoryURL)
+let revision = try refs.revision(for: "refs/tags/v1.0")
+let source = try await workspace.source(RepositoryRequest(url: repositoryURL, revision: revision))
+let catalog = try await RecipeCatalog.read(in: source.directory)
+```
+
+引用查询不获取源码；源码获取只解析版本并缓存指定提交的只读快照，不读取配方、不要求已填写包参数，也不获取配方资源。两者均不改变声明或 lock。其他仓库后端可选实现 `RepositoryReferenceProvider`；不具备引用列举能力的后端返回明确错误，不破坏既有 `RepositoryProvider` 实现。
+
+`RepositoryReferences` 是一次远端通告的快照，默认分支可能未知；分支和标签保留各自完全限定名称，同名时拒绝自动猜测。完整提交 ID 可单独输入，是否存在仍由源码获取验证；不从短 SHA 前缀推断任意未通告提交。之后再次按分支名获取可能得到新提交，应将实际 `SourceSnapshot.identity` 作为配方和参数元数据的版本身份。
+
+`RecipeCatalog` 也适用于已下载的本地目录，列出根 `recipe.yaml` 和 `*.recipe.yaml`。坏配方保留为诊断，不隐藏其他有效配方。解析与构建共用配方头部规则，但发现阶段不展开模板；`arguments` 只提供有序参数名，不推断类型、枚举或默认值。`validateOptions` 只校验已声明名称，完整值与模板校验仍走正常准备流程。需要规范化用户输入的来源简写时，使用 `PackageLocator.parse(_:relativeTo:)`，与配置编辑入口一致。
+
 ## 包管理、编辑与预览
 
 日常包管理直接操作 Workspace,单次与批量共用一个非抛出编辑闭包:

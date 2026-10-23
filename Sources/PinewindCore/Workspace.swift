@@ -88,6 +88,36 @@ public actor Workspace {
       throw ErrorBoundary.normalize(error)
     }
   }
+  /// Lists advertised refs without fetching source trees or changing declarations/lock.
+  public func references(at repository: URL) async throws -> RepositoryReferences {
+    try await pipeline {
+      try Task.checkCancellation()
+      guard let provider = services.repositories as? any RepositoryReferenceProvider else {
+        throw GitFailure.referenceListingUnsupported(repository)
+      }
+      let result = try await provider.references(at: repository)
+      try Task.checkCancellation()
+      guard try SourceIdentity.normalize(result.repository) == SourceIdentity.normalize(repository)
+      else {
+        throw Defect.invariant(
+          detail: "reference provider returned an unrelated repository", origin: Origin())
+      }
+      return result
+    }
+  }
+
+  /// Acquires only a commit-bound source tree. It does not read recipes, obtain
+  /// their resources, require package options, or persist configuration/lock.
+  public func source(_ request: RepositoryRequest) async throws -> SourceSnapshot {
+    try await pipeline {
+      try Task.checkCancellation()
+      let identity = try await services.repositories.resolve(request)
+      try Task.checkCancellation()
+      try validate(identity, against: request)
+      return try await source(identity, network: true)
+    }
+  }
+
   public func resolve(progress: OperationProgress? = nil) async throws -> Resolution {
     try await pipeline {
       try await self.resolveSnapshot(store.load(), preview: false, update: nil, progress: progress)
@@ -818,9 +848,7 @@ extension Workspace {
   ) async throws -> ConfigurationSnapshot {
     try await pipeline {
       let baseline = try await store.load()
-      var editor = ConfigurationEditor(baseline)
-      operation(&editor)
-      return editor.snapshot(baseline: baseline)
+      return baseline.editing(operation)
     }
   }
 

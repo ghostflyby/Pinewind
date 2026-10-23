@@ -30,12 +30,30 @@ public struct GitCredentials: Sendable {
 public typealias GitCredentialProvider = @Sendable (URL) -> GitCredentials?
 
 /// Prepares immutable commit snapshots under a FilePath-only cache boundary.
-struct GitKitRepositoryProvider: RepositoryProvider {
+struct GitKitRepositoryProvider: RepositoryProvider, RepositoryReferenceProvider {
   let transport: any GitTransport
   public init(credentials: GitCredentialProvider? = nil) {
     transport = GitKitTransport(credentials: credentials)
   }
   init(transport: any GitTransport) { self.transport = transport }
+
+  public func references(at repository: URL) async throws -> RepositoryReferences {
+    do {
+      let transport = transport
+      return try await BlockingIO.run {
+        let url = try Self.sourceURL(repository)
+        let advertised = RemoteReferences(
+          try transport.advertise(url: Self.remoteURL(url)), url: url)
+        let names = Set(
+          advertised.values.map(\.name).filter { $0.hasPrefix("refs/") && !$0.hasSuffix("^{}") })
+        let references = try names.sorted().map {
+          RepositoryReference(name: $0, commit: try advertised.commit(for: $0))
+        }
+        return RepositoryReferences(
+          repository: url, references: references, defaultBranch: try? advertised.defaultBranch())
+      }
+    } catch { throw ErrorBoundary.normalize(error) }
+  }
 
   public func resolve(_ request: RepositoryRequest) async throws -> SourceIdentity {
     do {
