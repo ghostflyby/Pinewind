@@ -1,5 +1,5 @@
 {
-  "originHash" : "cd28f922c2a507a8bf1fe67ce4b2a5520c48136b61912d5d051326786577b632",
+  "originHash" : "8b7059ed851010b1b7a55d36a4f8a664d29abd75f16d8e2fa9d55052c5e4b157",
   "pins" : [
     {
       "identity" : "csqlite",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Cocoanetics/GitKit",
       "state" : {
-        "revision" : "394b38d6da20e6c988efd0016b595d5ee7075c61",
-        "version" : "2.2.0"
+        "revision" : "2a2638216ee5c1ab82196a8dc17b6c21e4c38f8d",
+        "version" : "2.9.0"
       }
     },
     {
