@@ -1,5 +1,5 @@
 {
-  "originHash" : "cd28f922c2a507a8bf1fe67ce4b2a5520c48136b61912d5d051326786577b632",
+  "originHash" : "eebc34216bad99203584609e1663d82b7484c3693d548bc6ebce619987eed8c1",
   "pins" : [
     {
       "identity" : "csqlite",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Cocoanetics/GitKit",
       "state" : {
-        "revision" : "394b38d6da20e6c988efd0016b595d5ee7075c61",
-        "version" : "2.2.0"
+        "revision" : "8b857d4bef2f9819b886995c7824e9b39d4b4224",
+        "version" : "2.10.0"
       }
     },
     {
@@ -176,8 +176,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system",
       "state" : {
-        "revision" : "869129b7bf4ecc57b97d0193ad29690ca2134750",
-        "version" : "1.8.1"
+        "revision" : "640e5755b5826f4437eaeedd366fd776737db62c",
+        "version" : "1.9.0"
       }
     },
     {
