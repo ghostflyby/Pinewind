@@ -51,6 +51,12 @@ public struct ConfigurationEditor: Sendable {
     manifest = snapshot.manifest
     localOverrides = snapshot.localOverrides
     relativeTo = snapshot.locations.relativeTo
+    diagnostics = snapshot.editingDiagnostics
+    origins = snapshot.editingOrigins
+    localOrigins = snapshot.editingLocalOrigins
+    operationIndex =
+      (diagnostics.compactMap(\.operationIndex) + Array(origins.values) + Array(localOrigins.values))
+      .max().map { $0 + 1 } ?? 0
     localContext = snapshot.locations.configuration.localOverrides.flatMap {
       try? DocumentContext(path: $0.filePath)
     }
@@ -213,8 +219,8 @@ public struct ConfigurationEditor: Sendable {
     var snapshot = ConfigurationSnapshot(
       manifest: manifest, localOverrides: localOverrides,
       sharedRevision: 0, localRevision: 0,
-      sharedIsDirty: manifest != baseline.manifest,
-      localIsDirty: localOverrides != baseline.localOverrides,
+      sharedIsDirty: baseline.sharedIsDirty || manifest != baseline.manifest,
+      localIsDirty: baseline.localIsDirty || localOverrides != baseline.localOverrides,
       locations: baseline.locations, baseline: baseline.baseline)
     let context = try? DocumentContext(path: baseline.locations.configuration.manifest.filePath)
     snapshot.editingDiagnostics = diagnostics.map { diagnostic in
@@ -231,6 +237,14 @@ public struct ConfigurationEditor: Sendable {
 }
 
 extension ConfigurationSnapshot {
+  /// Edits this exact detached baseline. Applying it still rejects concurrent
+  /// document/lock changes; opening a long-lived editor need not reload its base.
+  public func editing(_ operation: @Sendable (inout ConfigurationEditor) -> Void) -> Self {
+    var editor = ConfigurationEditor(self)
+    operation(&editor)
+    return editor.snapshot(baseline: self)
+  }
+
   /// Collects independent configuration problems without network or persistence.
   public func validate(scope: ConfigurationScope? = nil) -> [ConfigurationDiagnostic] {
     guard let scope else {
@@ -341,8 +355,8 @@ private func configurationError(_ error: any Error) -> PinewindError {
   (error as? PinewindError) ?? .runtime(error)
 }
 
-private enum PackageLocator {
-  static func parse(_ source: String, relativeTo base: FilePath) throws -> (String, URL) {
+public enum PackageLocator {
+  public static func parse(_ source: String, relativeTo base: FilePath) throws -> (String, URL) {
     guard !source.isEmpty, !source.contains("\0") else {
       throw DeclarationFailure.invalidPackageSource(source)
     }

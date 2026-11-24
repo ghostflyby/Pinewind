@@ -53,24 +53,8 @@ struct Recipe {
     request: PackageRequest, file: FilePath, reader: YAMLReader,
     root: [String: Node]
   ) throws -> Recipe {
-    let info = try root["recipe"].map { try reader.mapping($0) } ?? [:]
-    if let explicit = request.recipe {
-      guard let value = info["Rx"], try reader.string(value) == explicit else {
-        throw reader.error("recipe Rx must match the explicit recipe name")
-      }
-    }
-    var declared = Set<String>()
-    if let args = info["args"] {
-      for arg in try reader.strings(args) {
-        guard
-          let first = arg.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            .first, !first.isEmpty
-        else {
-          throw reader.error("recipe argument requires a nonempty option name")
-        }
-        declared.insert(String(first))
-      }
-    }
+    let declared = Set(
+      try RecipeDescriptor.declaredArguments(in: root, name: request.recipe, reader: reader))
     guard Set(request.options.keys).isSubset(of: declared) else {
       throw reader.error("options must be declared in recipe.args")
     }

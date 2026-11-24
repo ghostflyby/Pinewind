@@ -186,6 +186,7 @@ public enum GitFailure: PinewindErrorProtocol, Codable, Hashable {
   case referenceNotFound(String)
   case ambiguousReference(String)
   case defaultBranchIndeterminate(URL)
+  case referenceListingUnsupported(URL)
   case authenticationRequired(URL)
   case commitUnavailable(commit: String, repository: URL)
   case operationFailed(repository: URL, operation: String, status: Int32, detail: String)
@@ -200,6 +201,8 @@ public enum GitFailure: PinewindErrorProtocol, Codable, Hashable {
       return "ambiguous Git reference '\(name)'; use refs/heads/ or refs/tags/"
     case .defaultBranchIndeterminate(let url):
       return "Git remote does not advertise an unambiguous default branch: \(url.absoluteString)"
+    case .referenceListingUnsupported(let url):
+      return "repository backend does not support listing references: \(url.absoluteString)"
     case .authenticationRequired(let url): return "authentication required: \(url.absoluteString)"
     case .commitUnavailable(let commit, let repository):
       return "locked commit \(commit) is unavailable: \(repository.absoluteString)"

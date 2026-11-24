@@ -4,8 +4,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import CGitKit
 import Foundation
+import Git2
 import SystemPackage
 
 /// Internal seam for deterministic tests. Production callers enter through the

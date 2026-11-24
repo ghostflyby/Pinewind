@@ -1,0 +1,5 @@
+module Git2 {
+  umbrella header "Git2.h"
+  export *
+  link "git2"
+}

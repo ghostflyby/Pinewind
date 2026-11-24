@@ -39,11 +39,39 @@ jobs:
             } | shasum -a 256 | cut -d ' ' -f 1
           )
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: echo "sha=$(jq -r '."builtin-baseline"' vcpkg.json)" >> "$GITHUB_OUTPUT"
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
       - name: Cache SwiftPM build and dependencies
         uses: actions/cache@v6
         with:
           path: .build
-          key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-macos-arm64-osx-15-v1-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**') }}
+          restore-keys: vcpkg-binary-macos-arm64-osx-15-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh
+      - name: Install libgit2 via vcpkg manifest
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: vcpkg/vcpkg install --triplet arm64-osx-15 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-osx-15
+      - name: Export libgit2 pkg-config path
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/arm64-osx-15/arm64-osx-15/lib/pkgconfig"
+          echo "LIBGIT2_PKG_CONFIG=$pc_dir/libgit2.pc" >> "$GITHUB_ENV"
+          # Let Requires: (libpcre, …) resolve inside the tree instead of
+          # depending on pkg-config-implementation search-path behavior.
+          echo "PKG_CONFIG_PATH=$pc_dir" >> "$GITHUB_ENV"
       - name: swift test
         run: swift test --parallel
 
@@ -56,7 +84,7 @@ jobs:
       - name: Install C dependencies
         run: |
           apt-get update
-          apt-get install -y zlib1g-dev libssl-dev pkg-config ca-certificates
+          apt-get install -y zlib1g-dev libgit2-dev libssl-dev pkg-config ca-certificates
       - name: Identify Linux build environment
         id: swiftpm-environment
         run: |
@@ -92,7 +120,41 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .build
-          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: '"sha=$(jq -r ''."builtin-baseline"'' vcpkg.json)" >> $env:GITHUB_OUTPUT'
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-windows-x64-windows-static-md-v1-${{ steps.windows-image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-binary-windows-x64-windows-static-md-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.bat
+      - name: Install libgit2 via vcpkg manifest
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: ./vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-install-root vcpkg-trees/x64-windows-static-md
+      - name: Export libgit2 pkg-config path
+        run: |
+          $triplet = 'x64-windows-static-md'
+          $pc = @(
+            "lib/pkgconfig",
+            "share/pkgconfig"
+          ) | ForEach-Object { "$env:GITHUB_WORKSPACE/vcpkg-trees/$triplet/$triplet/$_/libgit2.pc" } |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $pc) { throw "libgit2.pc not found under vcpkg-trees/$triplet" }
+          "LIBGIT2_PKG_CONFIG=$($pc -replace '\\','/')" >> $env:GITHUB_ENV
+          # Let Requires: (zlib, …) resolve inside the tree instead of
+          # depending on pkg-config-implementation search-path behavior.
+          "PKG_CONFIG_PATH=$(Split-Path $pc -Resolve)" >> $env:GITHUB_ENV
       - name: swift test
         run: swift test --parallel
       - name: Preserve Windows build cache after failure
@@ -100,7 +162,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .build
-          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
   ios-test:
     name: iOS · build and simulator test
@@ -121,13 +183,41 @@ jobs:
       - name: Cache Xcode build and dependencies
         uses: irgaly/xcode-cache@v1
         with:
-          key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}-${{ github.sha }}
           restore-keys: |
-            ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}-
           swiftpm-package-resolved-file: Package.resolved
           restore-mtime-targets: |
             Tests/**/*
             Package.resolved
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: echo "sha=$(jq -r '."builtin-baseline"' vcpkg.json)" >> "$GITHUB_OUTPUT"
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-macos-arm64-ios-simulator-16-v1-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**') }}
+          restore-keys: vcpkg-binary-macos-arm64-ios-simulator-16-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh
+      - name: Install libgit2 via vcpkg manifest
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: vcpkg/vcpkg install --triplet arm64-ios-simulator-16 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-ios-simulator-16
+      - name: Export libgit2 pkg-config path
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/arm64-ios-simulator-16/arm64-ios-simulator-16/lib/pkgconfig"
+          echo "LIBGIT2_PKG_CONFIG=$pc_dir/libgit2.pc" >> "$GITHUB_ENV"
+          # Let Requires: (openssl, libpcre, …) resolve inside the tree
+          # instead of depending on pkg-config-implementation behavior.
+          echo "PKG_CONFIG_PATH=$pc_dir" >> "$GITHUB_ENV"
       - name: Select simulator
         run: |
           if ! sim_id=$(
@@ -158,7 +248,7 @@ jobs:
           disable-automatic-package-resolution: true
           skip-macro-validation: true
           skip-package-plugin-validation: true
-          build-settings: CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=NO
+          build-settings: CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES
           output-formatter: tee "${{ runner.temp }}/pinewind-ios-diagnostics/ios-test.log"
       - name: Collect diagnostics
         if: always()
