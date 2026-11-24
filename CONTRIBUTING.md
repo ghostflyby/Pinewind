@@ -23,6 +23,8 @@ vcpkg install --triplet arm64-ios-simulator-16 --overlay-triplets vcpkg-triplets
 export LIBGIT2_PKG_CONFIG=$PWD/vcpkg-trees/arm64-ios-simulator-16/arm64-ios-simulator-16/lib/pkgconfig/libgit2.pc
 ```
 
+设变量的同时建议 `export PKG_CONFIG_PATH=$(dirname "$LIBGIT2_PKG_CONFIG")`:vcpkg 产出的 pc 带 `Requires:`(libpcre/openssl 等),把搜索路径指进树内可让传递依赖就地解析,不依赖具体 pkg-config 实现是否把显式 pc 所在目录纳入搜索(CI 已这样做)。
+
 `vcpkg-triplets/` 提供部署目标钉在包平台下限(macOS 15 / iOS 16)的专属 triplet(名字后缀即下限):stock triplet 不设 `CMAKE_OSX_DEPLOYMENT_TARGET`,会按宿主 SDK 基线产出、与包链接时告警;专属名字同时拥有独立 ABI 命名空间,不与同根下既往安装状态冲突。升级依赖 = 更新 `vcpkg.json` 的 baseline(本地 vcpkg 先 `git pull` 拿新 commit)后重新 install。引用 `PinewindCore` 的消费方同理:export 变量即完全接管供给(动/静态由所选 pc 的 `Libs` 指向决定),不设则走系统回退。
 
 ## 本地检查

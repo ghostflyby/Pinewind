@@ -269,7 +269,7 @@ let named = try await workspace.refresh(packagesNamed: ["emoji"])
 
 默认 `.locked` 准备模式允许共享锁定版本和本地目录改向。覆写引入其他远程选择或尚未固定的资源时,显式使用 `fetch(mode: .development)` 或 `fetchAndCompose(to:mode: .development)`。开发结果只用于本次准备,不写共享锁或本地锁。
 
-`WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现使用 vcpkg 供给的 libgit2(`Git2` 模块,获取方式见[贡献指南](CONTRIBUTING.md))和 HTTPS 后端。认证和 HTTP session 通过 `WorkspaceServices.live(credentials:session:)` 配置。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。
+`WorkspaceServices` 可注入 `RepositoryProvider` 和 `ResourceDownloader`。默认实现使用 pkg-config 解析的 libgit2(`Git2` 模块,供给方式由构建者选择,见[贡献指南](CONTRIBUTING.md))和 HTTPS 后端。认证和 HTTP session 通过 `WorkspaceServices.live(credentials:session:)` 配置。默认 Git 后端不使用外部 git/ssh 命令;下载、资源固定与条目视图由工作区完成。
 
 通过服务工厂注入的 session 在有界和无上限下载中都将认证质询转发给注入 session 的 delegate,回调接收注入的 session 和实际传输的 task;未实现对应回调时使用默认认证处理。Corelibs 的有界下载使用相同配置的专用 session 承载传输。
 

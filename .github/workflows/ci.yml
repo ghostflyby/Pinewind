@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .build
-          key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+          key: macos-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}
       - name: Cache vcpkg binary packages
         uses: actions/cache@v6
         with:
@@ -66,9 +66,12 @@ jobs:
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
         run: vcpkg/vcpkg install --triplet arm64-osx-15 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-osx-15
       - name: Export libgit2 pkg-config path
-        run: >
-          echo "LIBGIT2_PKG_CONFIG=$GITHUB_WORKSPACE/vcpkg-trees/arm64-osx-15/arm64-osx-15/lib/pkgconfig/libgit2.pc"
-          >> "$GITHUB_ENV"
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/arm64-osx-15/arm64-osx-15/lib/pkgconfig"
+          echo "LIBGIT2_PKG_CONFIG=$pc_dir/libgit2.pc" >> "$GITHUB_ENV"
+          # Let Requires: (libpcre, …) resolve inside the tree instead of
+          # depending on pkg-config-implementation search-path behavior.
+          echo "PKG_CONFIG_PATH=$pc_dir" >> "$GITHUB_ENV"
       - name: swift test
         run: swift test --parallel
 
@@ -117,7 +120,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .build
-          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
       - name: Resolve pinned vcpkg revision
         id: vcpkg-ref
         run: '"sha=$(jq -r ''."builtin-baseline"'' vcpkg.json)" >> $env:GITHUB_OUTPUT'
@@ -149,6 +152,9 @@ jobs:
             Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $pc) { throw "libgit2.pc not found under vcpkg-trees/$triplet" }
           "LIBGIT2_PKG_CONFIG=$($pc -replace '\\','/')" >> $env:GITHUB_ENV
+          # Let Requires: (zlib, …) resolve inside the tree instead of
+          # depending on pkg-config-implementation search-path behavior.
+          "PKG_CONFIG_PATH=$(Split-Path $pc -Resolve)" >> $env:GITHUB_ENV
       - name: swift test
         run: swift test --parallel
       - name: Preserve Windows build cache after failure
@@ -156,7 +162,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .build
-          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
   ios-test:
     name: iOS · build and simulator test
@@ -177,9 +183,9 @@ jobs:
       - name: Cache Xcode build and dependencies
         uses: irgaly/xcode-cache@v1
         with:
-          key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}-${{ github.sha }}
           restore-keys: |
-            ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            ios-deriveddata-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}-
           swiftpm-package-resolved-file: Package.resolved
           restore-mtime-targets: |
             Tests/**/*
@@ -206,9 +212,12 @@ jobs:
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
         run: vcpkg/vcpkg install --triplet arm64-ios-simulator-16 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-ios-simulator-16
       - name: Export libgit2 pkg-config path
-        run: >
-          echo "LIBGIT2_PKG_CONFIG=$GITHUB_WORKSPACE/vcpkg-trees/arm64-ios-simulator-16/arm64-ios-simulator-16/lib/pkgconfig/libgit2.pc"
-          >> "$GITHUB_ENV"
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/arm64-ios-simulator-16/arm64-ios-simulator-16/lib/pkgconfig"
+          echo "LIBGIT2_PKG_CONFIG=$pc_dir/libgit2.pc" >> "$GITHUB_ENV"
+          # Let Requires: (openssl, libpcre, …) resolve inside the tree
+          # instead of depending on pkg-config-implementation behavior.
+          echo "PKG_CONFIG_PATH=$pc_dir" >> "$GITHUB_ENV"
       - name: Select simulator
         run: |
           if ! sim_id=$(
