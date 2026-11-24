@@ -2,7 +2,16 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "pinewind",
   "dependencies": [
-    "libgit2"
+    {
+      "name": "libgit2",
+      "default-features": false,
+      "features": ["pcre", "mbedtls"],
+      "platform": "linux"
+    },
+    {
+      "name": "libgit2",
+      "platform": "!linux"
+    }
   ],
   "builtin-baseline": "585d05d9dd12a0e0a25a39f9f0778686d8ea21fb"
 }

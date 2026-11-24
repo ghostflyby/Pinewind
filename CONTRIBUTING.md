@@ -27,6 +27,35 @@ export LIBGIT2_PKG_CONFIG=$PWD/vcpkg-trees/arm64-ios-simulator-16/arm64-ios-simu
 
 `vcpkg-triplets/` 提供部署目标钉在包平台下限(macOS 15 / iOS 16)的专属 triplet(名字后缀即下限):stock triplet 不设 `CMAKE_OSX_DEPLOYMENT_TARGET`,会按宿主 SDK 基线产出、与包链接时告警;专属名字同时拥有独立 ABI 命名空间,不与同根下既往安装状态冲突。升级依赖 = 更新 `vcpkg.json` 的 baseline(本地 vcpkg 先 `git pull` 拿新 commit)后重新 install。引用 `PinewindCore` 的消费方同理:export 变量即完全接管供给(动/静态由所选 pc 的 `Libs` 指向决定),不设则走系统回退。
 
+## 静态可执行文件
+
+发布用的 `pinewind` 二进制把全部非系统依赖(含 libgit2 及其传递依赖)静态链接。
+
+**macOS**:Swift 运行时随系统提供,Apple 工具链已不支持静态链接 Swift 库,因此运行时是系统动态库。`vcpkg-triplets/arm64-osx-15` 本身就是静态 triplet;把 `LIBGIT2_PKG_CONFIG` 指向它的 pc 再按 release 构建即可:
+
+```sh
+vcpkg install --triplet arm64-osx-15 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-osx-15
+export LIBGIT2_PKG_CONFIG=$PWD/vcpkg-trees/arm64-osx-15/arm64-osx-15/lib/pkgconfig/libgit2.pc
+export PKG_CONFIG_PATH=$(dirname "$LIBGIT2_PKG_CONFIG")
+swift build -c release --product pinewind
+otool -L .build/release/pinewind   # 动态依赖只应出现 /usr/lib 与 /System/Library
+```
+
+**Linux**:用 Swift Static Linux SDK 产出全静态 musl 可执行文件。stock `x64-linux` triplet 本来就是静态库,把 `CC`/`CXX` 换成 `musl-gcc` 重编 libgit2 及其依赖,再以 `--swift-sdk` 构建。Linux 上 `vcpkg.json` 为 libgit2 选 mbedTLS 而不是 OpenSSL:Static SDK 的 FoundationNetworking 自带 BoringSSL,两套 OpenSSL 系静态库符号重名会互相顶替:
+
+```sh
+CC=musl-gcc CXX=musl-gcc vcpkg install --triplet x64-linux --x-install-root vcpkg-trees/musl
+export LIBGIT2_PKG_CONFIG=$PWD/vcpkg-trees/musl/x64-linux/lib/pkgconfig/libgit2.pc
+export PKG_CONFIG_PATH=$(dirname "$LIBGIT2_PKG_CONFIG")
+swift sdk install https://download.swift.org/swift-6.2-release/static-sdk/swift-6.2-RELEASE/swift-6.2-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz --checksum d2225840e592389ca517bbf71652f7003dbf45ac35d1e57d98b9250368769378
+swift build -c release --product pinewind --swift-sdk x86_64-swift-linux-musl
+readelf -d .build/x86_64-swift-linux-musl/release/pinewind   # 不应有 NEEDED
+```
+
+**Windows**:Swift 工具链不支持全静态可执行文件(`-static-executable` 未实现,静态链接模型仍需要支持 DLL)。C 依赖仍用 `x64-windows-static-md` 静态链接,Swift 运行时 DLL 随可执行文件一起打包。
+
+CI 的 `macos-static-binary`、`linux-static-binary`、`windows-static-binary` 任务分别构建上述产物并上传压缩包。
+
 ## 本地检查
 
 ```sh

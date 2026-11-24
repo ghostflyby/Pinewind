@@ -75,6 +75,83 @@ jobs:
       - name: swift test
         run: swift test --parallel
 
+  macos-static-binary:
+    name: macOS · static pinewind binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Identify macOS build environment
+        id: swiftpm-environment
+        run: |
+          fingerprint=$(
+            {
+              swift --version
+              xcodebuild -version
+              xcrun --sdk macosx --show-sdk-build-version
+              sw_vers -buildVersion
+            } | shasum -a 256 | cut -d ' ' -f 1
+          )
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: echo "sha=$(jq -r '."builtin-baseline"' vcpkg.json)" >> "$GITHUB_OUTPUT"
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
+      - name: Cache SwiftPM build and dependencies
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: macos-static-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json', 'vcpkg-triplets/**') }}
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-macos-arm64-osx-15-v1-${{ hashFiles('vcpkg.json', 'vcpkg-triplets/**') }}
+          restore-keys: vcpkg-binary-macos-arm64-osx-15-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh
+      - name: Install static libgit2 via vcpkg manifest
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: vcpkg/vcpkg install --triplet arm64-osx-15 --overlay-triplets vcpkg-triplets --x-install-root vcpkg-trees/arm64-osx-15
+      - name: Build static executable
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/arm64-osx-15/arm64-osx-15/lib/pkgconfig"
+          export LIBGIT2_PKG_CONFIG="$pc_dir/libgit2.pc"
+          export PKG_CONFIG_PATH="$pc_dir"
+          swift build -c release --product pinewind
+      - name: Verify dependency closure is system-only
+        run: |
+          binary=.build/release/pinewind
+          test -x "$binary"
+          dependencies=$(otool -L "$binary" | awk 'NR > 1 { print $1 }')
+          printf '%s\n' "$dependencies"
+          foreign=$(printf '%s\n' "$dependencies" | grep -Ev '^(/usr/lib/|/System/Library/)' || true)
+          if [ -n "$foreign" ]; then
+            echo "::error::non-system dynamic dependencies: $foreign"
+            exit 1
+          fi
+          "$binary" --help > /dev/null
+      - name: Package executable
+        run: |
+          arch="$(printf '%s' "${{ runner.arch }}" | tr '[:upper:]' '[:lower:]')"
+          name="pinewind-macos-$arch"
+          mkdir -p dist
+          staging="$RUNNER_TEMP/$name"
+          mkdir -p "$staging"
+          cp .build/release/pinewind LICENSE "$staging"/
+          tar -czf "dist/$name.tar.gz" -C "$staging" pinewind LICENSE
+      - name: Upload static executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: pinewind-macos-static
+          path: dist/
+          if-no-files-found: error
+
   linux-test:
     name: Linux · swift test
     runs-on: ubuntu-latest
@@ -102,6 +179,109 @@ jobs:
           key: linux-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
       - name: swift test
         run: swift test --parallel
+
+  # Fully static musl binary via the Swift Static Linux SDK. libgit2 and its
+  # transitive dependencies are rebuilt against musl with the stock x64-linux
+  # triplet (already VCPKG_LIBRARY_LINKAGE static) by pointing CC/CXX at
+  # musl-gcc, so a C++ dependency fails to build instead of mixing glibc.
+  linux-static-binary:
+    name: Linux · static pinewind binary
+    runs-on: ubuntu-latest
+    container: swift:6.2.0-noble
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install musl toolchain and vcpkg prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            musl-tools g++ make perl python3 pkg-config jq binutils file \
+            ca-certificates curl zip unzip tar
+      - name: Identify Linux build environment
+        id: swiftpm-environment
+        run: |
+          swift --version
+          musl-gcc --version
+          fingerprint=$(
+            {
+              swift --version
+              musl-gcc --version
+              echo "static-sdk=d2225840e592389ca517bbf71652f7003dbf45ac35d1e57d98b9250368769378"
+            } | sha256sum | cut -d ' ' -f 1
+          )
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Cache SwiftPM build and dependencies
+        id: linux-static-swiftpm-cache
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: linux-static-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: echo "sha=$(jq -r '."builtin-baseline"' vcpkg.json)" >> "$GITHUB_OUTPUT"
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-linux-musl-x64-swift-6.2.0-noble-v1-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-binary-linux-musl-x64-swift-6.2.0-noble-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh
+      - name: Install musl libgit2 via vcpkg manifest
+        env:
+          CC: musl-gcc
+          CXX: musl-gcc
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: vcpkg/vcpkg install --triplet x64-linux --x-install-root vcpkg-trees/musl
+      - name: Install Swift static Linux SDK
+        run: |
+          swift sdk install \
+            https://download.swift.org/swift-6.2-release/static-sdk/swift-6.2-RELEASE/swift-6.2-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz \
+            --checksum d2225840e592389ca517bbf71652f7003dbf45ac35d1e57d98b9250368769378
+          swift sdk list
+      - name: Build static executable
+        run: |
+          pc_dir="$GITHUB_WORKSPACE/vcpkg-trees/musl/x64-linux/lib/pkgconfig"
+          export LIBGIT2_PKG_CONFIG="$pc_dir/libgit2.pc"
+          export PKG_CONFIG_PATH="$pc_dir"
+          swift build -c release --product pinewind --swift-sdk x86_64-swift-linux-musl
+          bin_dir=$(swift build -c release --product pinewind --swift-sdk x86_64-swift-linux-musl --show-bin-path)
+          echo "PINEWIND_BIN=$bin_dir/pinewind" >> "$GITHUB_ENV"
+      - name: Verify static executable
+        run: |
+          file "$PINEWIND_BIN"
+          if readelf -d "$PINEWIND_BIN" | grep -q NEEDED; then
+            echo "::error::pinewind is dynamically linked"
+            readelf -d "$PINEWIND_BIN"
+            exit 1
+          fi
+          "$PINEWIND_BIN" --help > /dev/null
+      - name: Package executable
+        run: |
+          name=pinewind-linux-x86_64
+          mkdir -p dist
+          staging="$RUNNER_TEMP/$name"
+          mkdir -p "$staging"
+          cp "$PINEWIND_BIN" LICENSE "$staging"/
+          tar -czf "dist/$name.tar.gz" -C "$staging" pinewind LICENSE
+      - name: Upload static executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: pinewind-linux-static
+          path: dist/
+          if-no-files-found: error
+      - name: Preserve Linux build cache after failure
+        if: failure() && steps.linux-static-swiftpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .build
+          key: linux-static-swiftpm-v1-${{ runner.arch }}-${{ steps.swiftpm-environment.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
   windows-test:
     name: Windows · swift test
@@ -163,6 +343,143 @@ jobs:
         with:
           path: .build
           key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+
+  # The Swift toolchain has no fully static Windows executable support:
+  # -static-executable is unimplemented and the static link model still
+  # requires support DLLs. This job statically links all C dependencies
+  # (x64-windows-static-md) and bundles the Swift runtime DLLs the executable
+  # actually imports, leaving only Windows system DLLs external.
+  windows-static-binary:
+    name: Windows · static pinewind bundle
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: SwiftyLab/setup-swift@v1
+        id: swift
+        with:
+          swift-version: '6.3.1'
+      - name: Show toolchain
+        run: swift --version
+      - name: Identify Windows image
+        id: windows-image
+        run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
+      - name: Cache SwiftPM build and dependencies
+        id: windows-static-swiftpm-cache
+        uses: actions/cache@v6
+        with:
+          path: .build
+          key: windows-static-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+      - name: Resolve pinned vcpkg revision
+        id: vcpkg-ref
+        run: '"sha=$(jq -r ''."builtin-baseline"'' vcpkg.json)" >> $env:GITHUB_OUTPUT'
+      - name: Checkout vcpkg
+        uses: actions/checkout@v7
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.vcpkg-ref.outputs.sha }}
+          path: vcpkg
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v6
+        with:
+          path: .vcpkg-binary-cache
+          key: vcpkg-binary-windows-x64-windows-static-md-v1-${{ steps.windows-image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-binary-windows-x64-windows-static-md-v1-
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.bat
+      - name: Install libgit2 via vcpkg manifest
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+        run: ./vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-install-root vcpkg-trees/x64-windows-static-md
+      - name: Export libgit2 pkg-config path
+        run: |
+          $triplet = 'x64-windows-static-md'
+          $pc = @(
+            "lib/pkgconfig",
+            "share/pkgconfig"
+          ) | ForEach-Object { "$env:GITHUB_WORKSPACE/vcpkg-trees/$triplet/$triplet/$_/libgit2.pc" } |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $pc) { throw "libgit2.pc not found under vcpkg-trees/$triplet" }
+          "LIBGIT2_PKG_CONFIG=$($pc -replace '\\','/')" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$(Split-Path $pc -Resolve)" >> $env:GITHUB_ENV
+      - name: Build release executable
+        run: swift build -c release --product pinewind
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Package executable with runtime DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = & swift build -c release --product pinewind --show-bin-path
+          $exe = Join-Path $binDir 'pinewind.exe'
+          if (-not (Test-Path $exe)) { throw "pinewind.exe not found at $exe" }
+          $stage = Join-Path $env:RUNNER_TEMP 'pinewind-windows-x64'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $exe, 'LICENSE' $stage
+
+          $imports = & dumpbin.exe /nologo /dependents $exe |
+            ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } } |
+            Sort-Object -Unique
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed on pinewind.exe' }
+          if (-not $imports) { throw 'could not parse DLL imports' }
+
+          function Get-DllImports([string]$file) {
+            & dumpbin.exe /nologo /dependents $file |
+              ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } }
+          }
+
+          $systemDirs = @(
+            (Join-Path $env:WINDIR 'System32'),
+            (Join-Path $env:WINDIR 'SysWOW64')
+          )
+          $redistPattern = '^(msvcp|vcruntime|concrt|vccorlib)'
+          $seen = @{}
+          $queue = [System.Collections.Generic.Queue[string]]::new()
+          $imports | ForEach-Object { $queue.Enqueue($_) }
+          while ($queue.Count -gt 0) {
+            $dll = $queue.Dequeue()
+            if ($seen.ContainsKey($dll)) { continue }
+            $seen[$dll] = $true
+            $bundled = Join-Path $stage $dll
+            if (Test-Path $bundled) {
+              $source = $bundled
+            } else {
+              $resolved = (& where.exe $dll 2>$null | Select-Object -First 1)
+              if (-not $resolved) { throw "cannot locate $dll" }
+              if (($systemDirs -contains (Split-Path -Parent $resolved)) -and ($dll -notmatch $redistPattern)) { continue }
+              Copy-Item $resolved $bundled
+              $source = $bundled
+            }
+            Get-DllImports $source | ForEach-Object { $queue.Enqueue($_) }
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed on $source" }
+          }
+
+          $seen.Keys | Sort-Object
+          $thirdParty = $seen.Keys | Where-Object {
+            $_ -match '^(libgit2|git2|libssl|libcrypto|libpcre|pcre2|zlib1|http_parser)'
+          }
+          if ($thirdParty) {
+            throw "non-static C dependencies: $($thirdParty -join ', ')"
+          }
+
+          $env:PATH = "$stage;$env:SystemRoot\System32;$env:SystemRoot"
+          & (Join-Path $stage 'pinewind.exe') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'smoke test failed' }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'dist\pinewind-windows-x64.zip' -Force
+      - name: Upload static executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: pinewind-windows-static
+          path: dist/
+          if-no-files-found: error
+      - name: Preserve Windows build cache after failure
+        if: failure() && steps.windows-static-swiftpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .build
+          key: windows-static-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
   ios-test:
     name: iOS · build and simulator test
