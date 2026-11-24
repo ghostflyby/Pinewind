@@ -7,3 +7,6 @@ xcuserdata/
 *.xcuserstate
 .netrc
 /.vscode/
+/.vcpkg-binary-cache/
+/vcpkg_installed/
+/vcpkg-trees/

@@ -1,5 +1,5 @@
 {
-  "originHash" : "cd28f922c2a507a8bf1fe67ce4b2a5520c48136b61912d5d051326786577b632",
+  "originHash" : "8f9e2e9309fe443725ba58f84f9d4280245ca3c2ae109453b58804af74952bf7",
   "pins" : [
     {
       "identity" : "csqlite",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Cocoanetics/ShellKit",
       "state" : {
-        "revision" : "40c1b417e6c6318d2ca644d9a3062dc6befd0e31",
-        "version" : "0.1.0"
+        "revision" : "f4f904b6998fb7034ab24d373973121a40965c3a",
+        "version" : "0.1.2"
       }
     },
     {
@@ -87,8 +87,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections",
       "state" : {
-        "revision" : "35a1edcb8ebd2bfe251d587f0b69e62af28f508c",
-        "version" : "1.7.3"
+        "revision" : "88754449ab766a739610b660e117762115fabc9c",
+        "version" : "1.7.6"
       }
     },
     {
@@ -96,8 +96,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-configuration",
       "state" : {
-        "revision" : "8bae88f79dbddec793390c5bf3e2abb4ac2ece42",
-        "version" : "1.2.2"
+        "revision" : "0b0c23215764302f7db752b079c024fbaff12e62",
+        "version" : "1.5.0"
       }
     },
     {
@@ -131,8 +131,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-log",
       "state" : {
-        "revision" : "4038b6a4f74a1426f47eb1dd5b4bb5628a15d597",
-        "version" : "1.16.1"
+        "revision" : "c7413d967b97aae67c46452bf7645bdb7b200e8e",
+        "version" : "1.17.2"
       }
     },
     {
@@ -149,8 +149,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swift-server/swift-service-lifecycle",
       "state" : {
-        "revision" : "c55297914e26ce3085b73ca88c521ef99136f6ad",
-        "version" : "2.12.1"
+        "revision" : "a18ee16b8039866fd919bdb4e8e906882d4ecc75",
+        "version" : "2.13.0"
       }
     },
     {

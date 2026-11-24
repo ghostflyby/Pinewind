@@ -2,6 +2,32 @@
 
 import PackageDescription
 
+// libgit2 arrives through pkg-config, with the supplier chosen by whoever
+// builds: LIBGIT2_PKG_CONFIG must hold the absolute path of the libgit2.pc
+// file to link against — any source works (vcpkg, Homebrew cellars,
+// hand-built trees); see CONTRIBUTING.md for the recommended vcpkg
+// manifest flow. One build session targets one destination: the manifest
+// is re-evaluated on every build with fresh environment (the compiled
+// manifest is cached, its execution is not), so pointing the variable at
+// the matching pc — macOS or iOS Simulator — selects the right slice.
+// Without the variable the target falls back to the bare pkg-config name
+// (system paths, Homebrew, apt). Never point it at a library built for
+// another destination: SwiftPM cannot detect the mismatch here.
+func libgit2PkgConfig() -> String {
+  Context.environment["LIBGIT2_PKG_CONFIG"] ?? "libgit2"
+}
+
+#if os(Linux)
+let git2Targets: [Target] = [
+  .systemLibrary(
+    name: "Git2", pkgConfig: libgit2PkgConfig(), providers: [.apt(["libgit2-dev"])])
+]
+#else
+let git2Targets: [Target] = [
+  .systemLibrary(name: "Git2", pkgConfig: libgit2PkgConfig())
+]
+#endif
+
 let package = Package(
   name: "Pinewind",
   platforms: [
@@ -21,7 +47,6 @@ let package = Package(
     .package(
       url: "https://github.com/davbeck/swift-glob.git",
       revision: "db32ccb46de66f83afad415ccb1609d08dfa5266"),
-    .package(url: "https://github.com/Cocoanetics/GitKit", from: "2.2.0", traits: ["Archive"]),
     .package(
       url: "https://github.com/Cocoanetics/SwiftBash",
       .upToNextMinor(from: "0.1.0")),
@@ -47,7 +72,7 @@ let package = Package(
         .product(name: "Yams", package: "Yams"),
         .product(name: "BashInterpreter", package: "SwiftBash"),
         .product(name: "Glob", package: "swift-glob"),
-        .product(name: "CGitKit", package: "GitKit"),
+        .target(name: "Git2"),
       ]),
     .testTarget(
       name: "PinewindCLITests",
@@ -64,9 +89,10 @@ let package = Package(
     .testTarget(
       name: "PinewindCoreTests",
       dependencies: [
-        "PinewindCore", .product(name: "CGitKit", package: "GitKit"),
+        "PinewindCore",
         .product(name: "BashInterpreter", package: "SwiftBash"),
+        .target(name: "Git2"),
       ],
       resources: [.copy("Fixtures")]),
-  ]
+  ] + git2Targets
 )
