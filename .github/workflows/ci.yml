@@ -344,13 +344,13 @@ jobs:
           path: .build
           key: windows-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
-  # The Swift toolchain has no fully static Windows executable support:
-  # -static-executable is unimplemented and the static link model still
-  # requires support DLLs. This job statically links all C dependencies
-  # (x64-windows-static-md) and bundles the Swift runtime DLLs the executable
-  # actually imports, leaving only Windows system DLLs external.
-  windows-static-binary:
-    name: Windows · static pinewind bundle
+  # Swift on Windows has no fully static executable support (-static-executable
+  # is unimplemented and the static runtime model still requires support DLLs),
+  # so the Windows artifact is a dynamic build: the stock x64-windows triplet
+  # provides libgit2 and its dependencies as DLLs, and packaging bundles every
+  # non-system DLL the executable transitively imports.
+  windows-binary:
+    name: Windows · pinewind bundle
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -365,11 +365,11 @@ jobs:
         id: windows-image
         run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
       - name: Cache SwiftPM build and dependencies
-        id: windows-static-swiftpm-cache
+        id: windows-binary-swiftpm-cache
         uses: actions/cache@v6
         with:
           path: .build
-          key: windows-static-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+          key: windows-binary-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
       - name: Resolve pinned vcpkg revision
         id: vcpkg-ref
         run: '"sha=$(jq -r ''."builtin-baseline"'' vcpkg.json)" >> $env:GITHUB_OUTPUT'
@@ -383,17 +383,17 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .vcpkg-binary-cache
-          key: vcpkg-binary-windows-x64-windows-static-md-v1-${{ steps.windows-image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-binary-windows-x64-windows-static-md-v1-
+          key: vcpkg-binary-windows-x64-windows-v1-${{ steps.windows-image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-binary-windows-x64-windows-v1-
       - name: Bootstrap vcpkg
         run: ./vcpkg/bootstrap-vcpkg.bat
       - name: Install libgit2 via vcpkg manifest
         env:
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
-        run: ./vcpkg/vcpkg.exe install --triplet x64-windows-static-md --x-install-root vcpkg-trees/x64-windows-static-md
+        run: ./vcpkg/vcpkg.exe install --triplet x64-windows --x-install-root vcpkg-trees/x64-windows
       - name: Export libgit2 pkg-config path
         run: |
-          $triplet = 'x64-windows-static-md'
+          $triplet = 'x64-windows'
           $pc = @(
             "lib/pkgconfig",
             "share/pkgconfig"
@@ -406,7 +406,7 @@ jobs:
         run: swift build -c release --product pinewind
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
-      - name: Package executable with runtime DLLs
+      - name: Package executable with dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -416,6 +416,12 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'pinewind-windows-x64'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $exe, 'LICENSE' $stage
+
+          # vcpkg's dynamic DLLs are outside the default search path; add them
+          # for the import walk. The smoke test below uses only the stage.
+          $vcpkgBin = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-trees\x64-windows\x64-windows\bin'
+          if (-not (Test-Path $vcpkgBin)) { throw "vcpkg bin not found at $vcpkgBin" }
+          $env:PATH = "$vcpkgBin;$env:PATH"
 
           $imports = & dumpbin.exe /nologo /dependents $exe |
             ForEach-Object { if ($_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') { $Matches[1] } } |
@@ -455,12 +461,6 @@ jobs:
           }
 
           $seen.Keys | Sort-Object
-          $thirdParty = $seen.Keys | Where-Object {
-            $_ -match '^(libgit2|git2|libssl|libcrypto|libpcre|pcre2|zlib1|http_parser)'
-          }
-          if ($thirdParty) {
-            throw "non-static C dependencies: $($thirdParty -join ', ')"
-          }
 
           $env:PATH = "$stage;$env:SystemRoot\System32;$env:SystemRoot"
           & (Join-Path $stage 'pinewind.exe') --help | Out-Null
@@ -468,18 +468,18 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath 'dist\pinewind-windows-x64.zip' -Force
-      - name: Upload static executable
+      - name: Upload executable bundle
         uses: actions/upload-artifact@v7
         with:
-          name: pinewind-windows-static
+          name: pinewind-windows
           path: dist/
           if-no-files-found: error
       - name: Preserve Windows build cache after failure
-        if: failure() && steps.windows-static-swiftpm-cache.outputs.cache-hit != 'true'
+        if: failure() && steps.windows-binary-swiftpm-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: .build
-          key: windows-static-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
+          key: windows-binary-swiftpm-v1-${{ runner.arch }}-${{ steps.windows-image.outputs.version }}-${{ steps.swift.outputs.swift-version }}-${{ hashFiles('Package.swift', 'Package.resolved', 'vcpkg.json') }}
 
   ios-test:
     name: iOS · build and simulator test
