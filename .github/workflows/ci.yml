@@ -304,7 +304,7 @@ jobs:
       - uses: SwiftyLab/setup-swift@v1
         id: swift
         with:
-          swift-version: '6.3.1'
+          swift-version: '6.4.3'
       - name: Identify Windows image
         id: windows-image
         run: '"version=$env:ImageVersion" >> $env:GITHUB_OUTPUT'
@@ -372,7 +372,7 @@ jobs:
       - uses: SwiftyLab/setup-swift@v1
         id: swift
         with:
-          swift-version: '6.3.1'
+          swift-version: '6.4.3'
       - name: Show toolchain
         run: swift --version
       - name: Identify Windows image
