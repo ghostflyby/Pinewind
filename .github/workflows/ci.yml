@@ -239,11 +239,19 @@ jobs:
           CXX: musl-gcc
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
         run: vcpkg/vcpkg install --triplet x64-linux --x-install-root vcpkg-trees/musl
+      - name: Cache Swift static Linux SDK
+        id: swift-static-sdk-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.swiftpm/swift-sdks
+          key: swift-static-sdk-6.2-RELEASE-0.0.1-v1
       - name: Install Swift static Linux SDK
         run: |
-          swift sdk install \
-            https://download.swift.org/swift-6.2-release/static-sdk/swift-6.2-RELEASE/swift-6.2-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz \
-            --checksum d2225840e592389ca517bbf71652f7003dbf45ac35d1e57d98b9250368769378
+          if [ "${{ steps.swift-static-sdk-cache.outputs.cache-hit }}" != "true" ]; then
+            swift sdk install \
+              https://download.swift.org/swift-6.2-release/static-sdk/swift-6.2-RELEASE/swift-6.2-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz \
+              --checksum d2225840e592389ca517bbf71652f7003dbf45ac35d1e57d98b9250368769378
+          fi
           swift sdk list
       - name: Build static executable
         run: |
