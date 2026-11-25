@@ -127,9 +127,9 @@ WorkspaceOptions.maximumResourceBytes 默认 64 MiB,是 recipe 下载、开发�
 
 默认 locked 模式允许共享锁定版本和本地目录改向。变更远程选择或新增未固定资源要求显式 development 准备。开发结果只留在本次阶段产物或可丢弃缓存,不写共享锁或新增本地锁。开发模式不承诺仅凭共享声明和锁复现本机结果。
 
-conf 使用内置的最小 package-list 解释器,每个 import 独立环境,不继承宿主变量,root_dir 保留。支持数组初始化/重置/追加、`${name}`/`${name:-default}` 展开、`source`(含重复 source)和注释;控制流、命令替换、管道、重定向和外部命令直接报错。preset/extra/all 使用内建有序列表。
+conf 使用内置的最小 package-list 解释器,每个 import 独立环境,不继承宿主变量,root_dir 保留。支持数组初始化/重置/追加、`${name}`/`${name:-default}` 展开、`source`(含重复 source)和注释;未加引号的展开按空白切分,默认值支持引号与反斜杠保护;控制流、命令替换、管道、重定向和外部命令直接报错。preset/extra/all 使用内建有序列表。
 
-本地 conf 相对于声明清单目录定位,include 受根 conf 所在资源目录限制。读取的本地 conf 在协调范围内捕获一次后供解释器读取,不复制整个清单父目录。远程资源通过只读虚拟挂载按需准备,相对 include 映射到根 conf 所在 HTTPS 目录,越界和远程目录枚举报错。重复 source 保留执行语义,下载内容在事务中固定。锁记录远程 import 资源校验与展开结果,普通组合不重新求值。
+本地 conf 相对于声明清单目录定位,include 受根 conf 所在资源目录限制。读取的本地 conf 在协调范围内捕获一次后供 conf 读取器读取,不复制整个清单父目录。远程资源按需下载并固定,相对 include 映射到根 conf 所在 HTTPS 目录,越界报错。重复 source 保留执行语义,下载内容在事务中固定。锁记录远程 import 资源校验与展开结果,普通组合不重新求值。
 
 默认限制为每 import 5 秒、64 次 source、每文件 1 MiB、累计 4 MiB,可通过 WorkspaceOptions.imports 修改。限制、超时和取消传播到解释器和下载准备。
 

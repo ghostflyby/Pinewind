@@ -2092,14 +2092,17 @@ struct WorkspaceTests {
     defer { f.remove() }
     let root = URL(string: "https://conf.test/main.conf")!
     let include = URL(string: "https://conf.test/include.conf")!
+    let unused = URL(string: "https://conf.test/unused.conf")!
     await f.downloads.set(root, try fixtureText("RemoteConf/Includes/main.conf"))
     await f.downloads.set(include, try fixtureText("RemoteConf/Includes/include.conf"))
+    await f.downloads.set(unused, "package_list+=(rime/unused)\n")
     try await f.repositories.install(firstID, files: ["default.yaml": "probe"])
     try write(f.manifest, "version: 1\norder: [{import: \(root.absoluteString)}]\n")
     let workspace = try await f.workspace()
     let resolution = try await workspace.resolve()
     #expect(resolution.imports[0].packages.count == 1)
     #expect(resolution.imports[0].resources.count == 2)
+    #expect(await f.downloads.requestedLimits(unused).isEmpty)
   }
 
   @Suite("Published output", .serialized)

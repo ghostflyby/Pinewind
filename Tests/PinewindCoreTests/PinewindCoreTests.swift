@@ -826,8 +826,8 @@ struct ConfTests {
     try f.write("slow.conf", "package_list=()", in: f.input)
     do {
       _ = try await PlumImporter(timeout: .milliseconds(50)).evaluate(
-        file: FilePath(f.input.appendingPathComponent("slow.conf").path),
-        resourceRoot: FilePath(f.input.path), variables: [:], reader: SlowConfReader())
+        file: native(f.input.appendingPathComponent("slow.conf")),
+        resourceRoot: native(f.input), variables: [:], reader: SlowConfReader())
       Issue.record("expected timeout")
     } catch let error as PinewindError {
       guard case .incident(let document) = error else {
@@ -900,7 +900,7 @@ struct ConfTests {
     #expect(request.options == ["schema": "terra_pinyin"])
   }
 
-  @Test func confCannotWriteHostFilesOrEscapeMount() async throws {
+  @Test func confRejectsCommandsAndEscapesMount() async throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("write.conf", "echo stolen > /conf/stolen", in: f.input)
@@ -908,10 +908,9 @@ struct ConfTests {
       try await importer.evaluate(ConfImport(source: "write.conf"), inputRoot: f.input)
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
-      guard case .evaluationFailed = document.underlyingError as? InterpreterFailure else {
-        return false
-      }
-      return true
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("only package_list assignments and source are supported")
     }
     #expect(!FileManager.default.fileExists(atPath: f.input.appendingPathComponent("stolen").path))
     try f.write("escape.conf", "source /etc/passwd", in: f.input)

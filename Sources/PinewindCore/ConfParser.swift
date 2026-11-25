@@ -11,8 +11,9 @@ struct ConfPosition: Hashable, Sendable {
 }
 
 enum ConfSegment: Hashable, Sendable {
-  case literal(String)
-  case expansion(name: String, defaultValue: String?)
+  /// `protected` is true for quoted words and escapes, which are not field-split.
+  case literal(String, protected: Bool)
+  case expansion(name: String, defaultValue: [ConfSegment]?, quoted: Bool)
 }
 
 struct ConfWord: Hashable, Sendable {
@@ -30,7 +31,6 @@ struct ConfStatement: Hashable, Sendable {
   }
 
   let kind: Kind
-  let position: ConfPosition
 }
 
 struct ConfProgram: Hashable, Sendable {
@@ -85,14 +85,32 @@ enum ConfParser {
     }
 
     mutating func skipHorizontalWhitespace() {
-      while let character = peek(), character == " " || character == "\t" {
-        advance()
+      while true {
+        if let character = peek(), character == " " || character == "\t" {
+          advance()
+          continue
+        }
+        if peek() == "\\", peek(1) == "\n" {
+          advance()
+          advance()
+          continue
+        }
+        break
       }
     }
 
     mutating func skipWhitespace() {
-      while let character = peek(), character == " " || character == "\t" || character == "\n" {
-        advance()
+      while true {
+        if let character = peek(), character == " " || character == "\t" || character == "\n" {
+          advance()
+          continue
+        }
+        if peek() == "\\", peek(1) == "\n" {
+          advance()
+          advance()
+          continue
+        }
+        break
       }
     }
 
@@ -142,7 +160,6 @@ enum ConfParser {
     }
 
     mutating func parseAssignment() throws(InterpreterFailure) -> ConfStatement {
-      let start = position
       for _ in 0..<"package_list".count { advance() }
       var append = false
       if peek() == "+" {
@@ -174,11 +191,10 @@ enum ConfParser {
         }
         words.append(try parseWord(allowCloseParen: true))
       }
-      return ConfStatement(kind: append ? .append(words) : .assign(words), position: start)
+      return ConfStatement(kind: append ? .append(words) : .assign(words))
     }
 
     mutating func parseSource(length: Int) throws(InterpreterFailure) -> ConfStatement {
-      let start = position
       for _ in 0..<length { advance() }
       guard let separator = peek(), separator == " " || separator == "\t" else {
         throw failure("source requires a path")
@@ -188,7 +204,7 @@ enum ConfParser {
         throw failure("source requires a path")
       }
       let word = try parseWord(allowCloseParen: false)
-      return ConfStatement(kind: .source(word), position: start)
+      return ConfStatement(kind: .source(word))
     }
 
     mutating func parseWord(allowCloseParen: Bool) throws(InterpreterFailure) -> ConfWord {
@@ -199,7 +215,7 @@ enum ConfParser {
 
       func flushLiteral() {
         guard !literal.isEmpty else { return }
-        segments.append(.literal(literal))
+        segments.append(.literal(literal, protected: true))
         literal = ""
       }
 
@@ -224,7 +240,7 @@ enum ConfParser {
         if character == "$" {
           flushLiteral()
           sawToken = true
-          segments.append(try parseExpansion())
+          segments.append(try parseExpansion(quoted: false))
           continue
         }
         if character == "\\" {
@@ -249,7 +265,7 @@ enum ConfParser {
 
       flushLiteral()
       guard sawToken || !segments.isEmpty else { throw failure("expected a word") }
-      if segments.isEmpty { segments = [.literal("")] }
+      if segments.isEmpty { segments = [.literal("", protected: true)] }
       return ConfWord(segments: segments, position: start)
     }
 
@@ -263,10 +279,10 @@ enum ConfParser {
         }
         if character == "$" {
           if !literal.isEmpty {
-            segments.append(.literal(literal))
+            segments.append(.literal(literal, protected: true))
             literal = ""
           }
-          segments.append(try parseExpansion())
+          segments.append(try parseExpansion(quoted: true))
           continue
         }
         if character == "`" {
@@ -295,7 +311,7 @@ enum ConfParser {
       throw failure("unterminated quoted string")
     }
 
-    mutating func parseExpansion() throws(InterpreterFailure) -> ConfSegment {
+    mutating func parseExpansion(quoted: Bool) throws(InterpreterFailure) -> ConfSegment {
       advance()
       guard peek() == "{" else {
         guard let first = peek(), isIdentifierStart(first) else {
@@ -306,7 +322,7 @@ enum ConfParser {
           name.append(character)
           advance()
         }
-        return .expansion(name: name, defaultValue: nil)
+        return .expansion(name: name, defaultValue: nil, quoted: quoted)
       }
       advance()
       guard let first = peek(), isIdentifierStart(first) else {
@@ -319,24 +335,105 @@ enum ConfParser {
       }
       if peek() == "}" {
         advance()
-        return .expansion(name: name, defaultValue: nil)
+        return .expansion(name: name, defaultValue: nil, quoted: quoted)
       }
       guard peek() == ":", peek(1) == "-" else {
         throw failure("unsupported expansion operator")
       }
       advance()
       advance()
-      var defaultValue = ""
-      while let character = peek(), character != "}" {
+      let defaultValue = try parseDefaultSegments()
+      guard peek() == "}" else { throw failure("unterminated expansion") }
+      advance()
+      return .expansion(name: name, defaultValue: defaultValue, quoted: quoted)
+    }
+
+    /// Parses the default word of `${name:-word}`. Bare text stays split-eligible;
+    /// quoted and escaped text is protected, matching the shell's quoting rules.
+    mutating func parseDefaultSegments() throws(InterpreterFailure) -> [ConfSegment] {
+      var segments: [ConfSegment] = []
+      var bare = ""
+
+      func flushBare() {
+        guard !bare.isEmpty else { return }
+        segments.append(.literal(bare, protected: false))
+        bare = ""
+      }
+
+      while let character = peek() {
+        if character == "}" { break }
         if character == "$" {
           throw failure("nested expansions are unsupported")
         }
-        defaultValue.append(character)
+        if character == "\"" {
+          flushBare()
+          advance()
+          var text = ""
+          while let inner = peek(), inner != "\"" {
+            if inner == "$" {
+              throw failure("nested expansions are unsupported")
+            }
+            if inner == "`" {
+              throw failure("command substitution is unsupported")
+            }
+            if inner == "\\" {
+              advance()
+              guard let next = peek() else { throw failure("unterminated quoted default") }
+              if next == "\n" {
+                advance()
+                continue
+              }
+              if next == "$" || next == "\"" || next == "\\" {
+                text.append(next)
+                advance()
+              } else {
+                text.append("\\")
+                text.append(next)
+                advance()
+              }
+              continue
+            }
+            text.append(inner)
+            advance()
+          }
+          guard peek() == "\"" else { throw failure("unterminated quoted default") }
+          advance()
+          segments.append(.literal(text, protected: true))
+          continue
+        }
+        if character == "'" {
+          flushBare()
+          advance()
+          var text = ""
+          while let inner = peek(), inner != "'" {
+            text.append(inner)
+            advance()
+          }
+          guard peek() == "'" else { throw failure("unterminated quoted default") }
+          advance()
+          segments.append(.literal(text, protected: true))
+          continue
+        }
+        if character == "\\" {
+          flushBare()
+          advance()
+          guard let next = peek() else { throw failure("trailing backslash") }
+          if next == "\n" {
+            advance()
+            continue
+          }
+          segments.append(.literal(String(next), protected: true))
+          advance()
+          continue
+        }
+        if character == "`" {
+          throw failure("command substitution is unsupported")
+        }
+        bare.append(character)
         advance()
       }
-      guard peek() == "}" else { throw failure("unterminated expansion") }
-      advance()
-      return .expansion(name: name, defaultValue: defaultValue)
+      flushBare()
+      return segments
     }
 
     mutating func finishStatement() throws(InterpreterFailure) {

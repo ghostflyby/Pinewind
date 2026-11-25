@@ -35,11 +35,18 @@ struct ConfEvaluator: Sendable {
   }
 
   private func evaluate(_ path: RelativePath, state: State) async throws {
+    let virtualPath = ConfVirtualPath.string(path)
+    let data: Data
+    do {
+      data = try await reader.read(path)
+    } catch let failure as FileSystemFailure {
+      throw InterpreterFailure.evaluationFailed(detail: "\(virtualPath): \(failure)")
+    }
+    // Charge only after a successful read, matching the old source builtin.
     state.sources += 1
     guard state.sources <= limits.maximumSources else {
       throw InterpreterFailure.budgetExceeded(.sources)
     }
-    let data = try await reader.read(path)
     guard data.count <= limits.maximumFileBytes else {
       throw InterpreterFailure.budgetExceeded(.fileBytes)
     }
@@ -48,7 +55,6 @@ struct ConfEvaluator: Sendable {
       throw InterpreterFailure.budgetExceeded(.totalBytes)
     }
 
-    let virtualPath = ConfVirtualPath.string(path)
     guard var text = String(data: data, encoding: .utf8) else {
       throw InterpreterFailure.evaluationFailed(detail: "\(virtualPath): not valid UTF-8")
     }
@@ -65,30 +71,131 @@ struct ConfEvaluator: Sendable {
     for statement in program.statements {
       switch statement.kind {
       case .assign(let words):
-        state.packageList = words.map { expand($0, in: state) }
+        state.packageList = words.flatMap { expandWord($0, in: state) }
       case .append(let words):
-        state.packageList.append(contentsOf: words.map { expand($0, in: state) })
+        state.packageList.append(contentsOf: words.flatMap { expandWord($0, in: state) })
       case .source(let word):
-        let target = try ConfVirtualPath.relative(expand(word, in: state))
-        try await evaluate(target, state: state)
+        let fields = expandWord(word, in: state)
+        guard fields.count == 1, let target = fields.first, !target.isEmpty else {
+          throw InterpreterFailure.evaluationFailed(
+            detail:
+              "\(virtualPath):\(word.position.line):\(word.position.column): source requires exactly one non-empty path"
+          )
+        }
+        try await evaluate(try ConfVirtualPath.relative(target), state: state)
       }
     }
   }
 
-  private func expand(_ word: ConfWord, in state: State) -> String {
-    var result = ""
-    for segment in word.segments {
-      switch segment {
-      case .literal(let text):
-        result += text
-      case .expansion(let name, let defaultValue):
-        if let value = state.variables[name], !value.isEmpty {
-          result += value
-        } else if let defaultValue {
-          result += defaultValue
+  /// Expands one word into the fields the shell would produce. Unquoted
+  /// expansions are split on space, tab and newline; quoted expansions and
+  /// quoted/escaped default text are not.
+  private func expandWord(_ word: ConfWord, in state: State) -> [String] {
+    var fields: [String] = []
+    var current = ""
+    var hasField = false
+
+    func flush() {
+      guard hasField else { return }
+      fields.append(current)
+      current = ""
+      hasField = false
+    }
+
+    func appendProtected(_ text: String) {
+      current += text
+      hasField = true
+    }
+
+    func appendUnprotected(_ text: String) {
+      let split = Self.splitFields(text)
+      if split.parts.isEmpty {
+        if split.hadSeparator { flush() }
+        return
+      }
+      if split.leadingSeparator { flush() }
+      current += split.parts[0]
+      hasField = true
+      for part in split.parts.dropFirst() {
+        fields.append(current)
+        current = part
+        hasField = true
+      }
+      if split.trailingSeparator { flush() }
+    }
+
+    func appendDefault(_ segments: [ConfSegment]) {
+      for segment in segments {
+        switch segment {
+        case .literal(let text, let protected):
+          if protected { appendProtected(text) } else { appendUnprotected(text) }
+        case .expansion:
+          // The parser rejects nested expansions in defaults.
+          break
         }
       }
     }
-    return result
+
+    func defaultText(_ segments: [ConfSegment]) -> String {
+      var text = ""
+      for segment in segments {
+        if case .literal(let literal, _) = segment {
+          text += literal
+        }
+      }
+      return text
+    }
+
+    for segment in word.segments {
+      switch segment {
+      case .literal(let text, let protected):
+        if protected { appendProtected(text) } else { appendUnprotected(text) }
+      case .expansion(let name, let defaultValue, let quoted):
+        if let value = state.variables[name], !value.isEmpty {
+          if quoted { appendProtected(value) } else { appendUnprotected(value) }
+        } else if let defaultValue, quoted {
+          appendProtected(defaultText(defaultValue))
+        } else if let defaultValue {
+          appendDefault(defaultValue)
+        } else if quoted {
+          appendProtected("")
+        }
+      }
+    }
+
+    flush()
+    return fields
+  }
+
+  private static func splitFields(
+    _ text: String
+  ) -> (leadingSeparator: Bool, parts: [String], trailingSeparator: Bool, hadSeparator: Bool) {
+    let characters = Array(text)
+    var index = 0
+
+    func isSeparator(_ character: Character) -> Bool {
+      character == " " || character == "\t" || character == "\n"
+    }
+
+    let leading = index < characters.count && isSeparator(characters[index])
+    var parts: [String] = []
+    var trailing = false
+    while index < characters.count {
+      while index < characters.count && isSeparator(characters[index]) {
+        index += 1
+      }
+      if index >= characters.count {
+        trailing = true
+        break
+      }
+      var part = ""
+      while index < characters.count && !isSeparator(characters[index]) {
+        part.append(characters[index])
+        index += 1
+      }
+      parts.append(part)
+    }
+    let hadSeparator = leading || trailing || parts.count > 1
+    return (leading, parts, trailing, hadSeparator)
   }
 }

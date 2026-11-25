@@ -21,6 +21,12 @@ private struct MemoryConfReader: ConfFileReader {
   }
 }
 
+private struct BytesConfReader: ConfFileReader {
+  let data: Data
+
+  func read(_ path: RelativePath) async throws -> Data { data }
+}
+
 private func evaluateConf(
   _ files: [String: String], variables: [String: String] = [:],
   limits: ImportLimits = ImportLimits()
@@ -30,8 +36,8 @@ private func evaluateConf(
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
   return try await PlumImporter(limits: limits).evaluate(
-    file: FilePath(root.appendingPathComponent("list.conf").path),
-    resourceRoot: FilePath(root.path), variables: variables,
+    file: native(root.appendingPathComponent("list.conf")),
+    resourceRoot: native(root), variables: variables,
     reader: MemoryConfReader(files: files))
 }
 
@@ -64,6 +70,33 @@ struct ConfSubsetTests {
       "more.conf": "package_list+=(essay)\n",
     ])
     #expect(list == ["essay", "essay"])
+  }
+
+  @Test func unquotedExpansionsSplitLikeTheShell() async throws {
+    let list = try await evaluateConf(
+      [
+        "list.conf":
+          #"package_list=(pre${v}post "${v}" ${v} $v "pre$v" pre${w}post "${w}")"# + "\n"
+      ],
+      variables: ["v": "a b", "w": " a "])
+    #expect(
+      list == ["prea", "bpost", "a b", "a", "b", "a", "b", "prea b", "pre", "a", "post", " a "])
+  }
+
+  @Test func defaultWordsUseShellQuoting() async throws {
+    let list = try await evaluateConf([
+      "list.conf":
+        #"package_list=(${missing:-"a b"} ${missing:-a b} ${missing:-a\ b} "${missing:-a b}" ${missing:-''})"#
+        + "\n"
+    ])
+    #expect(list == ["a b", "a", "b", "a b", "a b", ""])
+  }
+
+  @Test func emptyExpansionsFollowQuoting() async throws {
+    let list = try await evaluateConf([
+      "list.conf": #"package_list=(${missing} "${missing}" "" pre${missing}post)"# + "\n"
+    ])
+    #expect(list == ["", "", "prepost"])
   }
 
   @Test func variableDefaultsAndEmptyValues() async throws {
@@ -114,9 +147,74 @@ struct ConfSubsetTests {
     }
   }
 
-  @Test func missingSourcePropagatesFileSystemFailure() async throws {
-    await #expect(throws: FileSystemFailure.self) {
+  @Test func missingSourceIsAnAttributedEvaluationFailure() async throws {
+    await #expect {
       try await evaluateConf(["list.conf": "source \"${root_dir}/missing.conf\"\n"])
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("missing.conf")
+    }
+  }
+
+  @Test func syntaxErrorsCarryPositions() async throws {
+    await #expect {
+      try await evaluateConf(["list.conf": "# comment\n\nif true\n"])
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("/conf/list.conf:3:1:")
+    }
+  }
+
+  @Test func dotSourceTrailingCommentsAndContinuations() async throws {
+    let list = try await evaluateConf([
+      "list.conf": #"""
+      package_list+=(a#b)
+      . "${root_dir}/more.conf" # trailing comment
+      package_list+=\
+      (c)
+      source "${root_dir}/sub/../more.conf"
+
+      """#,
+      "more.conf": "package_list+=(d)\n",
+    ])
+    #expect(list == ["a#b", "d", "c", "d"])
+  }
+
+  @Test func invalidUTF8IsRejected() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    await #expect {
+      try await PlumImporter().evaluate(
+        file: native(root.appendingPathComponent("list.conf")),
+        resourceRoot: native(root), variables: [:],
+        reader: BytesConfReader(data: Data([0xFF, 0xFE])))
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("not valid UTF-8")
+    }
+  }
+
+  @Test(arguments: [
+    #"source "https://conf.test/x.conf""#,
+    #"source "a\b.conf""#,
+  ])
+  func unsafeSourcePathsAreForbidden(_ line: String) async throws {
+    await #expect {
+      try await evaluateConf(["list.conf": line + "\n"])
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .forbiddenOperation = document.underlyingError as? InterpreterFailure else {
+        return false
+      }
+      return true
     }
   }
 
@@ -148,6 +246,36 @@ struct ConfSubsetTests {
       guard case .budgetExceeded(.fileBytes) = document.underlyingError as? InterpreterFailure
       else { return false }
       return true
+    }
+
+    let totalLimits = ImportLimits(
+      timeout: .seconds(5), maximumSources: 64,
+      maximumFileBytes: 1_048_576, maximumTotalBytes: 40)
+    await #expect {
+      try await evaluateConf(
+        [
+          "list.conf": "source \"${root_dir}/a.conf\"\n",
+          "a.conf": "package_list+=(b)\n",
+        ], limits: totalLimits)
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .budgetExceeded(.totalBytes) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return true
+    }
+
+    // A failed read is reported before the source budget is charged.
+    let orderingLimits = ImportLimits(
+      timeout: .seconds(5), maximumSources: 1,
+      maximumFileBytes: 1_048_576, maximumTotalBytes: 4_194_304)
+    await #expect {
+      try await evaluateConf(
+        ["list.conf": "source \"${root_dir}/missing.conf\"\n"], limits: orderingLimits)
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("missing.conf")
     }
   }
 }
