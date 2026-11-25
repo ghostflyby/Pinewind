@@ -27,6 +27,12 @@ private struct BytesConfReader: ConfFileReader {
   func read(_ path: RelativePath) async throws -> Data { data }
 }
 
+private struct FailingConfReader: ConfFileReader {
+  func read(_ path: RelativePath) async throws -> Data {
+    throw FileSystemFailure.notFound(FilePath(path.string))
+  }
+}
+
 private func evaluateConf(
   _ files: [String: String], variables: [String: String] = [:],
   limits: ImportLimits = ImportLimits()
@@ -97,6 +103,66 @@ struct ConfSubsetTests {
       "list.conf": #"package_list=(${missing} "${missing}" "" pre${missing}post)"# + "\n"
     ])
     #expect(list == ["", "", "prepost"])
+  }
+
+  @Test func quotedDefaultWordsKeepSingleQuotesAndBackslashes() async throws {
+    let list = try await evaluateConf([
+      "list.conf":
+        ##"package_list=("${missing:-'a b'}" "${missing:-a\ b}" "${missing:-a\#b}" "${missing:-'}'}" "${missing:-}" "${missing:-""}")"##
+        + "\n"
+    ])
+    #expect(list == ["'a b'", "a\\ b", "a\\#b", "'}'", "", ""])
+  }
+
+  @Test func emptyQuotesKeepAQuotedNull() async throws {
+    let list = try await evaluateConf([
+      "list.conf":
+        #"package_list=(${missing}"" ""${missing} ""${missing}"" ${missing}${missing}"")"# + "\n"
+    ])
+    #expect(list == ["", "", "", ""])
+  }
+
+  @Test func splittingUsesTabsAndNewlinesToo() async throws {
+    let list = try await evaluateConf(
+      ["list.conf": #"package_list=($v)"# + "\n"],
+      variables: ["v": "a\tb\nc"])
+    #expect(list == ["a", "b", "c"])
+  }
+
+  @Test func sourceRequiresExactlyOneExpandedPath() async throws {
+    await #expect {
+      try await evaluateConf(["list.conf": "source ${missing}\n"])
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("source requires exactly one non-empty path")
+    }
+    await #expect {
+      try await evaluateConf(["list.conf": "source $paths\n"], variables: ["paths": "a b"])
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("source requires exactly one non-empty path")
+    }
+  }
+
+  @Test func entryReadFailuresAreAttributed() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    await #expect {
+      try await PlumImporter().evaluate(
+        file: native(root.appendingPathComponent("list.conf")),
+        resourceRoot: native(root), variables: [:], reader: FailingConfReader())
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("/conf/list.conf")
+    }
   }
 
   @Test func variableDefaultsAndEmptyValues() async throws {

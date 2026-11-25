@@ -4,7 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-/// Positions are one-based and point at the first character of a statement or word.
+/// Positions are one-based and point at the first character of a word.
 struct ConfPosition: Hashable, Sendable {
   let line: Int
   let column: Int
@@ -231,7 +231,11 @@ enum ConfParser {
         if character == "\"" {
           sawToken = true
           advance()
-          try parseDoubleQuoted(into: &segments, literal: &literal)
+          let produced = try parseDoubleQuoted(into: &segments, literal: &literal)
+          if !produced {
+            // Empty quotes are a quoted null: they keep an empty field alive.
+            segments.append(.literal("", protected: true))
+          }
           continue
         }
         if character == "'" {
@@ -271,11 +275,12 @@ enum ConfParser {
 
     mutating func parseDoubleQuoted(
       into segments: inout [ConfSegment], literal: inout String
-    ) throws(InterpreterFailure) {
+    ) throws(InterpreterFailure) -> Bool {
+      var produced = false
       while let character = peek() {
         if character == "\"" {
           advance()
-          return
+          return produced
         }
         if character == "$" {
           if !literal.isEmpty {
@@ -283,6 +288,7 @@ enum ConfParser {
             literal = ""
           }
           segments.append(try parseExpansion(quoted: true))
+          produced = true
           continue
         }
         if character == "`" {
@@ -303,9 +309,11 @@ enum ConfParser {
             literal.append(next)
             advance()
           }
+          produced = true
           continue
         }
         literal.append(character)
+        produced = true
         advance()
       }
       throw failure("unterminated quoted string")
@@ -342,15 +350,103 @@ enum ConfParser {
       }
       advance()
       advance()
-      let defaultValue = try parseDefaultSegments()
+      let defaultValue = try parseDefaultSegments(quoted: quoted)
       guard peek() == "}" else { throw failure("unterminated expansion") }
       advance()
       return .expansion(name: name, defaultValue: defaultValue, quoted: quoted)
     }
 
-    /// Parses the default word of `${name:-word}`. Bare text stays split-eligible;
-    /// quoted and escaped text is protected, matching the shell's quoting rules.
-    mutating func parseDefaultSegments() throws(InterpreterFailure) -> [ConfSegment] {
+    /// Parses the default word of `${name:-word}`. An unquoted expansion splits
+    /// bare text and treats quotes/escapes as protection. A quoted expansion
+    /// follows double-quote rules, except that single quotes stay literal while
+    /// still shielding a closing brace from terminating the expansion.
+    mutating func parseDefaultSegments(quoted: Bool) throws(InterpreterFailure)
+      -> [ConfSegment]
+    {
+      if quoted {
+        var text = ""
+        while let character = peek() {
+          if character == "}" { break }
+          if character == "$" {
+            throw failure("nested expansions are unsupported")
+          }
+          if character == "`" {
+            throw failure("command substitution is unsupported")
+          }
+          if character == "\\" {
+            advance()
+            guard let next = peek() else { throw failure("unterminated quoted default") }
+            if next == "\n" {
+              advance()
+              continue
+            }
+            if next == "$" || next == "`" || next == "\"" || next == "\\" {
+              text.append(next)
+              advance()
+            } else {
+              text.append("\\")
+              text.append(next)
+              advance()
+            }
+            continue
+          }
+          if character == "\"" {
+            advance()
+            while let inner = peek(), inner != "\"" {
+              if inner == "$" {
+                throw failure("nested expansions are unsupported")
+              }
+              if inner == "`" {
+                throw failure("command substitution is unsupported")
+              }
+              if inner == "\\" {
+                advance()
+                guard let next = peek() else { throw failure("unterminated quoted default") }
+                if next == "\n" {
+                  advance()
+                  continue
+                }
+                if next == "$" || next == "`" || next == "\"" || next == "\\" {
+                  text.append(next)
+                  advance()
+                } else {
+                  text.append("\\")
+                  text.append(next)
+                  advance()
+                }
+                continue
+              }
+              text.append(inner)
+              advance()
+            }
+            guard peek() == "\"" else { throw failure("unterminated quoted default") }
+            advance()
+            continue
+          }
+          if character == "'" {
+            text.append("'")
+            advance()
+            while let inner = peek(), inner != "'" {
+              if inner == "$" {
+                throw failure("nested expansions are unsupported")
+              }
+              if inner == "`" {
+                throw failure("command substitution is unsupported")
+              }
+              text.append(inner)
+              advance()
+            }
+            guard peek() == "'" else { throw failure("unterminated quoted default") }
+            text.append("'")
+            advance()
+            continue
+          }
+          text.append(character)
+          advance()
+        }
+        return [.literal(text, protected: true)]
+      }
+
       var segments: [ConfSegment] = []
       var bare = ""
 
