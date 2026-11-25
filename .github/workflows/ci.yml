@@ -460,6 +460,8 @@ jobs:
             $dll = $queue.Dequeue()
             if ($seen.ContainsKey($dll)) { continue }
             $seen[$dll] = $true
+            # API sets are virtual OS components; there is no file to copy.
+            if ($dll -match '^(api|ext)-ms-win-') { continue }
             $bundled = Join-Path $stage $dll
             if (Test-Path $bundled) {
               $source = $bundled
