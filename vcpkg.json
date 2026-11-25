@@ -5,7 +5,7 @@
     {
       "name": "libgit2",
       "default-features": false,
-      "features": ["pcre", "mbedtls"],
+      "features": ["pcre2", "mbedtls"],
       "platform": "linux"
     },
     {
