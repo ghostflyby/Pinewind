@@ -4,7 +4,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import BashInterpreter
 import Foundation
 import SystemPackage
 import Yams
@@ -12,7 +11,6 @@ import Yams
 // These types retain their original structure and existing Codable capabilities.
 extension Errno: PinewindErrorProtocol {}
 extension YamlError: PinewindErrorProtocol {}
-extension FileSystemError: PinewindErrorProtocol {}
 // Intentional standard-protocol adapters for the pinned external types.
 // swift-format-ignore: AvoidRetroactiveConformances
 extension URLError: PinewindErrorProtocol, @retroactive CustomStringConvertible {

@@ -26,7 +26,7 @@ Codable 是具体类型的能力,不要求基础协议可编码。编码直接�
 
 泛型包装器分别条件遵循 Encodable/Decodable,条件来自其原因类型;可比较性也只是具体类型的可选能力。不存在把任意错误强制变成 Codable 或 Hashable 的存在容器。
 
-Errno、URLError、Yams.YamlError、SwiftBash.FileSystemError 按需遵循公共协议,不复制成另一组一一对应的枚举。Errno 保持原有 Codable。Yams 的原始错误、Context、Mark 获得原字段的 Encodable 实现;Context 没有公开构造入口,因此不声称支持 Decodable。不提供任意外部错误类型的自动恢复注册表。
+Errno、URLError、Yams.YamlError 按需遵循公共协议,不复制成另一组一一对应的枚举。Errno 保持原有 Codable。Yams 的原始错误、Context、Mark 获得原字段的 Encodable 实现;Context 没有公开构造入口,因此不声称支持 Decodable。不提供任意外部错误类型的自动恢复注册表。
 
 URLError 的 CustomStringConvertible 和 Yams 类型的 Encodable 属于外部类型对外部协议的追溯符合。上游以后加入相同符合时可能发生冲突,升级依赖或工具链时需要检查并移除对应适配。Yams 解析错误的关联位置编码为 `mark`,包含 `line`、`column`。
 

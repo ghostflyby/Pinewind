@@ -47,9 +47,6 @@ let package = Package(
     .package(
       url: "https://github.com/davbeck/swift-glob.git",
       revision: "db32ccb46de66f83afad415ccb1609d08dfa5266"),
-    .package(
-      url: "https://github.com/Cocoanetics/SwiftBash",
-      .upToNextMinor(from: "0.1.0")),
   ],
   targets: [
     .executableTarget(
@@ -70,7 +67,6 @@ let package = Package(
         .product(name: "SystemPackage", package: "swift-system"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "Yams", package: "Yams"),
-        .product(name: "BashInterpreter", package: "SwiftBash"),
         .product(name: "Glob", package: "swift-glob"),
         .target(name: "Git2"),
       ]),
@@ -90,7 +86,6 @@ let package = Package(
       name: "PinewindCoreTests",
       dependencies: [
         "PinewindCore",
-        .product(name: "BashInterpreter", package: "SwiftBash"),
         .target(name: "Git2"),
       ],
       resources: [.copy("Fixtures")]),

@@ -4,7 +4,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import BashInterpreter
 import Foundation
 import SystemPackage
 
@@ -722,7 +721,7 @@ public actor Workspace {
         let file = view.directory.appending(url.lastPathComponent)
         descriptors = try await importer.evaluate(
           file: file, resourceRoot: view.directory, variables: request.variables,
-          fileSystem: RemoteConfFileSystem(capture: capture, directory: view.directory))
+          reader: CapturedConfFileReader(capture: capture, directory: view.directory))
         pins = await capture.resources()
       } else {
         guard !request.source.contains("://") else {
@@ -743,16 +742,11 @@ public actor Workspace {
         let capture = LocalConfCapture(
           root: rootURL, directory: view.directory, coordinator: store.coordinator,
           limits: options.imports)
-        let original = MountedFileSystem(
-          mounts: [
-            .init(virtual: "/conf", host: source.removingLastComponent().string, readOnly: true)
-          ], backing: RealFileSystem())
         descriptors = try await importer.evaluate(
           file: view.directory.appending(source.lastComponent!),
           resourceRoot: view.directory,
           variables: request.variables,
-          fileSystem: RemoteConfFileSystem(
-            capture: capture, directory: view.directory, original: original))
+          reader: CapturedConfFileReader(capture: capture, directory: view.directory))
         pins = []
       }
       return try ResolvedImport(
