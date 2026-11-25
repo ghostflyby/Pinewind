@@ -112,6 +112,19 @@ struct ConfSubsetTests {
         + "\n"
     ])
     #expect(list == ["'a b'", "a\\ b", "a\\#b", "'}'", "", ""])
+
+    let escaped = try await evaluateConf([
+      "list.conf":
+        ##"package_list=("${missing:-'a\\b'}" "${missing:-'a\"b'}" "${missing:-'a\$HOME'}" "${missing:-'a\b'}")"##
+        + "\n"
+    ])
+    #expect(escaped == ["'a\\b'", "'a\"b'", "'a$HOME'", "'a\\b'"])
+
+    let nested = try await evaluateConf([
+      "list.conf":
+        ##"package_list=("${missing:-a"b\"c"d}" "${missing:-a"\$b"c}")"## + "\n"
+    ])
+    #expect(nested == ["ab\"cd", "a$bc"])
   }
 
   @Test func emptyQuotesKeepAQuotedNull() async throws {
@@ -192,6 +205,9 @@ struct ConfSubsetTests {
     "source 'x'",
     "echo hi",
     "package_list=(`echo a`)",
+    #"package_list=("${missing:-$x}")"#,
+    #"package_list=("${missing:-`x`}")"#,
+    #"package_list=("${missing:-'a}")"#,
   ])
   func unsupportedSyntaxFails(_ text: String) async throws {
     await #expect {

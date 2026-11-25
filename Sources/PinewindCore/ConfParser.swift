@@ -433,6 +433,23 @@ enum ConfParser {
               if inner == "`" {
                 throw failure("command substitution is unsupported")
               }
+              if inner == "\\" {
+                advance()
+                guard let next = peek() else { throw failure("unterminated quoted default") }
+                if next == "\n" {
+                  advance()
+                  continue
+                }
+                if next == "$" || next == "`" || next == "\"" || next == "\\" {
+                  text.append(next)
+                  advance()
+                } else {
+                  text.append("\\")
+                  text.append(next)
+                  advance()
+                }
+                continue
+              }
               text.append(inner)
               advance()
             }
