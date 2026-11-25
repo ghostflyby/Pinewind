@@ -237,8 +237,11 @@ jobs:
         env:
           CC: musl-gcc
           CXX: musl-gcc
-          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
-        run: vcpkg/vcpkg install --triplet x64-linux --x-install-root vcpkg-trees/musl
+        run: |
+          # ${{ github.workspace }} is the host path; inside the container the
+          # workspace is the step's $PWD.
+          export VCPKG_BINARY_SOURCES="clear;files,$PWD/.vcpkg-binary-cache,readwrite"
+          vcpkg/vcpkg install --triplet x64-linux --x-install-root vcpkg-trees/musl
       - name: Cache Swift static Linux SDK
         id: swift-static-sdk-cache
         uses: actions/cache@v6
@@ -293,9 +296,9 @@ jobs:
 
   windows-test:
     name: Windows · swift test
-    # Pin the VS 2022 image: windows-latest currently maps to
-    # windows-2025-vs2026, whose STL requires Clang 22 while Swift ships 21.
-    runs-on: windows-2025
+    # windows-latest and windows-2025 map to the windows-2025-vs2026 image,
+    # whose STL requires Clang 22 while the Swift toolchain ships Clang 21.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
       - uses: SwiftyLab/setup-swift@v1
@@ -362,7 +365,7 @@ jobs:
   windows-binary:
     name: Windows · pinewind bundle
     # Same pinned VS 2022 image as windows-test.
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
