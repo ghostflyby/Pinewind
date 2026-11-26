@@ -34,7 +34,7 @@
 
 `RelativePath` 是 `FilePath` 的只读轻量包装。初始化委托 FilePath 归一化分隔符并消解 `.`、可消解的 `..`;拒绝根路径、空结果、剩余的父目录组件以及无法便携编码的组件。`filePath` 暴露原生路径;`string` 从组件生成统一 `/` 表示,用于锁和检查结果。唯一初始化入口接收 FilePath,按宿主语法解析原生分隔符;不提供 String 重载。YAML、锁及 conf 选择器在各自的文本边界先拒绝 NUL 和反斜杠,再构造原生路径,防止 FilePath 的字符串构造提前丢弃或改写无效输入。冒号和组件内的反斜杠仍被拒绝,避免跨平台解释歧义。recipe 下载和补丁目标在求值后转换一次,后续阶段直接使用包装值,并按规范化身份检查重复目标。文件枚举直接从原生组件构造 RelativePath,规划、发布和变更列表持续保留该类型,不在中间阶段退回字符串再校验。Git 后端额外校验原始树条目是未经改写的单个 UTF-8 文件名。显式 recipe 名称及其文件路径在 PackageRequest 构造时一起归一化,后续加载和 Rx 比较使用同一结果。glob 与 recipe 原始表达式继续是 String。词法归一化不替代符号链接、junction 和目录重叠检查。
 
-FileFilter.accepts 和 Glob.matches 的候选路径只接收 RelativePath,glob 表达式仍为 String。conf 捕获接口同样接收 RelativePath,SwiftBash 的 POSIX 文本路径只在其 FileSystem 适配器中转换。canonical/overlap 检查以文件系统解析后的 FilePath 及组件前缀工作,不在内部传递路径字符串。Windows 原生路径也直接通过 withPlatformString 交给 WinSDK,只有 junction 编码及大小写折叠保留必要的文本转换。
+FileFilter.accepts 和 Glob.matches 的候选路径只接收 RelativePath,glob 表达式仍为 String。conf 捕获接口同样接收 RelativePath,虚拟 `/conf` 文本路径只在 conf 文件读取器中转换。canonical/overlap 检查以文件系统解析后的 FilePath 及组件前缀工作,不在内部传递路径字符串。Windows 原生路径也直接通过 withPlatformString 交给 WinSDK,只有 junction 编码及大小写折叠保留必要的文本转换。
 
 词法归一化不是符号链接解析。普通来源文件树不接受符号链接,安全路径检查防止越出来源根。Windows 使用实际目录句柄解析 junction/短名/大小写别名,输出受管 junction 按发布规则单独处理。
 
@@ -127,9 +127,9 @@ WorkspaceOptions.maximumResourceBytes 默认 64 MiB,是 recipe 下载、开发�
 
 默认 locked 模式允许共享锁定版本和本地目录改向。变更远程选择或新增未固定资源要求显式 development 准备。开发结果只留在本次阶段产物或可丢弃缓存,不写共享锁或新增本地锁。开发模式不承诺仅凭共享声明和锁复现本机结果。
 
-conf 使用 SwiftBash 解释器,每个 import 独立环境,不继承宿主变量,root_dir 保留。支持数组初始化/重置/追加、变量展开、控制流和重复 source;不注册外部命令目录或网络命令。preset/extra/all 使用内建有序列表。
+conf 使用内置的最小 package-list 解释器,每个 import 独立环境,不继承宿主变量,root_dir 保留。支持数组初始化/重置/追加、`${name}`/`${name:-default}` 展开、`source`(含重复 source)和注释;未加引号的展开按空白切分,默认值支持引号与反斜杠保护;控制流、命令替换、管道、重定向和外部命令直接报错。preset/extra/all 使用内建有序列表。
 
-本地 conf 相对于声明清单目录定位,include 受根 conf 所在资源目录限制。读取的本地 conf 在协调范围内捕获一次后供解释器读取,不复制整个清单父目录。远程资源通过只读虚拟挂载按需准备,相对 include 映射到根 conf 所在 HTTPS 目录,越界和远程目录枚举报错。重复 source 保留执行语义,下载内容在事务中固定。锁记录远程 import 资源校验与展开结果,普通组合不重新求值。
+本地 conf 相对于声明清单目录定位,include 受根 conf 所在资源目录限制。读取的本地 conf 在协调范围内捕获一次后供 conf 读取器读取,不复制整个清单父目录。远程资源按需下载并固定,相对 include 映射到根 conf 所在 HTTPS 目录,越界报错。重复 source 保留执行语义,下载内容在事务中固定。锁记录远程 import 资源校验与展开结果,普通组合不重新求值。
 
 默认限制为每 import 5 秒、64 次 source、每文件 1 MiB、累计 4 MiB,可通过 WorkspaceOptions.imports 修改。限制、超时和取消传播到解释器和下载准备。
 

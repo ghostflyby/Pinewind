@@ -1,51 +1,6 @@
 {
-  "originHash" : "8f9e2e9309fe443725ba58f84f9d4280245ca3c2ae109453b58804af74952bf7",
+  "originHash" : "229d789c302db1a701acbcd63dee899c74b9aa106658db8d24105417e81dfeea",
   "pins" : [
-    {
-      "identity" : "csqlite",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/stephencelis/CSQLite",
-      "state" : {
-        "revision" : "bdb5580e54cdf49251b365ea34e2651199473240",
-        "version" : "3.50.4"
-      }
-    },
-    {
-      "identity" : "gitkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/GitKit",
-      "state" : {
-        "revision" : "394b38d6da20e6c988efd0016b595d5ee7075c61",
-        "version" : "2.2.0"
-      }
-    },
-    {
-      "identity" : "shellkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/ShellKit",
-      "state" : {
-        "revision" : "f4f904b6998fb7034ab24d373973121a40965c3a",
-        "version" : "0.1.2"
-      }
-    },
-    {
-      "identity" : "sqlitekit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/SQLiteKit",
-      "state" : {
-        "revision" : "f05575530c9e460ce728b6bd077176d18098b108",
-        "version" : "0.1.0"
-      }
-    },
-    {
-      "identity" : "swift-archive",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/marcprux/swift-archive",
-      "state" : {
-        "revision" : "48fddd77a1d8301ce04e0d7c093fcf0867fa1ff8",
-        "version" : "3.8.9"
-      }
-    },
     {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
@@ -62,42 +17,6 @@
       "state" : {
         "revision" : "3b6410f7dee09eb33cdd26260c5fd47fda19b0e2",
         "version" : "1.7.3"
-      }
-    },
-    {
-      "identity" : "swift-async-algorithms",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-async-algorithms.git",
-      "state" : {
-        "revision" : "13713a4ffdee8abd929f92568ee9462a46ae26e0",
-        "version" : "1.1.7"
-      }
-    },
-    {
-      "identity" : "swift-cmark",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-cmark.git",
-      "state" : {
-        "revision" : "08ddb528923cc1a6527e02b7a1aee9e516ca749a",
-        "version" : "0.9.0"
-      }
-    },
-    {
-      "identity" : "swift-collections",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-collections",
-      "state" : {
-        "revision" : "88754449ab766a739610b660e117762115fabc9c",
-        "version" : "1.7.6"
-      }
-    },
-    {
-      "identity" : "swift-configuration",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-configuration",
-      "state" : {
-        "revision" : "0b0c23215764302f7db752b079c024fbaff12e62",
-        "version" : "1.5.0"
       }
     },
     {
@@ -118,93 +37,12 @@
       }
     },
     {
-      "identity" : "swift-http-types",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-http-types",
-      "state" : {
-        "revision" : "bff4b6903cdc99dda49649dd52f46c11cfd3ed50",
-        "version" : "1.8.0"
-      }
-    },
-    {
-      "identity" : "swift-log",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-log",
-      "state" : {
-        "revision" : "c7413d967b97aae67c46452bf7645bdb7b200e8e",
-        "version" : "1.17.2"
-      }
-    },
-    {
-      "identity" : "swift-markdown",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-markdown",
-      "state" : {
-        "revision" : "25cb61d3482054b09ae76ca4f281b1bfe7fe5a43",
-        "version" : "0.9.0"
-      }
-    },
-    {
-      "identity" : "swift-service-lifecycle",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swift-server/swift-service-lifecycle",
-      "state" : {
-        "revision" : "a18ee16b8039866fd919bdb4e8e906882d4ecc75",
-        "version" : "2.13.0"
-      }
-    },
-    {
-      "identity" : "swift-subprocess",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-subprocess",
-      "state" : {
-        "revision" : "11633673a41f509f8945f23c96c7acd4adafd679",
-        "version" : "0.5.0"
-      }
-    },
-    {
-      "identity" : "swift-syntax",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-syntax",
-      "state" : {
-        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
-        "version" : "603.0.2"
-      }
-    },
-    {
       "identity" : "swift-system",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system",
       "state" : {
         "revision" : "869129b7bf4ecc57b97d0193ad29690ca2134750",
         "version" : "1.8.1"
-      }
-    },
-    {
-      "identity" : "swiftbash",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/SwiftBash",
-      "state" : {
-        "revision" : "54d045fa3ff5361a45e196c6a4db7ae57b063ba3",
-        "version" : "0.1.0"
-      }
-    },
-    {
-      "identity" : "swiftports",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/SwiftPorts",
-      "state" : {
-        "revision" : "0748f5e5baa41818563cc55585c8246e89fa5a12",
-        "version" : "0.1.0"
-      }
-    },
-    {
-      "identity" : "swiftscript",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Cocoanetics/SwiftScript",
-      "state" : {
-        "revision" : "ab0a95b504007d6feb52c8ebfaf2dfaaa2aecc9b",
-        "version" : "0.1.0"
       }
     },
     {

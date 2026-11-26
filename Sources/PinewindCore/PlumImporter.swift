@@ -4,13 +4,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import BashInterpreter
 import Foundation
 import SystemPackage
 
-/// Conf evaluation uses a fresh SwiftBash shell and a read-only resource mount.
-/// Built-in lists are native data; local confs use the interpreter. Remote resource views
-/// will be supplied by the HTTP acquisition layer, never by enabling shell networking.
+/// Conf evaluation uses the in-repo package-list interpreter over a read-only
+/// `/conf` view. Built-in lists are native data; remote resources are supplied
+/// by the acquisition layer.
 struct PlumImporter: Sendable {
   let limits: ImportLimits
   var timeout: Duration { limits.timeout }
@@ -49,7 +48,7 @@ struct PlumImporter: Sendable {
 
   func evaluate(
     file: FilePath, resourceRoot: FilePath, variables: [String: String] = [:],
-    fileSystem: (any FileSystem)? = nil
+    reader: (any ConfFileReader)? = nil
   ) async throws
     -> [String]
   {
@@ -63,65 +62,34 @@ struct PlumImporter: Sendable {
       throw InterpreterFailure.forbiddenOperation(path: file.string)
     }
     let context = try DocumentContext(path: file)
-    let name = file.lastComponent?.string ?? ""
-    let shell = BashInterpreter.Shell(
-      environment: Environment(variables: variables, workingDirectory: "/conf"))
-    shell.environment["root_dir"] = "/conf"
-    shell.errexit = true
-    shell.fileSystem =
-      fileSystem
-      ?? MountedFileSystem(
-        mounts: [.init(virtual: "/conf", host: resourceRoot.string, readOnly: true)],
-        backing: RealFileSystem())
-    let budget = ConfSourceBudget(limits: limits)
-    shell.installShellBuiltin(BoundedSource(name: "source", budget: budget))
-    shell.installShellBuiltin(BoundedSource(name: ".", budget: budget))
-    // No external command catalog or network permissions are installed.
-    // source, array assignments, arithmetic and control flow are interpreter built-ins.
-    let script = "source '" + "/conf/" + name.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    return try await withThrowingTaskGroup(of: [String].self) { group in
-      group.addTask {
-        let output = OutputSink(bufferingPolicy: .bufferingNewest(0))
-        let errors = OutputSink(bufferingPolicy: .bufferingNewest(16))
-        shell.stdout = output
-        shell.stderr = errors
-        let status = try await shell.run(script)
-        output.finish()
-        errors.finish()
-        guard status == .success else {
-          let message = await errors.readAllString()
+    guard let name = file.lastComponent?.string else {
+      throw InterpreterFailure.evaluationFailed(detail: "conf path has no file name")
+    }
+    let entry: RelativePath
+    do {
+      entry = try RelativePath(FilePath(name))
+    } catch {
+      throw InterpreterFailure.forbiddenOperation(path: file.string)
+    }
+    let evaluator = ConfEvaluator(
+      reader: reader ?? DirectConfFileReader(root: resourceRoot),
+      limits: limits, variables: variables)
+    do {
+      return try await withThrowingTaskGroup(of: [String].self) { group in
+        group.addTask { try await evaluator.run(entry: entry) }
+        group.addTask {
+          try await Task.sleep(for: timeout)
           throw PinewindError.incident(
-            DocumentError(
-              context: context,
-              failure: InterpreterFailure.evaluationFailed(
-                detail: message.trimmingCharacters(in: .whitespacesAndNewlines))))
+            DocumentError(context: context, failure: InterpreterFailure.timedOut))
         }
-        guard shell.environment.associativeArrays["package_list"] == nil else {
-          throw PinewindError.configuration(
-            DocumentError(
-              context: context,
-              failure: InterpreterFailure.evaluationFailed(
-                detail: "package_list must be an indexed array")))
+        defer { group.cancelAll() }
+        guard let first = try await group.next() else {
+          throw CancellationError()
         }
-        if shell.environment.variables["package_list"] != nil {
-          throw PinewindError.configuration(
-            DocumentError(
-              context: context,
-              failure: InterpreterFailure.evaluationFailed(
-                detail: "package_list must be an indexed array")))
-        }
-        return shell.environment.arrays["package_list"]?.elementsInOrder ?? []
+        return first
       }
-      group.addTask {
-        try await Task.sleep(for: timeout)
-        throw PinewindError.incident(
-          DocumentError(context: context, failure: InterpreterFailure.timedOut))
-      }
-      defer { group.cancelAll() }
-      guard let first = try await group.next() else {
-        throw CancellationError()
-      }
-      return first
+    } catch let failure as InterpreterFailure {
+      throw PinewindError.incident(DocumentError(context: context, failure: failure))
     }
   }
 
@@ -159,41 +127,5 @@ struct PlumImporter: Sendable {
     return try PackageRequest(
       url: url, revision: source.count == 2 ? .reference(source[1]) : nil,
       recipe: sections.count > 1 && !sections[1].isEmpty ? sections[1] : nil, options: options)
-  }
-}
-
-/// Shared across interpreter subshell copies; a bounded include count also stops
-/// cyclic source chains without changing the semantics of repeated includes.
-private actor ConfSourceBudget {
-  let limits: ImportLimits
-  init(limits: ImportLimits) { self.limits = limits }
-  private var calls = 0
-  private var bytes = 0
-
-  func charge(_ size: Int) throws(InterpreterFailure) {
-    calls += 1
-    bytes += size
-    guard calls <= limits.maximumSources else {
-      throw InterpreterFailure.budgetExceeded(.sources)
-    }
-    guard size <= limits.maximumFileBytes else {
-      throw InterpreterFailure.budgetExceeded(.fileBytes)
-    }
-    guard bytes <= limits.maximumTotalBytes else {
-      throw InterpreterFailure.budgetExceeded(.totalBytes)
-    }
-  }
-}
-
-private struct BoundedSource: Command {
-  let name: String
-  let budget: ConfSourceBudget
-
-  func run(_ argv: [String]) async throws -> ExitStatus {
-    try Task.checkCancellation()
-    guard let path = argv.dropFirst().first else { return ExitStatus(2) }
-    let data = try await BashInterpreter.Shell.bashCurrent.readDataAtPath(path)
-    try await budget.charge(data.count)
-    return try await SourceCommand(name: name).run(argv)
   }
 }

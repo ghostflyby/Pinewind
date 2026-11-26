@@ -2012,7 +2012,7 @@ struct WorkspaceTests {
     await #expect {
       _ = try await workspace.resolve(refreshing: .imports(Set(initial.imports.map(\.id))))
     } throws: { error in
-      return String(describing: error).contains("permission denied: /outside.conf")
+      return String(describing: error).contains("forbidden operation: /conf/../outside.conf")
     }
     #expect(try Data(contentsOf: url(f.lock)) == baseline)
     await f.downloads.set(remote, String(repeating: "#padding\n", count: 40))
@@ -2087,19 +2087,22 @@ struct WorkspaceTests {
     #expect(try await workspace.compose(to: f.output).paths.map(\.string) == ["schema.yaml"])
   }
 
-  @Test func remoteConfFileProbesPrepareResourcesWithoutDirectoryGuessing() async throws {
+  @Test func remoteConfIncludesPrepareOnlySourcedResources() async throws {
     let f = try Fixture()
     defer { f.remove() }
     let root = URL(string: "https://conf.test/main.conf")!
     let include = URL(string: "https://conf.test/include.conf")!
-    await f.downloads.set(root, try fixtureText("RemoteConf/Probes/main.conf"))
-    await f.downloads.set(include, try fixtureText("RemoteConf/Probes/include.conf"))
+    let unused = URL(string: "https://conf.test/unused.conf")!
+    await f.downloads.set(root, try fixtureText("RemoteConf/Includes/main.conf"))
+    await f.downloads.set(include, try fixtureText("RemoteConf/Includes/include.conf"))
+    await f.downloads.set(unused, "package_list+=(rime/unused)\n")
     try await f.repositories.install(firstID, files: ["default.yaml": "probe"])
     try write(f.manifest, "version: 1\norder: [{import: \(root.absoluteString)}]\n")
     let workspace = try await f.workspace()
     let resolution = try await workspace.resolve()
     #expect(resolution.imports[0].packages.count == 1)
     #expect(resolution.imports[0].resources.count == 2)
+    #expect(await f.downloads.requestedLimits(unused).isEmpty)
   }
 
   @Suite("Published output", .serialized)

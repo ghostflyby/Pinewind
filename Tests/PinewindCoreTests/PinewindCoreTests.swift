@@ -4,7 +4,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import BashInterpreter
 import Foundation
 import SystemPackage
 import Testing
@@ -814,13 +813,21 @@ struct ConfTests {
     #expect(throws: InterpreterFailure.self) { try PlumImporter.package(descriptor) }
   }
 
-  @Test(.timeLimit(.minutes(1))) func longLoopsTimeOutAndCancelInterpreter() async throws {
+  private struct SlowConfReader: ConfFileReader {
+    func read(_ path: RelativePath) async throws -> Data {
+      try await Task.sleep(for: .seconds(10))
+      return Data()
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1))) func slowConfReadsTimeOutAndCancelInterpreter() async throws {
     let f = try Fixture()
     defer { f.remove() }
-    try f.write("loop.conf", "while :; do :; done", in: f.input)
+    try f.write("slow.conf", "package_list=()", in: f.input)
     do {
       _ = try await PlumImporter(timeout: .milliseconds(50)).evaluate(
-        ConfImport(source: "loop.conf"), inputRoot: f.input)
+        file: native(f.input.appendingPathComponent("slow.conf")),
+        resourceRoot: native(f.input), variables: [:], reader: SlowConfReader())
       Issue.record("expected timeout")
     } catch let error as PinewindError {
       guard case .incident(let document) = error else {
@@ -893,7 +900,7 @@ struct ConfTests {
     #expect(request.options == ["schema": "terra_pinyin"])
   }
 
-  @Test func confCannotWriteHostFilesOrEscapeMount() async throws {
+  @Test func confRejectsCommandsAndEscapesMount() async throws {
     let f = try Fixture()
     defer { f.remove() }
     try f.write("write.conf", "echo stolen > /conf/stolen", in: f.input)
@@ -902,25 +909,19 @@ struct ConfTests {
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
       guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
-      else {
-        return false
-      }
-      return detail.contains("/conf/stolen: Permission denied")
+      else { return false }
+      return detail.contains("only package_list assignments and source are supported")
     }
     #expect(!FileManager.default.fileExists(atPath: f.input.appendingPathComponent("stolen").path))
     try f.write("escape.conf", "source /etc/passwd", in: f.input)
-    await #expect(throws: FileSystemError.notFound("/etc/passwd")) {
-      try await importer.evaluate(ConfImport(source: "escape.conf"), inputRoot: f.input)
-    }
-  }
-
-  @Test func cyclicIncludesFailWithinResourceBudget() async throws {
-    let f = try Fixture()
-    defer { f.remove() }
-    try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
     await #expect {
-      try await importer.evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
-    } throws: { $0 is InterpreterFailure }
+      try await importer.evaluate(ConfImport(source: "escape.conf"), inputRoot: f.input)
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .forbiddenOperation(let path) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return path == "/etc/passwd"
+    }
   }
 }
 

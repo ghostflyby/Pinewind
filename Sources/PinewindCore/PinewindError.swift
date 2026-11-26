@@ -317,7 +317,6 @@ public enum InterpreterFailure: PinewindErrorProtocol, Codable, Hashable {
   case timedOut
   case budgetExceeded(Budget)
   case forbiddenOperation(path: String)
-  case enumerationUnsupported
   case unknownBuiltIn(String)
 
   public var description: String {
@@ -327,7 +326,6 @@ public enum InterpreterFailure: PinewindErrorProtocol, Codable, Hashable {
     case .budgetExceeded(let budget):
       return "conf include resource limit exceeded: \(budget.description)"
     case .forbiddenOperation(let path): return "forbidden operation: \(path)"
-    case .enumerationUnsupported: return "remote conf directory enumeration is unsupported"
     case .unknownBuiltIn(let name): return "unknown built-in conf '\(name)'"
     }
   }
