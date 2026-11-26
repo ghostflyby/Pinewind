@@ -923,20 +923,6 @@ struct ConfTests {
       return path == "/etc/passwd"
     }
   }
-
-  @Test func cyclicIncludesFailWithinResourceBudget() async throws {
-    let f = try Fixture()
-    defer { f.remove() }
-    try f.write("cycle.conf", "source /conf/cycle.conf", in: f.input)
-    await #expect {
-      try await importer.evaluate(ConfImport(source: "cycle.conf"), inputRoot: f.input)
-    } throws: { error in
-      guard case .incident(let document) = error as? PinewindError else { return false }
-      guard case .budgetExceeded(.sources) = document.underlyingError as? InterpreterFailure
-      else { return false }
-      return true
-    }
-  }
 }
 
 @Suite("Pinewind opaque lock")

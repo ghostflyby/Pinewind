@@ -161,6 +161,18 @@ struct ConfSubsetTests {
     }
   }
 
+  @Test func cyclicIncludesFailWithinResourceBudget() async throws {
+    let limits = ImportLimits(timeout: .seconds(60), maximumSources: 8)
+    await #expect {
+      try await evaluateConf(["list.conf": "source /conf/list.conf\n"], limits: limits)
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .budgetExceeded(.sources) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return true
+    }
+  }
+
   @Test func entryReadFailuresAreAttributed() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
