@@ -8,6 +8,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-latest
@@ -51,26 +55,27 @@ jobs:
       - name: Create or reuse a draft release
         run: |
           set -euo pipefail
-          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$RELEASE_TAG\") | .id][0] // empty")
-          if [ -n "$release_id" ]; then
-            is_draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)
+          if release=$(gh release view "$RELEASE_TAG" --json isDraft 2>/dev/null); then
+            is_draft=$(jq -r '.isDraft' <<<"$release")
             if [ "$is_draft" != "true" ]; then
               echo "::error::release $RELEASE_TAG is already published; immutable releases cannot be modified"
               exit 1
             fi
+            # A re-run may target a re-pushed tag, so regenerate notes for its current commit.
+            notes=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$RELEASE_TAG" --jq .body)
+            printf '%s\n' "$notes" | gh release edit "$RELEASE_TAG" --notes-file -
           else
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG" --draft
-            release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$RELEASE_TAG\") | .id][0]")
-            if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-              echo "::error::draft release for $RELEASE_TAG was not found"
-              exit 1
-            fi
           fi
-          echo "release_id=$release_id" >> "$GITHUB_ENV"
 
       - name: Upload assets to the draft
         run: |
           set -euo pipefail
+          is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::release $RELEASE_TAG is no longer a draft; refusing to modify a published release"
+            exit 1
+          fi
           gh release upload "$RELEASE_TAG" \
             dist/pinewind-macos-arm64.tar.gz \
             dist/pinewind-linux-x86_64.tar.gz \
@@ -80,8 +85,9 @@ jobs:
       - name: Verify assets before publishing
         run: |
           set -euo pipefail
+          assets=$(gh release view "$RELEASE_TAG" --json assets)
           for expected in pinewind-macos-arm64.tar.gz pinewind-linux-x86_64.tar.gz pinewind-windows-x64.zip; do
-            present=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq "([.assets[].name] | index(\"$expected\")) != null")
+            present=$(jq --arg name "$expected" 'any(.assets[].name; . == $name)' <<<"$assets")
             if [ "$present" != "true" ]; then
               echo "::error::missing release asset $expected"
               exit 1
@@ -91,8 +97,13 @@ jobs:
       - name: Publish the immutable release
         run: |
           set -euo pipefail
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false
-          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)
+          is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::release $RELEASE_TAG is no longer a draft; refusing to publish over a published release"
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false
+          published=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
           if [ "$published" != "false" ]; then
             echo "::error::release $RELEASE_TAG was not published"
             exit 1

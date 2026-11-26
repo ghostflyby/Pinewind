@@ -54,7 +54,7 @@ readelf -d .build/x86_64-swift-linux-musl/release/pinewind   # 不应有 NEEDED
 
 **Windows**:Swift 工具链不支持全静态可执行文件(`-static-executable` 未实现,静态链接模型仍需要支持 DLL),因此产物用 stock `x64-windows` triplet 动态链接 libgit2 及其依赖,并把可执行文件传递导入的所有非系统 DLL 一起打包。
 
-CI 的 `macos-static-binary`、`linux-static-binary`、`windows-binary` 任务分别构建上述产物并上传压缩包。发布 tag 时,Release workflow 要求该 tag 指向的 commit 在 `main` 上有成功的 CI run,下载这三个已验证产物,先创建 draft、上传全部资产并校验,最后才发布;已发布的 release 不再修改,以兼容 immutable release。`v*.*.*` tag 应在对应 commit 的 `main` CI 通过后再推送。
+CI 的 `macos-static-binary`、`linux-static-binary`、`windows-binary` 任务分别构建上述产物并上传压缩包。发布 tag 时,Release workflow 要求该 tag 指向的 commit 在 `main` 上有成功的 CI run,下载这三个已验证产物,先创建或复用 draft(复用时按 tag 当前目标重新生成发布说明)、上传全部资产并校验,最后才发布;已发布的 release 不再修改,以兼容 immutable release。`v*.*.*` tag 应在对应 commit 的 `main` CI 通过后再推送。
 
 ## 本地检查
 
