@@ -6,10 +6,14 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
     runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -17,17 +21,79 @@ jobs:
 
       - name: Verify tag is on main
         run: |
+          set -euo pipefail
           git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          commit=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$commit" origin/main
+          echo "commit=$commit" >> "$GITHUB_ENV"
 
-      - name: Build
-        run: swift build
+      - name: Locate the successful CI run for the tagged commit
+        run: |
+          set -euo pipefail
+          run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$commit&event=push&branch=main&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')
+          if [ -z "$run_id" ]; then
+            echo "::error::no successful CI run for $commit on main; wait for CI before tagging"
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_ENV"
 
-      - name: Test
-        run: swift test --parallel
+      - name: Download the verified artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for artifact in pinewind-macos-static pinewind-linux-static pinewind-windows; do
+            gh run download "$run_id" --name "$artifact" --dir dist
+          done
+          for asset in pinewind-macos-arm64.tar.gz pinewind-linux-x86_64.tar.gz pinewind-windows-x64.zip; do
+            test -f "dist/$asset" || { echo "::error::missing $asset"; exit 1; }
+          done
 
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+      - name: Create or reuse a draft release
+        run: |
+          set -euo pipefail
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$RELEASE_TAG\") | .id][0] // empty")
+          if [ -n "$release_id" ]; then
+            is_draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release $RELEASE_TAG is already published; immutable releases cannot be modified"
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG" --draft
+            release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$RELEASE_TAG\") | .id][0]")
+            if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+              echo "::error::draft release for $RELEASE_TAG was not found"
+              exit 1
+            fi
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_ENV"
+
+      - name: Upload assets to the draft
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            dist/pinewind-macos-arm64.tar.gz \
+            dist/pinewind-linux-x86_64.tar.gz \
+            dist/pinewind-windows-x64.zip \
+            --clobber
+
+      - name: Verify assets before publishing
+        run: |
+          set -euo pipefail
+          for expected in pinewind-macos-arm64.tar.gz pinewind-linux-x86_64.tar.gz pinewind-windows-x64.zip; do
+            present=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq "([.assets[].name] | index(\"$expected\")) != null")
+            if [ "$present" != "true" ]; then
+              echo "::error::missing release asset $expected"
+              exit 1
+            fi
+          done
+
+      - name: Publish the immutable release
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" -F draft=false
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq .draft)
+          if [ "$published" != "false" ]; then
+            echo "::error::release $RELEASE_TAG was not published"
+            exit 1
+          fi
