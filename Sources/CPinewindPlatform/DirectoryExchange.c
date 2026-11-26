@@ -12,11 +12,23 @@
 #include <fcntl.h>
 #include <stdio.h>
 
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+
+// The Static Linux SDK's musl predates the renameat2 wrapper; the raw
+// syscall has existed since Linux 3.15.
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif
+#endif
+
 int pinewind_exchange_directories(const char *candidate, const char *output) {
 #if defined(__APPLE__)
   int result = renameatx_np(AT_FDCWD, candidate, AT_FDCWD, output, RENAME_SWAP);
 #elif defined(__linux__)
-  int result = renameat2(AT_FDCWD, candidate, AT_FDCWD, output, RENAME_EXCHANGE);
+  int result = (int)syscall(
+      SYS_renameat2, AT_FDCWD, candidate, AT_FDCWD, output, RENAME_EXCHANGE);
 #else
   return ENOTSUP;
 #endif
