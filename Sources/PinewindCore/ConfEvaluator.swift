@@ -39,7 +39,11 @@ struct ConfEvaluator: Sendable {
     let data: Data
     do {
       data = try await reader.read(path)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let failure as FileSystemFailure {
+      throw InterpreterFailure.evaluationFailed(detail: "\(virtualPath): \(failure)")
+    } catch let failure as any FileOperationErrorProtocol {
       throw InterpreterFailure.evaluationFailed(detail: "\(virtualPath): \(failure)")
     }
     // Charge only after a successful read, matching the old source builtin.

@@ -70,6 +70,8 @@ private func readConfFile(_ file: FilePath) async throws -> Data {
   try await BlockingIO.run {
     do {
       return try Data(contentsOf: file.foundationURL)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let failure as FileSystemFailure {
       throw failure
     } catch {

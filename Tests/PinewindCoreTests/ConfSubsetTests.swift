@@ -33,13 +33,29 @@ private struct FailingConfReader: ConfFileReader {
   }
 }
 
+private struct CancellingConfReader: ConfFileReader {
+  func read(_ path: RelativePath) async throws -> Data { throw CancellationError() }
+}
+
+private struct OpenFailureConfReader: ConfFileReader {
+  func read(_ path: RelativePath) async throws -> Data {
+    throw FileOperationFailure(
+      operation: .open, paths: [FilePath(path.string)], error: CocoaError(.fileNoSuchFile))
+  }
+}
+
+private func temporaryConfRoot() throws -> URL {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  return root
+}
+
 private func evaluateConf(
   _ files: [String: String], variables: [String: String] = [:],
   limits: ImportLimits = ImportLimits()
 ) async throws -> [String] {
-  let root = FileManager.default.temporaryDirectory
-    .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
-  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  let root = try temporaryConfRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   return try await PlumImporter(limits: limits).evaluate(
     file: native(root.appendingPathComponent("list.conf")),
@@ -174,14 +190,37 @@ struct ConfSubsetTests {
   }
 
   @Test func entryReadFailuresAreAttributed() async throws {
-    let root = FileManager.default.temporaryDirectory
-      .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let root = try temporaryConfRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     await #expect {
       try await PlumImporter().evaluate(
         file: native(root.appendingPathComponent("list.conf")),
         resourceRoot: native(root), variables: [:], reader: FailingConfReader())
+    } throws: { error in
+      guard case .incident(let document) = error as? PinewindError else { return false }
+      guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
+      else { return false }
+      return detail.contains("/conf/list.conf")
+    }
+  }
+
+  @Test func cancellationIsNotConvertedToAConfFailure() async throws {
+    let root = try temporaryConfRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    await #expect(throws: CancellationError.self) {
+      try await PlumImporter().evaluate(
+        file: native(root.appendingPathComponent("list.conf")),
+        resourceRoot: native(root), variables: [:], reader: CancellingConfReader())
+    }
+  }
+
+  @Test func fileOperationFailuresAreAttributed() async throws {
+    let root = try temporaryConfRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    await #expect {
+      try await PlumImporter().evaluate(
+        file: native(root.appendingPathComponent("list.conf")),
+        resourceRoot: native(root), variables: [:], reader: OpenFailureConfReader())
     } throws: { error in
       guard case .incident(let document) = error as? PinewindError else { return false }
       guard case .evaluationFailed(let detail) = document.underlyingError as? InterpreterFailure
@@ -279,9 +318,7 @@ struct ConfSubsetTests {
   }
 
   @Test func invalidUTF8IsRejected() async throws {
-    let root = FileManager.default.temporaryDirectory
-      .appendingPathComponent("pinewind-conf-" + UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let root = try temporaryConfRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     await #expect {
       try await PlumImporter().evaluate(
